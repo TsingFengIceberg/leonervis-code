@@ -1,0 +1,12 @@
+[submodule "learning-submodules/claw-code"]
+	path = learning-submodules/claw-code
+	url = https://github.com/ultraworkers/claw-code.git
+[submodule "learning-submodules/learn-claude-code"]
+	path = learning-submodules/learn-claude-code
+	url = https://github.com/shareAI-lab/learn-claude-code.git
+[submodule "learning-submodules/claude-code-complete-guide_v2"]
+	path = learning-submodules/claude-code-complete-guide_v2
+	url = https://github.com/bcefghj/claude-code-complete-guide_v2.git
+[submodule "learning-submodules/miniClaudeCode"]
+	path = learning-submodules/miniClaudeCode
+	url = https://github.com/bcefghj/miniClaudeCode.git
