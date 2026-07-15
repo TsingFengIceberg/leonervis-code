@@ -1,13 +1,18 @@
-"""Command-line interface for the Foundation 0 learning slice."""
+"""Command-line interface for the deterministic Foundation 0 slices."""
 
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
+from pathlib import Path
+from typing import TextIO
 
 from leonervis_code import __version__
 from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.providers.fake import DeterministicFakeProvider
+from leonervis_code.cli.brand import color_enabled
+from leonervis_code.cli.repl import run_repl
+from leonervis_code.providers.fake import ScriptedFakeProvider
 
 
 def nonblank_prompt(value: str) -> str:
@@ -24,17 +29,41 @@ def build_parser() -> argparse.ArgumentParser:
         description="Leonervis Code: a learning-first local coding-agent CLI prototype.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    subcommands = parser.add_subparsers(dest="command", required=True)
+    subcommands = parser.add_subparsers(dest="command")
     prompt_parser = subcommands.add_parser("prompt", help="run one deterministic prompt turn")
     prompt_parser.add_argument("prompt", type=nonblank_prompt, help="the prompt to send")
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run one deterministic prompt turn through the Foundation 0 loop."""
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+    cwd: Path | None = None,
+) -> int:
+    """Run a one-shot prompt command or launch the interactive terminal surface."""
     arguments = build_parser().parse_args(argv)
+    loop = AgentLoop(ScriptedFakeProvider())
     if arguments.command == "prompt":
-        response = AgentLoop(DeterministicFakeProvider()).run(arguments.prompt)
-        print(response)
+        print(loop.run(arguments.prompt))
         return 0
-    raise AssertionError(f"unhandled command: {arguments.command}")
+
+    input_stream = stdin or sys.stdin
+    output_stream = stdout or sys.stdout
+    error_stream = stderr or sys.stderr
+    if not input_stream.isatty() or not output_stream.isatty():
+        print(
+            'interactive mode requires a terminal; use leonervis-code prompt "..." instead',
+            file=error_stream,
+        )
+        return 2
+    return run_repl(
+        loop,
+        stdin=input_stream,
+        stdout=output_stream,
+        version=__version__,
+        cwd=cwd or Path.cwd(),
+        color=color_enabled(output_stream),
+    )

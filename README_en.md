@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. It will incrementally build an understandable and verifiable Harness: a model makes decisions, the host executes controlled tools within explicit workspace and permission boundaries, and structured results return to the model.
 
-> **Current status: Foundation 0 is complete.** The project now runs one deterministic local `prompt` command. It proves the first CLI → AgentLoop → provider control flow with a fake provider; it is not yet a runtime that can perform real agent tasks.
+> **Current status: Foundation 1A in-memory text history is complete.** Invoking the command with no subcommand opens a local interactive terminal. Later inputs in the same REPL process see prior completed user/assistant text pairs; this is not yet a runtime that can perform real agent tasks.
 
 ## Project positioning
 
@@ -46,7 +46,36 @@ cd leonervis-code
 # 2. Create .venv, install dependencies, and synchronize from uv.lock
 uv sync
 
-# 3. Run the Foundation 0 deterministic prompt
+# 3. Launch the local interactive terminal (requires a real terminal)
+uv run leonervis-code
+```
+
+The command shows a colored LEO mark, version, current directory, and Foundation 1A status before displaying:
+
+```text
+leonervis>
+```
+
+Enter any nonblank text for a deterministic result:
+
+```text
+leonervis> Explain the Harness boundary
+Fake response: Explain the Harness boundary
+```
+
+The REPL currently supports only local controls:
+
+```text
+/help              show controls
+/history <count>   show the most recent complete conversation turns
+/exit or /quit     exit normally
+Ctrl-D / EOF       exit normally
+Ctrl-C             exit normally
+```
+
+For one prompt in scripts or automation, use the explicit subcommand:
+
+```bash
 uv run leonervis-code prompt "Explain the Harness boundary"
 # Fake response: Explain the Harness boundary
 ```
@@ -65,19 +94,21 @@ uv run leonervis-code --help
 uv run leonervis --version
 ```
 
-## Foundation 0: single deterministic loop
+## Foundation 1A: deterministic prompt, REPL, and in-memory history
 
-The current command completes only this minimal, testable path:
+The current REPL and `prompt` command complete only this minimal, testable path:
 
 ```text
-prompt command → AgentLoop → DeterministicFakeProvider → text output
+terminal input → AgentLoop (ordered in-memory history) → ScriptedFakeProvider → text output
 ```
 
-Every `prompt` invocation performs exactly one provider call and displays its returned text unchanged. The default fake provider is stable and reproducible, making it suitable for first verifying Harness control flow and error propagation boundaries.
+Every nonblank input performs exactly one provider call and displays its returned text unchanged. Within one running REPL process, the loop retains ordered text history: the second provider call receives the first successful user/assistant pair plus the new user input. The `prompt` command remains one-shot and begins with empty history on every invocation; each newly launched REPL also begins empty.
 
-This slice makes **no** model API call, credential or environment-variable read, network request, filesystem/tool action, session write, or workspace access. It has no REPL, approval, or persistence. Real providers, tool loops, and other runtime capabilities will arrive only in separately designed, implemented, and tested slices.
+This history exists only in the current process. The REPL can display complete turns through `/history <count>`, but it is not written to disk and is not a session, transcript, resume mechanism, or long-term memory.
 
-The learning design record is available in [the Foundation 0 decision](./docs/decisions/0001-foundation-0-single-turn-loop.md).
+This slice makes **no** model API call, credential or environment-variable read, network request, filesystem/tool action, session write, or workspace access. It has no real model, approval, or persistence. A bare `leonervis-code` invocation in a noninteractive terminal explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
+
+The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md) and [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md).
 
 ## Development and verification
 
@@ -115,11 +146,12 @@ The repository now includes:
 
 - a reproducible Python 3.12–3.13 and uv environment with `uv.lock`;
 - installable `leonervis-code` / `leonervis` entry points plus `python -m leonervis_code`;
-- the `PromptProvider` contract, deterministic fake provider, and one-turn `AgentLoop`;
-- an end-to-end Foundation 0 path through the `prompt` command; and
+- the `TextMessage` / `ConversationProvider` contract, deterministic scripted fake provider, and an `AgentLoop` with in-memory history;
+- a local REPL with a colored startup mark, minimal controls, Tab completion, and ordered process-local text history;
+- an automation-friendly end-to-end path through the `prompt` command; and
 - a minimal `pytest` and `ruff` quality toolchain.
 
-The next slice can introduce explicit assistant-content contracts and a bounded multi-turn/tool loop while retaining the provider boundary established here. Real model integration, file tools, write approvals, sessions, and controlled Bash each still need their own learning slice.
+The next slice can introduce richer assistant-content contracts and a bounded tool loop while retaining the text causal chain established here. Real model integration, file tools, write approvals, sessions, and controlled Bash each still need their own learning slice.
 
 MCP, plugins, remote/server forms, multi-agent coordination, RAG, and background work are not permanently ruled out. They will be introduced only after a concrete need, boundary design, and test plan exist.
 
@@ -127,10 +159,10 @@ MCP, plugins, remote/server forms, multi-agent coordination, RAG, and background
 
 ```text
 src/leonervis_code/
-  core/                 # neutral contracts; currently PromptProvider only
-  agent/                # bounded, one-turn AgentLoop
-  providers/            # deterministic fake provider only for now
-  cli/                  # command parsing, composition, and terminal output
+  core/                 # neutral text contracts: TextMessage and ConversationProvider
+  agent/                # AgentLoop with ordered in-memory text history
+  providers/            # deterministic scripted fake provider only for now
+  cli/                  # command parsing, brand rendering, REPL, and terminal output
 tests/                  # unit, integration, security, and end-to-end tests will grow here
 docs/                   # architecture decisions, learning notes, and security design
 scripts/                # reproducible local/CI maintenance commands, added when needed

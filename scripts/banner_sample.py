@@ -6,31 +6,11 @@ from __future__ import annotations
 import argparse
 import os
 
+from leonervis_code.cli.brand import BODY, E_GLYPH, HEAD, L_GLYPH, O_GLYPH, TAIL, paint
+
 RESET = "\x1b[0m"
 BOLD_WHITE = "\x1b[1;97m"
 DIM = "\x1b[2m"
-
-# The three equal 5×5 modules agreed for the temporary LEO mark.
-L_GLYPH = ("█    ", "█    ", "█    ", "█    ", "█████")
-E_GLYPH = ("█████", "█    ", "█████", "█    ", "█████")
-O_GLYPH = (" ███ ", "█   █", "█   █", "█   █", " ███ ")
-
-# Tail → body → head: dark amber → gold → light gold.
-TAIL = (166, 90, 24)
-BODY = (230, 154, 43)
-HEAD = (255, 224, 154)
-
-
-def rgb(red: int, green: int, blue: int) -> str:
-    """Return an ANSI truecolor foreground escape sequence."""
-    return f"\x1b[38;2;{red};{green};{blue}m"
-
-
-def paint(text: str, color: tuple[int, int, int], *, enabled: bool) -> str:
-    """Apply a foreground color only when color output is enabled."""
-    if not enabled:
-        return text
-    return f"{rgb(*color)}{text}{RESET}"
 
 
 def build_mark(*, color: bool) -> list[str]:

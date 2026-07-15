@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Literal, Protocol
 
 
-class PromptProvider(Protocol):
-    """Produce one text response for one prompt."""
+@dataclass(frozen=True)
+class TextMessage:
+    """One ordered text message in an in-memory conversation."""
 
-    def respond(self, prompt: str) -> str:
-        """Return the provider response for ``prompt``."""
+    role: Literal["user", "assistant"]
+    text: str
+
+
+class ConversationProvider(Protocol):
+    """Produce one assistant response from ordered text history."""
+
+    def respond(self, history: tuple[TextMessage, ...]) -> str:
+        """Return one assistant text response for ``history``."""

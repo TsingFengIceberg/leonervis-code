@@ -7,7 +7,7 @@ from pathlib import Path
 import struct
 import zlib
 
-from banner_sample import BODY, E_GLYPH, HEAD, L_GLYPH, O_GLYPH, TAIL
+from leonervis_code.cli.brand import BODY, E_GLYPH, HEAD, L_GLYPH, O_GLYPH, TAIL
 
 OUTPUT_PATH = Path(__file__).parents[1] / "docs" / "assets" / "leo-mark.png"
 CELL_SIZE = 28
