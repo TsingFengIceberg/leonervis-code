@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. It will incrementally build an understandable and verifiable Harness: a model makes decisions, the host executes controlled tools within explicit workspace and permission boundaries, and structured results return to the model.
 
-> **Current status: environment bootstrap is complete; the Harness runtime is not implemented yet.** The project can now be installed, its commands inspected, and its basic quality checks run. It cannot yet perform real agent tasks.
+> **Current status: Foundation 0 is complete.** The project now runs one deterministic local `prompt` command. It proves the first CLI → AgentLoop → provider control flow with a fake provider; it is not yet a runtime that can perform real agent tasks.
 
 ## Project positioning
 
@@ -46,18 +46,38 @@ cd leonervis-code
 # 2. Create .venv, install dependencies, and synchronize from uv.lock
 uv sync
 
-# 3. Inspect the available bootstrap CLI
-uv run leonervis-code --help
-uv run leonervis --version
+# 3. Run the Foundation 0 deterministic prompt
+uv run leonervis-code prompt "Explain the Harness boundary"
+# Fake response: Explain the Harness boundary
 ```
 
 The two command names point to the same entry point: `leonervis-code` is the formal command and `leonervis` is its shorthand. A module entry point is also available:
 
 ```bash
-uv run python -m leonervis_code --help
+uv run leonervis prompt "Hello"
+uv run python -m leonervis_code prompt "Hello"
 ```
 
-At this stage, invoking the command without `--help` or `--version` explicitly reports that the Harness runtime is not implemented and exits nonzero. It is intentionally not a misleading placeholder for a working agent.
+`--help` and `--version` remain available:
+
+```bash
+uv run leonervis-code --help
+uv run leonervis --version
+```
+
+## Foundation 0: single deterministic loop
+
+The current command completes only this minimal, testable path:
+
+```text
+prompt command → AgentLoop → DeterministicFakeProvider → text output
+```
+
+Every `prompt` invocation performs exactly one provider call and displays its returned text unchanged. The default fake provider is stable and reproducible, making it suitable for first verifying Harness control flow and error propagation boundaries.
+
+This slice makes **no** model API call, credential or environment-variable read, network request, filesystem/tool action, session write, or workspace access. It has no REPL, approval, or persistence. Real providers, tool loops, and other runtime capabilities will arrive only in separately designed, implemented, and tested slices.
+
+The learning design record is available in [the Foundation 0 decision](./docs/decisions/0001-foundation-0-single-turn-loop.md).
 
 ## Development and verification
 
@@ -95,21 +115,26 @@ The repository now includes:
 
 - a reproducible Python 3.12–3.13 and uv environment with `uv.lock`;
 - installable `leonervis-code` / `leonervis` entry points plus `python -m leonervis_code`;
-- a minimal `pytest` and `ruff` quality toolchain; and
-- a bootstrap CLI that explicitly reports the runtime is not implemented yet.
+- the `PromptProvider` contract, deterministic fake provider, and one-turn `AgentLoop`;
+- an end-to-end Foundation 0 path through the `prompt` command; and
+- a minimal `pytest` and `ruff` quality toolchain.
 
-The first implementation slice will next establish a minimal, testable Harness foundation: core contracts, deterministic test doubles, a bounded agent loop, and a minimal CLI. Model integration, file tools, write approvals, sessions, and controlled Bash will each arrive only in their own learning slice.
+The next slice can introduce explicit assistant-content contracts and a bounded multi-turn/tool loop while retaining the provider boundary established here. Real model integration, file tools, write approvals, sessions, and controlled Bash each still need their own learning slice.
 
 MCP, plugins, remote/server forms, multi-agent coordination, RAG, and background work are not permanently ruled out. They will be introduced only after a concrete need, boundary design, and test plan exist.
 
 ## Repository layout
 
 ```text
-src/leonervis_code/    # the only production Python package; bootstrap CLI only for now
-tests/                 # unit, integration, security, and end-to-end tests will grow here
-docs/                  # architecture decisions, learning notes, and security design
-scripts/               # reproducible local/CI maintenance commands, added when needed
-learning-submodules/   # read-only learning references
+src/leonervis_code/
+  core/                 # neutral contracts; currently PromptProvider only
+  agent/                # bounded, one-turn AgentLoop
+  providers/            # deterministic fake provider only for now
+  cli/                  # command parsing, composition, and terminal output
+tests/                  # unit, integration, security, and end-to-end tests will grow here
+docs/                   # architecture decisions, learning notes, and security design
+scripts/                # reproducible local/CI maintenance commands, added when needed
+learning-submodules/    # read-only learning references
 ```
 
 Repositories under `learning-submodules/` are read-only study materials. They are not runtime dependencies, and product code must never import them. When their design informs an implementation, Leonervis Code will document both the inspiration and its own deliberate differences.
