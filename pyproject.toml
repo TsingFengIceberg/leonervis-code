@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "leonervis-code"
+version = "0.1.0"
+description = "A learning-first, local coding-agent CLI Harness prototype."
+readme = "README_en.md"
+requires-python = ">=3.12,<3.14"
+authors = [{ name = "Leonervis Code contributors" }]
+keywords = ["agent", "cli", "coding-agent", "harness", "llm"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
+
+[project.scripts]
+leonervis-code = "leonervis_code.cli.main:main"
+leonervis = "leonervis_code.cli.main:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.9.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/leonervis_code"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = ["learning-submodules"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

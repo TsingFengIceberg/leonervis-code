@@ -1,2 +1,28 @@
-# Local project instructions
+# Local Claude Code state and project instructions
+.claude/
 CLAUDE.md
+
+# Local configuration
+.env
+.env.*
+
+# Python environments, caches, and build artifacts
+.venv/
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pytype/
+
+# Editor and operating-system noise
+.DS_Store
+.vscode/
+.idea/
