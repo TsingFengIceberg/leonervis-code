@@ -2,9 +2,10 @@
 .claude/
 CLAUDE.md
 
-# Local configuration
+# Local configuration and Leonervis runtime state
 .env
 .env.*
+/.leonervis-code/
 
 # Python environments, caches, and build artifacts
 .venv/

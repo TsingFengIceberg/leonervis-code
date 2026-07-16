@@ -216,6 +216,20 @@ def test_parser_classifies_refusal_and_rejects_truncated_text() -> None:
     assert output_limit.value.failure.kind == ProviderFailureKind.RESPONSE_INVALID
 
 
+def test_adapter_sends_explicit_temperature_when_configured() -> None:
+    client = RecordingMessagesClient([message(TextBlock(text="Hello", type="text"))])
+    configured = AnthropicProviderConfig(
+        model_id="claude-opus-4-8",
+        max_output_tokens=64,
+        temperature=0.2,
+    )
+    provider = AnthropicConversationProvider(configured, client)
+
+    provider.respond((UserMessage(text="Hello"),))
+
+    assert client.requests[0]["temperature"] == 0.2
+
+
 def test_adapter_sends_only_explicit_native_request_fields() -> None:
     client = RecordingMessagesClient([message(TextBlock(text="Hello", type="text"))])
     provider = AnthropicConversationProvider(config(), client)

@@ -34,6 +34,7 @@ def create_provider(
                 model_id=route.wire_model,
                 max_output_tokens=route.max_output_tokens,
                 base_url=route.base_url,
+                temperature=route.temperature,
             ),
             api_key=api_key or "",
         )

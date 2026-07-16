@@ -18,8 +18,17 @@ def test_package_version_is_declared() -> None:
     assert __version__ == "0.1.0"
 
 
-def test_prompt_command_runs_the_deterministic_foundation_loop(capsys) -> None:
-    assert main(["prompt", "Hello"]) == 0
+def test_prompt_command_runs_the_deterministic_foundation_loop(capsys, tmp_path) -> None:
+    assert (
+        main(
+            ["prompt", "Hello"],
+            cwd=tmp_path,
+            environment={},
+            user_profile_path=tmp_path / "user.json",
+            project_profile_path=tmp_path / "project.json",
+        )
+        == 0
+    )
 
     captured = capsys.readouterr()
     assert captured.out == "Fake response: Hello\n"
@@ -35,8 +44,17 @@ def test_prompt_command_uses_its_cwd_as_the_read_file_workspace(monkeypatch, tmp
 
     monkeypatch.setattr("leonervis_code.cli.main.ReadFileTool", RecordingReadFileTool)
 
-    assert main(["prompt", "Hello"], cwd=tmp_path) == 0
-    assert workspaces == [tmp_path]
+    assert (
+        main(
+            ["prompt", "Hello"],
+            cwd=tmp_path,
+            environment={},
+            user_profile_path=tmp_path / "user.json",
+            project_profile_path=tmp_path / "project.json",
+        )
+        == 0
+    )
+    assert workspaces == [tmp_path.resolve()]
 
 
 def test_real_prompt_requires_an_explicit_nonblank_model(capsys) -> None:
@@ -266,6 +284,167 @@ def test_bare_command_rejects_noninteractive_streams() -> None:
     assert error.getvalue() == (
         'interactive mode requires a terminal; use leonervis-code prompt "..." instead\n'
     )
+
+
+def test_provider_profile_crud_and_active_precedence_use_injected_paths(tmp_path) -> None:
+    user_path = tmp_path / "config" / "providers.json"
+    project_path = tmp_path / "workspace" / "provider.json"
+    output = io.StringIO()
+
+    assert (
+        main(
+            [
+                "provider",
+                "add",
+                "local-dev",
+                "--provider",
+                "custom",
+                "--model",
+                "Qwen/Qwen3.5",
+                "--protocol",
+                "openai-compatible",
+                "--base-url",
+                "http://127.0.0.1:11434",
+            ],
+            stdout=output,
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            environment={},
+            user_profile_path=user_path,
+            project_profile_path=project_path,
+        )
+        == 0
+    )
+    assert output.getvalue() == "Saved provider profile local-dev.\n"
+
+    constructed = []
+
+    class LocalProvider:
+        def respond(self, history):
+            return AssistantText("local response")
+
+    def factory(route, *, environment):
+        constructed.append(route)
+        return LocalProvider()
+
+    output = io.StringIO()
+    assert (
+        main(
+            ["provider", "use", "local-dev"],
+            stdout=output,
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            environment={},
+            user_profile_path=user_path,
+            project_profile_path=project_path,
+            provider_factory=factory,
+        )
+        == 0
+    )
+    assert output.getvalue() == "Using provider profile local-dev at project scope.\n"
+
+    output = io.StringIO()
+    assert (
+        main(
+            ["prompt", "Hello"],
+            stdout=output,
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            environment={},
+            user_profile_path=user_path,
+            project_profile_path=project_path,
+            provider_factory=factory,
+        )
+        == 0
+    )
+    assert output.getvalue() == "local response\n"
+    assert constructed[-1].wire_model == "Qwen/Qwen3.5"
+
+    output = io.StringIO()
+    assert (
+        main(
+            ["provider", "list"],
+            stdout=output,
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            environment={},
+            user_profile_path=user_path,
+            project_profile_path=project_path,
+        )
+        == 0
+    )
+    assert output.getvalue() == "local-dev *: custom/Qwen/Qwen3.5\n"
+
+
+def test_profile_model_override_is_runtime_only_and_profile_output_is_redacted(tmp_path) -> None:
+    user_path = tmp_path / "providers.json"
+    project_path = tmp_path / "project.json"
+    common = {
+        "cwd": tmp_path,
+        "environment": {"VENDOR_KEY": "secret-must-not-render"},
+        "user_profile_path": user_path,
+        "project_profile_path": project_path,
+    }
+    assert (
+        main(
+            [
+                "provider",
+                "add",
+                "vendor",
+                "--provider",
+                "custom",
+                "--model",
+                "default-model",
+                "--protocol",
+                "openai-compatible",
+                "--base-url",
+                "https://gateway.example/v1",
+                "--api-key-env",
+                "VENDOR_KEY",
+            ],
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    captured = []
+
+    class TextProvider:
+        def respond(self, history):
+            return AssistantText("ok")
+
+    def factory(route, *, environment):
+        captured.append(route)
+        return TextProvider()
+
+    assert (
+        main(
+            ["--profile", "vendor", "--model", "temporary-model", "prompt", "Hi"],
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            provider_factory=factory,
+            **common,
+        )
+        == 0
+    )
+    assert captured[0].selected_model == "temporary-model"
+
+    output = io.StringIO()
+    assert (
+        main(
+            ["provider", "show", "vendor"],
+            stdout=output,
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    rendered = output.getvalue()
+    assert "model: default-model" in rendered
+    assert "credential: configured" in rendered
+    assert "VENDOR_KEY" not in rendered
+    assert "secret-must-not-render" not in rendered
 
 
 @pytest.mark.parametrize(

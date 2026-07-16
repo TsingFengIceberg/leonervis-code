@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from leonervis_code.core.orchestration import OrchestrationError
@@ -16,6 +18,9 @@ from leonervis_code.providers.definitions import (
     RuntimeProviderRoute,
     WireProtocol,
 )
+
+if TYPE_CHECKING:
+    from leonervis_code.providers.profile import NamedProviderProfile
 
 
 class RuntimeRouteError(OrchestrationError):
@@ -48,14 +53,14 @@ def resolve_runtime_route(
             )
         if custom_api_key_env is not None and not custom_api_key_env.strip():
             raise RuntimeRouteError("custom API key environment variable must not be blank")
-        if custom_api_key_env is not None and not _valid_environment_name(custom_api_key_env):
+        if custom_api_key_env is not None and not valid_environment_name(custom_api_key_env):
             raise RuntimeRouteError("custom API key environment variable name is invalid")
         definition = ProviderDefinition(
             provider_id="custom",
             protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
             credential_env=custom_api_key_env,
             credential_required=custom_api_key_env is not None,
-            default_base_url=_normalize_compatible_base_url(custom_base_url),
+            default_base_url=normalize_compatible_base_url(custom_base_url),
         )
         return _route(
             definition,
@@ -99,6 +104,87 @@ def resolve_runtime_route(
     )
 
 
+def resolve_profile_route(
+    profile: NamedProviderProfile,
+    *,
+    environment: Mapping[str, str],
+    model_override: str | None = None,
+) -> RuntimeProviderRoute:
+    """Resolve one validated named profile to non-secret adapter metadata."""
+    model = model_override if model_override is not None else profile.model
+    if not model.strip():
+        raise RuntimeRouteError("model selector must not be blank")
+    if model != model.strip():
+        raise RuntimeRouteError("model selector must not have surrounding whitespace")
+
+    if profile.provider_id == "custom":
+        assert profile.base_url is not None
+        definition = ProviderDefinition(
+            provider_id="custom",
+            protocol=profile.protocol,
+            credential_env=profile.api_key_env,
+            credential_required=profile.api_key_env is not None,
+            default_base_url=profile.base_url,
+        )
+        return _route(
+            definition,
+            model,
+            model,
+            profile.base_url,
+            "profile",
+            profile.max_output_tokens,
+            profile.temperature,
+        )
+
+    definition = BUILTIN_PROVIDERS[profile.provider_id]
+    if profile.api_key_env is not None:
+        definition = replace(
+            definition,
+            credential_env=profile.api_key_env,
+            credential_required=True,
+        )
+    wire_model = _wire_model_for_profile(profile.provider_id, model)
+    if profile.base_url is not None:
+        base_url = profile.base_url
+        source = "profile"
+    else:
+        base_url = definition.default_base_url
+        source = "default"
+        if definition.base_url_env:
+            configured = environment.get(definition.base_url_env, "").strip()
+            if configured:
+                base_url = configured
+                source = "environment"
+    if definition.protocol == WireProtocol.OPENAI_CHAT_COMPLETIONS:
+        base_url = normalize_compatible_base_url(base_url)
+    else:
+        base_url = validate_base_url(base_url)
+    return _route(
+        definition,
+        model,
+        wire_model,
+        base_url,
+        source,
+        profile.max_output_tokens,
+        profile.temperature,
+    )
+
+
+def _wire_model_for_profile(provider_id: str, model: str) -> str:
+    prefix = f"{provider_id}/"
+    if provider_id != "openrouter" and model.startswith(prefix):
+        wire_model = model[len(prefix) :]
+        if not wire_model:
+            raise RuntimeRouteError("model selector must include a model after the provider")
+        return wire_model
+    if provider_id == "openrouter" and model.startswith(prefix):
+        wire_model = model[len(prefix) :]
+        if not wire_model:
+            raise RuntimeRouteError("model selector must include a model after the provider")
+        return wire_model
+    return model
+
+
 def _definition_for_bare_model(model: str) -> ProviderDefinition | None:
     lowered = model.lower()
     if lowered.startswith("claude-"):
@@ -128,9 +214,9 @@ def _route_for_definition(
             base_url = configured
             source = "environment"
     if definition.protocol == WireProtocol.OPENAI_CHAT_COMPLETIONS:
-        base_url = _normalize_compatible_base_url(base_url)
+        base_url = normalize_compatible_base_url(base_url)
     else:
-        base_url = _validate_base_url(base_url)
+        base_url = validate_base_url(base_url)
     return _route(
         definition,
         selected_model,
@@ -162,8 +248,9 @@ def _route(
     )
 
 
-def _normalize_compatible_base_url(value: str) -> str:
-    validated = _validate_base_url(value)
+def normalize_compatible_base_url(value: str) -> str:
+    """Validate and normalize an OpenAI-compatible API base URL."""
+    validated = validate_base_url(value)
     parsed = urlparse(validated)
     path = parsed.path.rstrip("/")
     if path.endswith("/chat/completions"):
@@ -173,13 +260,19 @@ def _normalize_compatible_base_url(value: str) -> str:
     return f"{validated.rstrip('/')}/v1"
 
 
-def _valid_environment_name(value: str) -> bool:
-    return (value[0].isascii() and (value[0].isalpha() or value[0] == "_")) and all(
-        character.isascii() and (character.isalnum() or character == "_") for character in value
+def valid_environment_name(value: str) -> bool:
+    """Return whether a value is a portable ASCII environment-variable name."""
+    return (
+        bool(value)
+        and (value[0].isascii() and (value[0].isalpha() or value[0] == "_"))
+        and all(
+            character.isascii() and (character.isalnum() or character == "_") for character in value
+        )
     )
 
 
-def _validate_base_url(value: str) -> str:
+def validate_base_url(value: str) -> str:
+    """Validate one absolute credential-free HTTP(S) provider base URL."""
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise RuntimeRouteError("provider base URL must be an absolute http or https URL")

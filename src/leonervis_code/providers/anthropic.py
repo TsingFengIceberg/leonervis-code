@@ -34,12 +34,15 @@ class AnthropicProviderConfig:
     model_id: str
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     base_url: str = "https://api.anthropic.com"
+    temperature: float | None = None
 
     def __post_init__(self) -> None:
         if not self.model_id.strip():
             raise ValueError("Anthropic model ID must not be blank")
         if self.max_output_tokens < 1:
             raise ValueError("Anthropic max output tokens must be at least 1")
+        if self.temperature is not None and not 0.0 <= self.temperature <= 2.0:
+            raise ValueError("Anthropic temperature must be between 0.0 and 2.0")
 
 
 class AnthropicMessagesClient(Protocol):
@@ -68,7 +71,7 @@ def create_anthropic_provider(
         max_retries=0,
         http_client=anthropic.DefaultHttpxClient(follow_redirects=False),
     )
-    return AnthropicConversationProvider(config, client.messages)
+    return AnthropicConversationProvider(config, client.messages, owner=client)
 
 
 class AnthropicConversationProvider:
@@ -78,21 +81,33 @@ class AnthropicConversationProvider:
         self,
         config: AnthropicProviderConfig,
         client: AnthropicMessagesClient,
+        *,
+        owner: object | None = None,
     ) -> None:
         self._config = config
         self._client = client
+        self._owner = owner
+
+    def close(self) -> None:
+        """Close the production SDK owner when this adapter constructed it."""
+        close = getattr(self._owner, "close", None)
+        if callable(close):
+            close()
 
     def respond(self, history: tuple[ConversationItem, ...]) -> ProviderResponse:
         """Make one non-streaming request through the injected SDK seam."""
         messages = serialize_history(history, config=self._config)
+        request: dict[str, object] = {
+            "model": self._config.model_id,
+            "max_tokens": self._config.max_output_tokens,
+            "messages": messages,
+            "tools": [read_file_tool_definition()],
+            "stream": False,
+        }
+        if self._config.temperature is not None:
+            request["temperature"] = self._config.temperature
         try:
-            response = self._client.create(
-                model=self._config.model_id,
-                max_tokens=self._config.max_output_tokens,
-                messages=messages,
-                tools=[read_file_tool_definition()],
-                stream=False,
-            )
+            response = self._client.create(**request)
         except anthropic.APIError as error:
             raise normalize_sdk_error(error, config=self._config) from None
         return parse_response(response, config=self._config)

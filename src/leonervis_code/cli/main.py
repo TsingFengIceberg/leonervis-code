@@ -1,15 +1,15 @@
-"""Command-line interface for the current deterministic and explicit-provider slices."""
+"""Command-line interface for offline policy, named profiles, and persistent sessions."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TextIO
 
-from leonervis_code import __version__
+from leonervis_code import ProjectSession, __version__
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.brand import color_enabled
 from leonervis_code.cli.repl import run_repl
@@ -20,11 +20,19 @@ from leonervis_code.core.orchestration import (
     RouteRequest,
     RouteRequirements,
 )
+from leonervis_code.providers.definitions import BUILTIN_PROVIDERS, WireProtocol
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.factory import create_provider
 from leonervis_code.providers.fake import ScriptedFakeProvider
+from leonervis_code.providers.manager import RuntimeProviderManager
+from leonervis_code.providers.profile import NamedProviderProfile, ProviderProfileError
+from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.providers.request_policy import preview_request
-from leonervis_code.providers.resolver import RuntimeRouteError, resolve_runtime_route
+from leonervis_code.providers.resolver import (
+    RuntimeRouteError,
+    resolve_profile_route,
+    resolve_runtime_route,
+)
 from leonervis_code.providers.routing import (
     DEFAULT_ROUTE_REQUEST,
     FAKE_PROVIDER_PROFILES,
@@ -48,24 +56,33 @@ def nonblank_model(value: str) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Create the small CLI surface available through Foundation 3A."""
+    """Create the Foundation 3C command, profile, and REPL surface."""
     parser = argparse.ArgumentParser(
         prog="leonervis-code",
         description="Leonervis Code: a learning-first local coding-agent CLI prototype.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--profile", help="named endpoint profile for this invocation")
     parser.add_argument(
         "--model",
+        dest="invocation_model",
         type=nonblank_model,
-        help="explicit provider/model selector for the prompt command",
+        help="direct provider/model selector, or model override with --profile",
     )
     parser.add_argument(
         "--provider-protocol",
+        dest="invocation_provider_protocol",
         choices=["openai-compatible"],
         help="explicit custom provider wire protocol",
     )
-    parser.add_argument("--base-url", help="custom provider API base URL")
-    parser.add_argument("--api-key-env", help="environment variable holding a custom API key")
+    parser.add_argument(
+        "--base-url", dest="invocation_base_url", help="custom provider API base URL"
+    )
+    parser.add_argument(
+        "--api-key-env",
+        dest="invocation_api_key_env",
+        help="environment variable holding a custom API key",
+    )
     subcommands = parser.add_subparsers(dest="command")
     prompt_parser = subcommands.add_parser("prompt", help="run one prompt turn")
     prompt_parser.add_argument("prompt", type=nonblank_prompt, help="the prompt to send")
@@ -80,15 +97,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--model", dest="route_model", help="provider/model selector or unambiguous alias"
     )
     route_parser.add_argument(
-        "--fallback-model",
-        action="append",
-        default=[],
-        help="ordered fallback provider/model selector; repeat to add more",
+        "--fallback-model", action="append", default=[], help="ordered fallback selector"
     )
     route_parser.add_argument("--require-tool-use", action="store_true")
     route_parser.add_argument("--require-streaming", action="store_true")
     route_parser.add_argument("--max-output-tokens", type=int)
     route_parser.add_argument("--temperature", type=float)
+
+    provider_parser = subcommands.add_parser("provider", help="manage named provider profiles")
+    provider_commands = provider_parser.add_subparsers(dest="provider_command", required=True)
+    add_parser = provider_commands.add_parser("add", help="add one global provider profile")
+    add_parser.add_argument("name")
+    add_parser.add_argument("--provider", required=True, choices=[*BUILTIN_PROVIDERS, "custom"])
+    add_parser.add_argument("--model", dest="profile_model", required=True, type=nonblank_model)
+    add_parser.add_argument(
+        "--protocol",
+        dest="profile_protocol",
+        choices=["openai-compatible", "anthropic-messages"],
+    )
+    add_parser.add_argument("--base-url", dest="profile_base_url")
+    add_parser.add_argument("--api-key-env", dest="profile_api_key_env")
+    add_parser.add_argument("--max-output-tokens", type=int, default=1024)
+    add_parser.add_argument("--temperature", type=float)
+    add_parser.add_argument("--replace", action="store_true")
+    provider_commands.add_parser("list", help="list global provider profiles")
+    show_parser = provider_commands.add_parser("show", help="show one redacted provider profile")
+    show_parser.add_argument("name")
+    use_parser = provider_commands.add_parser("use", help="activate one provider profile")
+    use_parser.add_argument("name")
+    use_parser.add_argument("--scope", choices=["project", "user"], default="project")
+    clear_parser = provider_commands.add_parser("clear", help="clear one active profile layer")
+    clear_parser.add_argument("--scope", choices=["project", "user"], default="project")
+    remove_parser = provider_commands.add_parser("remove", help="remove an inactive profile")
+    remove_parser.add_argument("name")
     return parser
 
 
@@ -96,10 +137,7 @@ def render_demo_read(workspace: Path, path: str, stdout: TextIO) -> int:
     """Run and visibly report one scripted ``read_file`` tool demonstration."""
     tool_use = ToolUse(tool_use_id="demo-read-1", name="read_file", path=path)
     provider = ScriptedFakeProvider(
-        [
-            tool_use,
-            AssistantText(text="Demo final response: provider received the read_file result."),
-        ]
+        [tool_use, AssistantText("Demo final response: provider received the read_file result.")]
     )
     demo_loop = AgentLoop(provider, ReadFileTool(workspace))
     stdout.write(f"[demo] provider requested read_file: {path}\n")
@@ -131,45 +169,32 @@ def render_route(
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
-    """Render one offline, redacted fake-provider request plan."""
+    """Render one offline fake-provider request-policy plan."""
     request = RouteRequest(
         primary_selector=model or DEFAULT_ROUTE_REQUEST.primary_selector,
         fallback_selectors=tuple(fallback_models),
-        requirements=RouteRequirements(
-            requires_tool_use=require_tool_use,
-            requires_streaming=require_streaming,
-        ),
-        options=GenerationOptions(
-            max_output_tokens=max_output_tokens,
-            temperature=temperature,
-        ),
+        requirements=RouteRequirements(require_tool_use, require_streaming),
+        options=GenerationOptions(max_output_tokens, temperature),
     )
     try:
         route = resolve_route(request)
     except OrchestrationError as error:
         print(f"route error: {error}", file=stderr)
         return 2
-
     profiles = {profile.provider_id: profile for profile in FAKE_PROVIDER_PROFILES}
     for label, plan in (
         ("primary", route.primary),
-        *(("fallback", fallback) for fallback in route.fallbacks),
+        *(("fallback", item) for item in route.fallbacks),
     ):
         profile = profiles[plan.provider_id]
         preview = preview_request(plan)
         credential = "configured" if profile.credential_ref is not None else "not configured"
         stdout.write(f"{label}: {plan.provider_id}/{plan.model_id}\n")
         stdout.write(f"  credential: {credential}\n")
-        if plan.canonical_parameters:
-            canonical = ", ".join(f"{name}={value}" for name, value in plan.canonical_parameters)
-            stdout.write(f"  canonical parameters: {canonical}\n")
-        else:
-            stdout.write("  canonical parameters: <none>\n")
-        if preview.native_parameters:
-            native = ", ".join(f"{name}={value}" for name, value in preview.native_parameters)
-            stdout.write(f"  native preview: {native}\n")
-        else:
-            stdout.write("  native preview: <none>\n")
+        canonical = ", ".join(f"{name}={value}" for name, value in plan.canonical_parameters)
+        native = ", ".join(f"{name}={value}" for name, value in preview.native_parameters)
+        stdout.write(f"  canonical parameters: {canonical or '<none>'}\n")
+        stdout.write(f"  native preview: {native or '<none>'}\n")
         if preview.diagnostics:
             stdout.write("  diagnostics:\n")
             for diagnostic in preview.diagnostics:
@@ -182,32 +207,13 @@ def render_route(
     return 0
 
 
-def render_runtime_route(
-    *,
-    model: str,
-    provider_protocol: str | None,
-    base_url: str | None,
-    api_key_env: str | None,
-    stdout: TextIO,
-    stderr: TextIO,
-) -> int:
-    """Render one real-provider route without constructing a client or reading secrets."""
-    try:
-        route = resolve_runtime_route(
-            model,
-            environment=os.environ,
-            custom_protocol=provider_protocol,
-            custom_base_url=base_url,
-            custom_api_key_env=api_key_env,
-        )
-    except RuntimeRouteError as error:
-        print(f"provider route error: {error}", file=stderr)
-        return 2
+def render_runtime_route(route, environment: Mapping[str, str], stdout: TextIO) -> int:
+    """Render one real route without constructing a client or exposing secrets."""
     definition = route.definition
     credential = "not required"
     if definition.credential_env:
         credential = (
-            "configured" if os.environ.get(definition.credential_env, "").strip() else "missing"
+            "configured" if environment.get(definition.credential_env, "").strip() else "missing"
         )
     stdout.write(f"provider: {definition.provider_id}\n")
     stdout.write(f"protocol: {definition.protocol}\n")
@@ -226,34 +232,120 @@ def render_provider_failure(error: ProviderAdapterError, stderr: TextIO) -> int:
     return 2
 
 
-def run_real_prompt(
-    *,
-    model: str,
-    prompt: str,
+def render_profile(
+    profile: NamedProviderProfile, environment: Mapping[str, str], stdout: TextIO
+) -> None:
+    """Render one profile's non-secret endpoint configuration."""
+    credential = "not required"
+    if profile.api_key_env:
+        credential = "configured" if environment.get(profile.api_key_env, "").strip() else "missing"
+    elif profile.provider_id in BUILTIN_PROVIDERS:
+        name = BUILTIN_PROVIDERS[profile.provider_id].credential_env
+        if name:
+            credential = "configured" if environment.get(name, "").strip() else "missing"
+    stdout.write(f"name: {profile.name}\n")
+    stdout.write(f"provider: {profile.provider_id}\n")
+    stdout.write(f"protocol: {profile.protocol.value}\n")
+    stdout.write(f"model: {profile.model}\n")
+    stdout.write(f"base URL: {profile.base_url or '<provider default>'}\n")
+    stdout.write(f"credential: {credential}\n")
+    stdout.write(f"max output tokens: {profile.max_output_tokens}\n")
+    stdout.write(
+        f"temperature: {profile.temperature if profile.temperature is not None else '<default>'}\n"
+    )
+
+
+def _profile_protocol(provider_id: str, option: str | None) -> WireProtocol:
+    if provider_id in BUILTIN_PROVIDERS:
+        expected = BUILTIN_PROVIDERS[provider_id].protocol
+        if option is not None and option != _protocol_option(expected):
+            raise ProviderProfileError(
+                f"profile protocol does not match built-in provider {provider_id}"
+            )
+        return expected
+    if option != "openai-compatible":
+        raise ProviderProfileError("custom profiles require --protocol openai-compatible")
+    return WireProtocol.OPENAI_CHAT_COMPLETIONS
+
+
+def _protocol_option(protocol: WireProtocol) -> str:
+    return (
+        "anthropic-messages" if protocol == WireProtocol.ANTHROPIC_MESSAGES else "openai-compatible"
+    )
+
+
+def _store(
     workspace: Path,
-    provider_protocol: str | None,
-    base_url: str | None,
-    api_key_env: str | None,
+    environment: Mapping[str, str],
+    user_profile_path: Path | None,
+    project_profile_path: Path | None,
+) -> ProviderProfileStore:
+    return ProviderProfileStore.for_workspace(
+        workspace,
+        environment=environment,
+        user_path=user_profile_path,
+        project_path=project_profile_path,
+    )
+
+
+def handle_provider_command(
+    arguments: argparse.Namespace,
+    *,
+    workspace: Path,
+    environment: Mapping[str, str],
+    user_profile_path: Path | None,
+    project_profile_path: Path | None,
+    provider_factory,
     stdout: TextIO,
-    stderr: TextIO,
 ) -> int:
-    """Resolve and run one explicit network-capable multi-provider prompt."""
-    try:
-        route = resolve_runtime_route(
-            model,
-            environment=os.environ,
-            custom_protocol=provider_protocol,
-            custom_base_url=base_url,
-            custom_api_key_env=api_key_env,
+    """Execute one profile CRUD or activation command."""
+    store = _store(workspace, environment, user_profile_path, project_profile_path)
+    command = arguments.provider_command
+    if command == "add":
+        configured = NamedProviderProfile(
+            name=arguments.name,
+            provider_id=arguments.provider,
+            protocol=_profile_protocol(arguments.provider, arguments.profile_protocol),
+            model=arguments.profile_model,
+            base_url=arguments.profile_base_url,
+            api_key_env=arguments.profile_api_key_env,
+            max_output_tokens=arguments.max_output_tokens,
+            temperature=arguments.temperature,
         )
-        provider = create_provider(route, environment=os.environ)
-        response = AgentLoop(provider, ReadFileTool(workspace)).run(prompt)
-    except RuntimeRouteError as error:
-        print(f"provider route error: {error}", file=stderr)
-        return 2
-    except ProviderAdapterError as error:
-        return render_provider_failure(error, stderr)
-    print(response, file=stdout)
+        store.add_profile(configured, replace=arguments.replace)
+        stdout.write(f"Saved provider profile {configured.name}.\n")
+    elif command == "list":
+        profiles = store.list_profiles()
+        active = store.active_selection()
+        if not profiles:
+            stdout.write("No provider profiles configured.\n")
+        for configured in profiles:
+            marker = " *" if active and active.name == configured.name else ""
+            stdout.write(
+                f"{configured.name}{marker}: {configured.provider_id}/{configured.model}\n"
+            )
+    elif command == "show":
+        render_profile(store.get_profile(arguments.name), environment, stdout)
+    elif command == "remove":
+        store.remove_profile(arguments.name)
+        stdout.write(f"Removed provider profile {arguments.name}.\n")
+    elif command == "clear":
+        RuntimeProviderManager.prepare_clear(
+            store,
+            scope=arguments.scope,
+            environment=environment,
+            provider_factory=provider_factory,
+        )
+        stdout.write(f"Cleared {arguments.scope} active provider profile.\n")
+    elif command == "use":
+        status = RuntimeProviderManager.prepare_profile(
+            store,
+            arguments.name,
+            scope=arguments.scope,
+            environment=environment,
+            provider_factory=provider_factory,
+        )
+        stdout.write(f"Using provider profile {status.profile} at {arguments.scope} scope.\n")
     return 0
 
 
@@ -264,73 +356,131 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     cwd: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+    user_profile_path: Path | None = None,
+    project_profile_path: Path | None = None,
+    provider_factory=None,
 ) -> int:
-    """Run a one-shot prompt command or launch the interactive terminal surface."""
+    """Run a command or launch one persistent project conversation session."""
     arguments = build_parser().parse_args(argv)
-    workspace = cwd or Path.cwd()
-    custom_provider_requested = any(
+    workspace = (cwd or Path.cwd()).resolve()
+    output = stdout or sys.stdout
+    errors = stderr or sys.stderr
+    env = os.environ if environment is None else environment
+    factory = provider_factory or create_provider
+    custom_requested = any(
         value is not None
-        for value in (arguments.provider_protocol, arguments.base_url, arguments.api_key_env)
+        for value in (
+            arguments.invocation_provider_protocol,
+            arguments.invocation_base_url,
+            arguments.invocation_api_key_env,
+        )
     )
-    if arguments.command == "route" and arguments.model is not None:
-        return render_runtime_route(
-            model=arguments.model,
-            provider_protocol=arguments.provider_protocol,
-            base_url=arguments.base_url,
-            api_key_env=arguments.api_key_env,
-            stdout=stdout or sys.stdout,
-            stderr=stderr or sys.stderr,
+    try:
+        if arguments.profile is not None and custom_requested:
+            raise ProviderProfileError("--profile cannot be combined with custom endpoint options")
+        if arguments.command == "provider":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "global provider selection options cannot be combined with provider management"
+                )
+            return handle_provider_command(
+                arguments,
+                workspace=workspace,
+                environment=env,
+                user_profile_path=user_profile_path,
+                project_profile_path=project_profile_path,
+                provider_factory=factory,
+                stdout=output,
+            )
+        if arguments.command == "demo-read":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError("demo-read does not accept provider selection options")
+            return render_demo_read(workspace, arguments.path, output)
+        if arguments.command == "route":
+            if arguments.profile is not None:
+                configured = _store(
+                    workspace, env, user_profile_path, project_profile_path
+                ).get_profile(arguments.profile)
+                route = resolve_profile_route(
+                    configured, environment=env, model_override=arguments.invocation_model
+                )
+                return render_runtime_route(route, env, output)
+            if arguments.invocation_model is not None:
+                route = resolve_runtime_route(
+                    arguments.invocation_model,
+                    environment=env,
+                    custom_protocol=arguments.invocation_provider_protocol,
+                    custom_base_url=arguments.invocation_base_url,
+                    custom_api_key_env=arguments.invocation_api_key_env,
+                )
+                return render_runtime_route(route, env, output)
+            if custom_requested:
+                raise ProviderProfileError("custom endpoint options require --model")
+            return render_route(
+                model=arguments.route_model,
+                fallback_models=arguments.fallback_model,
+                require_tool_use=arguments.require_tool_use,
+                require_streaming=arguments.require_streaming,
+                max_output_tokens=arguments.max_output_tokens,
+                temperature=arguments.temperature,
+                stdout=output,
+                stderr=errors,
+            )
+        if custom_requested and (
+            arguments.command != "prompt" or arguments.invocation_model is None
+        ):
+            raise ProviderProfileError(
+                "custom endpoint options require --model and the prompt command"
+            )
+        if arguments.command is None:
+            input_stream = stdin or sys.stdin
+            if not input_stream.isatty() or not output.isatty():
+                print(
+                    'interactive mode requires a terminal; use leonervis-code prompt "..." instead',
+                    file=errors,
+                )
+                return 2
+        session = ProjectSession.open(
+            workspace,
+            profile=arguments.profile,
+            model=arguments.invocation_model,
+            custom_protocol=arguments.invocation_provider_protocol,
+            custom_base_url=arguments.invocation_base_url,
+            custom_api_key_env=arguments.invocation_api_key_env,
+            environment=env,
+            user_profile_path=user_profile_path,
+            project_profile_path=project_profile_path,
+            provider_factory=factory,
+            read_file_factory=ReadFileTool,
         )
-    if custom_provider_requested and (arguments.command != "prompt" or arguments.model is None):
-        print(
-            "provider route error: custom provider options require --model and the prompt command",
-            file=stderr or sys.stderr,
-        )
+        try:
+            if arguments.command == "prompt":
+                print(session.prompt(arguments.prompt), file=output)
+                return 0
+            return run_repl(
+                session,
+                stdin=stdin or sys.stdin,
+                stdout=output,
+                version=__version__,
+                cwd=workspace,
+                color=color_enabled(output),
+            )
+        finally:
+            session.close()
+    except RuntimeRouteError as error:
+        print(f"provider route error: {error}", file=errors)
         return 2
-    if arguments.command == "demo-read":
-        return render_demo_read(workspace, arguments.path, stdout or sys.stdout)
-    if arguments.command == "route":
-        return render_route(
-            model=arguments.route_model,
-            fallback_models=arguments.fallback_model,
-            require_tool_use=arguments.require_tool_use,
-            require_streaming=arguments.require_streaming,
-            max_output_tokens=arguments.max_output_tokens,
-            temperature=arguments.temperature,
-            stdout=stdout or sys.stdout,
-            stderr=stderr or sys.stderr,
-        )
-    if arguments.command == "prompt" and arguments.model is not None:
-        return run_real_prompt(
-            model=arguments.model,
-            prompt=arguments.prompt,
-            workspace=workspace,
-            provider_protocol=arguments.provider_protocol,
-            base_url=arguments.base_url,
-            api_key_env=arguments.api_key_env,
-            stdout=stdout or sys.stdout,
-            stderr=stderr or sys.stderr,
-        )
-
-    loop = AgentLoop(ScriptedFakeProvider(), ReadFileTool(workspace))
-    if arguments.command == "prompt":
-        print(loop.run(arguments.prompt))
-        return 0
-
-    input_stream = stdin or sys.stdin
-    output_stream = stdout or sys.stdout
-    error_stream = stderr or sys.stderr
-    if not input_stream.isatty() or not output_stream.isatty():
-        print(
-            'interactive mode requires a terminal; use leonervis-code prompt "..." instead',
-            file=error_stream,
-        )
+    except ProviderAdapterError as error:
+        return render_provider_failure(error, errors)
+    except ProviderProfileError as error:
+        print(f"provider profile error: {error}", file=errors)
         return 2
-    return run_repl(
-        loop,
-        stdin=input_stream,
-        stdout=output_stream,
-        version=__version__,
-        cwd=workspace,
-        color=color_enabled(output_stream),
-    )

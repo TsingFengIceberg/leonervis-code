@@ -13,6 +13,9 @@ from leonervis_code.cli.repl import (
 )
 from leonervis_code.core.contracts import AssistantText, ConversationTurn, ToolUse, UserMessage
 from leonervis_code.providers.fake import ScriptedFakeProvider
+from leonervis_code.providers.manager import RuntimeStatus
+from leonervis_code.providers.profile import NamedProviderProfile
+from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -39,7 +42,10 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 1) == "/history"
     assert complete_command("/", 2) == "/exit"
     assert complete_command("/", 3) == "/quit"
-    assert complete_command("/", 4) is None
+    assert complete_command("/", 4) == "/status"
+    assert complete_command("/", 5) == "/provider"
+    assert complete_command("/", 6) == "/model"
+    assert complete_command("/", 7) is None
     assert complete_command("ordinary prompt", 0) is None
 
 
@@ -176,6 +182,94 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
     assert loop.prompts == []
     assert "Commands: /help, /history <count>, /exit, /quit." in rendered
     assert "Unknown command: /unknown. Type /help for controls." in rendered
+
+
+def test_repl_provider_commands_switch_without_entering_model_history(tmp_path) -> None:
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.prompts = []
+            self.turns = ()
+            self.used = []
+            self.models = []
+
+        def status(self):
+            return RuntimeStatus(
+                mode="real",
+                profile="one",
+                selection_source="project",
+                provider_id="custom",
+                protocol="openai_chat_completions",
+                selected_model="model-one",
+                wire_model="model-one",
+                base_url="http://127.0.0.1:11434/v1",
+                base_url_source="profile",
+                credential_required=False,
+                credential_present=False,
+            )
+
+        def list_profiles(self):
+            return (
+                NamedProviderProfile(
+                    "one",
+                    "custom",
+                    WireProtocol.OPENAI_CHAT_COMPLETIONS,
+                    "model-one",
+                    "http://127.0.0.1:11434/v1",
+                ),
+            )
+
+        def use_profile(self, name, *, scope):
+            self.used.append((name, scope))
+            return self.status()
+
+        def set_model(self, model):
+            self.models.append(model)
+            status = self.status()
+            return RuntimeStatus(**{**status.__dict__, "selected_model": model})
+
+        def prompt(self, prompt):
+            self.prompts.append(prompt)
+            return f"reply: {prompt}"
+
+    session = RecordingSession()
+    output = io.StringIO()
+    run_repl(
+        session,
+        stdin=io.StringIO(
+            "/status\n/provider list\n/provider current\n/provider use one\n/model model-two\nHello\n/exit\n"
+        ),
+        stdout=output,
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+    )
+
+    rendered = output.getvalue()
+    assert session.used == [("one", "project")]
+    assert session.models == ["model-two"]
+    assert session.prompts == ["Hello"]
+    assert "Credential: not required" in rendered
+    assert "one: custom/model-one" in rendered
+    assert "profile was not modified" in rendered
+    assert "reply: Hello" in rendered
+
+
+def test_invalid_prefix_commands_are_not_treated_as_switches(tmp_path) -> None:
+    loop = RecordingLoop()
+    output = io.StringIO()
+
+    run_repl(
+        loop,
+        stdin=io.StringIO("/modelx gpt-5\n/provider usex one\n/exit\n"),
+        stdout=output,
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+    )
+
+    assert loop.prompts == []
+    assert "Unknown command: /modelx gpt-5" in output.getvalue()
+    assert "Unknown command: /provider usex one" in output.getvalue()
 
 
 def test_repl_exits_cleanly_at_end_of_input(tmp_path) -> None:

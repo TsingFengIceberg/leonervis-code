@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
 
-def test_module_entry_runs_one_deterministic_prompt_turn() -> None:
+def isolated_environment(tmp_path):
+    environment = dict(os.environ)
+    environment["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    return environment
+
+
+def test_module_entry_runs_one_deterministic_prompt_turn(tmp_path) -> None:
     result = subprocess.run(
         [sys.executable, "-m", "leonervis_code", "prompt", "Hello"],
         capture_output=True,
         check=False,
+        cwd=tmp_path,
+        env=isolated_environment(tmp_path),
         text=True,
     )
 
@@ -25,6 +34,7 @@ def test_module_entry_visibly_demonstrates_a_read_file_tool_loop(tmp_path) -> No
         capture_output=True,
         check=False,
         cwd=tmp_path,
+        env=isolated_environment(tmp_path),
         text=True,
     )
 
@@ -39,7 +49,7 @@ def test_module_entry_visibly_demonstrates_a_read_file_tool_loop(tmp_path) -> No
     assert result.stderr == ""
 
 
-def test_module_entry_renders_a_deterministic_offline_route_plan() -> None:
+def test_module_entry_renders_a_deterministic_offline_route_plan(tmp_path) -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -53,6 +63,8 @@ def test_module_entry_renders_a_deterministic_offline_route_plan() -> None:
         ],
         capture_output=True,
         check=False,
+        cwd=tmp_path,
+        env=isolated_environment(tmp_path),
         text=True,
     )
 
@@ -67,11 +79,13 @@ def test_module_entry_renders_a_deterministic_offline_route_plan() -> None:
     assert result.stderr == ""
 
 
-def test_bare_module_entry_requires_an_interactive_terminal() -> None:
+def test_bare_module_entry_requires_an_interactive_terminal(tmp_path) -> None:
     result = subprocess.run(
         [sys.executable, "-m", "leonervis_code"],
         capture_output=True,
         check=False,
+        cwd=tmp_path,
+        env=isolated_environment(tmp_path),
         text=True,
     )
 

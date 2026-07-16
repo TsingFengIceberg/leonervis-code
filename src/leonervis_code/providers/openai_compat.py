@@ -35,9 +35,22 @@ class ChatCompletionsClient(Protocol):
 class OpenAICompatibleConversationProvider:
     """Translate neutral causal history through an OpenAI-compatible endpoint."""
 
-    def __init__(self, route: RuntimeProviderRoute, client: ChatCompletionsClient) -> None:
+    def __init__(
+        self,
+        route: RuntimeProviderRoute,
+        client: ChatCompletionsClient,
+        *,
+        owner: object | None = None,
+    ) -> None:
         self._route = route
         self._client = client
+        self._owner = owner
+
+    def close(self) -> None:
+        """Close the production SDK owner when this adapter constructed it."""
+        close = getattr(self._owner, "close", None)
+        if callable(close):
+            close()
 
     def respond(self, history: tuple[ConversationItem, ...]) -> ProviderResponse:
         """Make one non-streaming compatible request through the injected seam."""
@@ -70,7 +83,7 @@ def create_openai_compatible_provider(
         max_retries=0,
         http_client=openai.DefaultHttpxClient(follow_redirects=False),
     )
-    return OpenAICompatibleConversationProvider(route, client.chat.completions)
+    return OpenAICompatibleConversationProvider(route, client.chat.completions, owner=client)
 
 
 def read_file_tool_definition() -> dict[str, object]:

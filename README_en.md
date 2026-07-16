@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. It will incrementally build an understandable and verifiable Harness: a model makes decisions, the host executes controlled tools within explicit workspace and permission boundaries, and structured results return to the model.
 
-> **Current status: Foundation 3B's local multi-provider runtime is complete.** Explicit `leonervis-code --model <SELECTOR> prompt ...` calls Anthropic Messages through the shared provider resolver/factory, or uses one OpenAI-compatible adapter for OpenAI, xAI, DashScope/Qwen/Kimi, Ollama/local, OpenRouter, and controlled custom endpoints. The default `prompt` without `--model`, bare REPL, and `demo-read` still use the deterministic fake provider and read no credential or network; both real SDK clients use `max_retries=0`.
+> **Current status: Foundation 3C named provider profiles and the persistent runtime are complete.** Anthropic, OpenAI, xAI, DashScope/Qwen/Kimi, Ollama/local, OpenRouter, and controlled custom endpoints can now be used through one-shot `--model` selection or saved as global profiles containing no secret value, with a workspace choosing its active profile. `ProjectSession` gives other modules the same long-lived client, neutral multi-turn history, and atomic between-turn switching API. The bare REPL becomes a real conversation when an explicit/active profile exists and remains deterministic fake/offline when no real selection exists. Both real SDK clients use `max_retries=0`.
 
 ## Project positioning
 
@@ -63,14 +63,18 @@ leonervis> Explain the Harness boundary
 Fake response: Explain the Harness boundary
 ```
 
-The REPL currently supports only local controls:
+The REPL provides process-local history and provider-runtime controls:
 
 ```text
-/help              show controls
-/history <count>   show the most recent complete conversation turns
-/exit or /quit     exit normally
-Ctrl-D / EOF       exit normally
-Ctrl-C             exit normally
+/help                         show controls
+/history <count>              show the most recent complete turns
+/status                       show redacted current runtime status
+/provider list                list named profiles
+/provider current             show the active profile/provider/model
+/provider use <name>          switch and persist this workspace's active profile
+/model <model>                override only this process; do not edit the profile
+/exit or /quit                exit normally
+Ctrl-D / EOF / Ctrl-C         exit normally
 ```
 
 For a visible, deterministic Foundation 1B demonstration of the tool loop, run:
@@ -105,6 +109,60 @@ uv run python -m leonervis_code prompt "Hello"
 uv run leonervis-code --help
 uv run leonervis --version
 ```
+
+## Foundation 3C: named provider profiles and a real multi-turn REPL
+
+Profile definitions live in `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json`; a workspace stores only its active profile name in `.leonervis-code/provider.json`. Neither JSON file stores key values. The workspace directory is local runtime state and should be added to the target project's `.gitignore`.
+
+```bash
+# Built-in provider: protocol, default endpoint, and credential env come from the catalog
+uv run leonervis-code provider add work-openai \
+  --provider openai --model gpt-5
+
+# Controlled custom OpenAI-compatible endpoint; store only the key's env-variable name
+uv run leonervis-code provider add local-qwen \
+  --provider custom \
+  --model Qwen/Qwen3.5 \
+  --protocol openai-compatible \
+  --base-url http://127.0.0.1:11434
+
+uv run leonervis-code provider add vendor \
+  --provider custom \
+  --model vendor/model \
+  --protocol openai-compatible \
+  --base-url https://gateway.example/v1 \
+  --api-key-env VENDOR_API_KEY
+
+uv run leonervis-code provider list
+uv run leonervis-code provider show vendor
+uv run leonervis-code provider use local-qwen              # workspace scope by default
+uv run leonervis-code provider use work-openai --scope user
+uv run leonervis-code provider clear --scope project
+uv run leonervis-code provider remove vendor
+```
+
+Selection precedence is explicit `--profile` > explicit direct `--model` > workspace active > user active > fake/offline. `--profile NAME --model MODEL` uses a process-local model override on that endpoint without rewriting the profile:
+
+```bash
+uv run leonervis-code --profile work-openai --model gpt-5-mini prompt "Explain this workspace"
+uv run leonervis-code --profile work-openai       # real multi-turn REPL; client reused across turns
+```
+
+Both `provider use` and REPL `/provider use` resolve the route, validate the credential, and construct a candidate SDK client before writing active configuration and swapping the current client. On failure, the old active selection and client remain intact. `/model` is likewise atomic and allowed only between turns. Complete neutral history and tool-use/result pairs survive a provider switch; if the new provider rejects old history, the failed turn is not committed.
+
+Other project modules can use the public facade directly:
+
+```python
+from pathlib import Path
+from leonervis_code import ProjectSession
+
+with ProjectSession.open(Path.cwd(), profile="work-openai") as session:
+    first = session.prompt("Explain the README first")
+    session.set_model("gpt-5-mini")
+    second = session.prompt("Continue")
+```
+
+`ProjectSession` also exposes `list_profiles()`, `use_profile()`, `clear_active()`, `status()`, `history`, and `turns`. Foundation 3C history remains process-local; JSONL transcripts and resume are deferred to Foundation 3D.
 
 ## Foundation 3B: local multi-provider real-model path
 
@@ -143,7 +201,7 @@ uv run leonervis-code \
   prompt "Explain this workspace"
 ```
 
-Explicit provider namespaces win. Only registered bare `claude-*`, `gpt-*`, `grok-*`, `qwen-*`, and `kimi-*` families are inferred deterministically; an unknown bare model is never guessed from installed credentials. Route and adapter configuration contain no secret value. A key is read only when the factory constructs the selected SDK client. This slice does not read `.env`, persistent config, OAuth, or keyrings, and it does not implement streaming, automatic retries/backoff, fallback execution, live discovery, parallel tools, sessions, or persistence.
+Explicit provider namespaces win. Only registered bare `claude-*`, `gpt-*`, `grok-*`, `qwen-*`, and `kimi-*` families are inferred deterministically; an unknown bare model is never guessed from installed credentials. Route and adapter configuration contain no secret value. A key is read only when the factory constructs the selected SDK client. The runtime does not read `.env`, OAuth, or keyrings, and it does not implement streaming, automatic retries/backoff, fallback execution, live discovery, parallel tools, or disk-backed session resume.
 
 A real route can be previewed without constructing a client or accessing the network:
 
@@ -151,15 +209,17 @@ A real route can be previewed without constructing a client or accessing the net
 uv run leonervis-code --model openai/gpt-5 route
 ```
 
-The default fake paths remain unchanged:
+The fake fallback remains unchanged, but when a workspace/user active profile exists, `prompt` and the bare REPL use that real profile even without an explicit selector:
 
 ```bash
-uv run leonervis-code prompt "Hello"   # fake, no network
-uv run leonervis-code                   # fake REPL, no network
-uv run leonervis-code route             # Foundation 2B fake policy preview, no network
+uv run leonervis-code provider clear --scope project
+uv run leonervis-code provider clear --scope user
+uv run leonervis-code prompt "Hello"   # fake when no active profile exists; no network
+uv run leonervis-code                   # fake REPL when no active profile exists; no network
+uv run leonervis-code route             # Foundation 2B fake policy preview; no network
 ```
 
-See the [Foundation 3A Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md) and [Foundation 3B multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md). Run live smoke checks only when the user explicitly chooses their own credentials, endpoints, and API budget.
+See the [Foundation 3A Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), [Foundation 3B multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md), and [Foundation 3C named-profile/persistent-runtime decision](./docs/decisions/0009-foundation-3c-named-provider-profiles-and-runtime-manager.md). Run live smoke checks only when the user explicitly chooses their own credentials, endpoints, and API budget.
 
 ## Foundation 2B: offline adapter-owned compatibility policy
 
@@ -204,7 +264,7 @@ The default `ScriptedFakeProvider` retains the visible echo behavior and does no
 
 This state exists only in the current process and is not written to disk. It is not a session, transcript, resume mechanism, or long-term memory. The slice makes **no** real model API call, credential or environment-variable read, network request, Bash execution, write operation, approval decision, session write, or persistence. A bare `leonervis-code` invocation in a noninteractive terminal explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
 
-The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md), [the provider-neutral model-routing decision](./docs/decisions/0005-foundation-2a-provider-neutral-model-routing.md), [the adapter-owned compatibility-policy decision](./docs/decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md), [the non-streaming Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), and [the local multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md).
+The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md), [the provider-neutral model-routing decision](./docs/decisions/0005-foundation-2a-provider-neutral-model-routing.md), [the adapter-owned compatibility-policy decision](./docs/decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md), [the non-streaming Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), [the local multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md), and [the named-profile/persistent-runtime decision](./docs/decisions/0009-foundation-3c-named-provider-profiles-and-runtime-manager.md).
 
 ## Development and verification
 
@@ -242,12 +302,13 @@ The repository now includes:
 
 - a reproducible Python 3.12–3.13 and uv environment with `uv.lock`;
 - installable `leonervis-code` / `leonervis` entry points plus `python -m leonervis_code`;
-- the structured `UserMessage` / `AssistantText` / `ToolUse` / `ToolResult` contract, deterministic scripted fake provider, an `AgentLoop` with atomic in-memory causal history, one bounded `read_file` tool, the Foundation 2B offline route policy, and an explicit local multi-provider runtime covering Anthropic and the OpenAI-compatible provider family;
-- a local REPL with a colored startup mark, minimal controls, Tab completion, `/history`, and ordered process-local completed-turn history;
+- the structured `UserMessage` / `AssistantText` / `ToolUse` / `ToolResult` contract, deterministic scripted fake provider, an `AgentLoop` with atomic in-memory causal history, one bounded `read_file` tool, the Foundation 2B offline route policy, and a local multi-provider runtime covering Anthropic and the OpenAI-compatible family;
+- named provider profiles with no credential value, user/project active precedence, atomic between-turn client/model switching, and a public `ProjectSession` API for other modules;
+- a local real/fake REPL with a colored startup mark, Tab completion, `/history`, provider/status/model controls, and ordered process-local completed-turn history;
 - an automation-friendly end-to-end path through the `prompt` command; and
 - a minimal `pytest` and `ruff` quality toolchain.
 
-The next slice can design safe named provider profiles with configuration provenance on this verified multi-provider seam, or return to the local Harness path with additional read-only tools. Streaming, automatic retry/fallback, file writes, approvals, sessions, and controlled Bash each still need their own learning slice.
+The recommended next slice is Foundation 3D: add an append-only JSONL transcript, stable session identity, and resume on top of the verified `ProjectSession` and provider provenance while preserving tool causality as pairs. Streaming, automatic retry/fallback, file writes, approvals, and controlled Bash still require separate learning slices.
 
 MCP, plugins, remote/server forms, multi-agent coordination, RAG, and background work are not permanently ruled out. They will be introduced only after a concrete need, boundary design, and test plan exist.
 
@@ -258,8 +319,9 @@ src/leonervis_code/
   core/                 # neutral conversation/tool and model-orchestration contracts
   agent/                # AgentLoop with bounded causal history and tool decisions
   tools/                # workspace-confined read_file tool only for now
-  providers/            # deterministic fake provider plus offline route planning
-  cli/                  # command parsing, brand rendering, REPL, and terminal output
+  providers/            # adapters, route/factory, named profile store, and runtime manager
+  session.py            # ProjectSession facade for other project modules
+  cli/                  # command parsing, profile management, branding, REPL, and output
 tests/                  # unit, integration, security, and end-to-end tests will grow here
 docs/                   # architecture decisions, learning notes, and security design
 scripts/                # reproducible local/CI maintenance commands, added when needed

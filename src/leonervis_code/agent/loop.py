@@ -23,8 +23,12 @@ class ToolLoopLimitError(RuntimeError):
 class AgentLoop:
     """Maintain atomic in-memory turns across a bounded provider/tool loop."""
 
-    def __init__(self, provider: ConversationProvider, read_file: ReadFileTool) -> None:
-        """Store the provider, workspace-confined tool, and empty conversation state."""
+    def __init__(
+        self,
+        provider: ConversationProvider | None,
+        read_file: ReadFileTool,
+    ) -> None:
+        """Store an optional default provider, confined tool, and empty conversation state."""
         self._provider = provider
         self._read_file = read_file
         self._history: tuple[ConversationItem, ...] = ()
@@ -40,14 +44,22 @@ class AgentLoop:
         """Return completed user/final-assistant pairs for user-facing history display."""
         return self._turns
 
-    def run(self, prompt: str) -> str:
-        """Run one bounded tool loop and atomically commit its final text turn."""
+    def run(
+        self,
+        prompt: str,
+        *,
+        provider: ConversationProvider | None = None,
+    ) -> str:
+        """Run one bounded tool loop with one provider pinned for the full turn."""
+        turn_provider = provider or self._provider
+        if turn_provider is None:
+            raise RuntimeError("conversation provider is required for this turn")
         user = UserMessage(text=prompt)
         candidate: tuple[ConversationItem, ...] = self._history + (user,)
         tool_calls = 0
 
         while True:
-            response = self._provider.respond(candidate)
+            response = turn_provider.respond(candidate)
             if isinstance(response, AssistantText):
                 self._history = candidate + (response,)
                 self._turns += (ConversationTurn(user=user, assistant=response),)
@@ -62,7 +74,7 @@ class AgentLoop:
                         is_error=True,
                     ),
                 )
-                final_response = self._provider.respond(candidate)
+                final_response = turn_provider.respond(candidate)
                 if isinstance(final_response, AssistantText):
                     self._history = candidate + (final_response,)
                     self._turns += (ConversationTurn(user=user, assistant=final_response),)
