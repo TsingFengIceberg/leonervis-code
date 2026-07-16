@@ -38,6 +38,34 @@ def test_prompt_command_uses_its_cwd_as_the_read_file_workspace(monkeypatch, tmp
     assert workspaces == [tmp_path]
 
 
+def test_demo_read_visibly_executes_the_structured_tool_loop(tmp_path) -> None:
+    (tmp_path / "README.md").write_text("workspace proof\n", encoding="utf-8")
+    output = io.StringIO()
+
+    assert main(["demo-read", "README.md"], stdout=output, cwd=tmp_path) == 0
+
+    assert output.getvalue() == (
+        "[demo] provider requested read_file: README.md\n"
+        "[read_file] README.md\n"
+        "  ✓ 16 UTF-8 bytes returned\n"
+        "  preview: workspace proof\n"
+        "Demo final response: provider received the read_file result.\n"
+    )
+
+
+def test_demo_read_visibly_reports_workspace_failures(tmp_path) -> None:
+    output = io.StringIO()
+
+    assert main(["demo-read", "../outside.txt"], stdout=output, cwd=tmp_path) == 0
+
+    assert output.getvalue() == (
+        "[demo] provider requested read_file: ../outside.txt\n"
+        "[read_file] ../outside.txt\n"
+        "  ✗ read_file path escapes the workspace\n"
+        "Demo final response: provider received the read_file result.\n"
+    )
+
+
 def test_bare_command_launches_the_interactive_terminal(tmp_path) -> None:
     stdout = InteractiveStream()
 

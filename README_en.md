@@ -73,6 +73,18 @@ Ctrl-D / EOF       exit normally
 Ctrl-C             exit normally
 ```
 
+For a visible, deterministic Foundation 1B demonstration of the tool loop, run:
+
+```bash
+uv run leonervis-code demo-read README.md
+```
+
+This command visibly reports a scripted provider request, the workspace-confined `read_file` result, and the scripted final response. It is a verification aid, not a real model interface; it never writes files, executes commands, or accesses the network. Try a failure boundary with a path that escapes the workspace:
+
+```bash
+uv run leonervis-code demo-read ../outside.txt
+```
+
 For one prompt in scripts or automation, use the explicit subcommand:
 
 ```bash
@@ -108,7 +120,7 @@ A provider response is either final assistant text or one `read_file` request. T
 
 `read_file` accepts only a relative path whose resolved target remains in the current working directory, which is the workspace root for this slice. It rejects absolute paths, `..` or symlink escapes, missing paths, directories, unreadable files, and invalid UTF-8. It returns at most 32 KiB of UTF-8 text with a truncation marker. It cannot write, rename, delete, execute commands, search, or access the network.
 
-The default `ScriptedFakeProvider` retains the visible echo behavior and does not request tools by itself. Its scripted form provides deterministic proof of the tool cycle in tests. The `prompt` command remains one-shot; each newly launched REPL starts with empty history. Within one running REPL, `/history <count>` shows only completed user/final-assistant pairs, never internal tool data.
+The default `ScriptedFakeProvider` retains the visible echo behavior and does not request tools by itself. Its scripted form provides deterministic proof of the tool cycle in tests, while `demo-read <path>` exposes the same fixed scripted cycle for manual terminal verification. The `prompt` command remains one-shot; each newly launched REPL starts with empty history. Within one running REPL, `/history <count>` shows only completed user/final-assistant pairs, never internal tool data.
 
 This state exists only in the current process and is not written to disk. It is not a session, transcript, resume mechanism, or long-term memory. The slice makes **no** real model API call, credential or environment-variable read, network request, Bash execution, write operation, approval decision, session write, or persistence. A bare `leonervis-code` invocation in a noninteractive terminal explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
 
