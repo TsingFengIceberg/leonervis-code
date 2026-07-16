@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. It will incrementally build an understandable and verifiable Harness: a model makes decisions, the host executes controlled tools within explicit workspace and permission boundaries, and structured results return to the model.
 
-> **Current status: Foundation 1B's bounded `read_file` tool loop is complete.** Invoking the command with no subcommand opens a local interactive terminal, and later inputs in the same REPL process see prior completed user/assistant text pairs. The Harness can now represent one safe read-only file request and result structurally, but the default fake provider does not request tools, so this is not yet a runtime that can perform real agent tasks.
+> **Current status: Foundation 3B's local multi-provider runtime is complete.** Explicit `leonervis-code --model <SELECTOR> prompt ...` calls Anthropic Messages through the shared provider resolver/factory, or uses one OpenAI-compatible adapter for OpenAI, xAI, DashScope/Qwen/Kimi, Ollama/local, OpenRouter, and controlled custom endpoints. The default `prompt` without `--model`, bare REPL, and `demo-read` still use the deterministic fake provider and read no credential or network; both real SDK clients use `max_retries=0`.
 
 ## Project positioning
 
@@ -106,6 +106,86 @@ uv run leonervis-code --help
 uv run leonervis --version
 ```
 
+## Foundation 3B: local multi-provider real-model path
+
+With global `--model`, `prompt` resolves a real adapter through the shared resolver/factory:
+
+```bash
+export ANTHROPIC_API_KEY='...'
+uv run leonervis-code --model anthropic/claude-opus-4-8 prompt "Explain this workspace"
+
+export OPENAI_API_KEY='...'
+uv run leonervis-code --model openai/gpt-5 prompt "Explain this workspace"
+
+export XAI_API_KEY='...'
+uv run leonervis-code --model xai/grok-3 prompt "Explain this workspace"
+
+export DASHSCOPE_API_KEY='...'
+uv run leonervis-code --model dashscope/qwen-plus prompt "Explain this workspace"
+
+uv run leonervis-code --model ollama/qwen3:8b prompt "Explain this workspace"
+
+export OPENROUTER_API_KEY='...'
+uv run leonervis-code --model openrouter/anthropic/claude-opus-4-8 prompt "Explain this workspace"
+```
+
+The Anthropic path uses the official `anthropic` SDK. Every other built-in route reuses the official `openai` SDK through the Chat Completions wire adapter. Both clients are synchronous, non-streaming, and configured with `max_retries=0`. They declare only the current `read_file(path)` tool; local `ReadFileTool` continues to enforce workspace containment, UTF-8, the 32 KiB cap, and the per-turn tool budget.
+
+A one-shot controlled OpenAI-compatible endpoint can also be supplied without persisting a provider or key:
+
+```bash
+export VENDOR_API_KEY='...'
+uv run leonervis-code \
+  --model vendor/model \
+  --provider-protocol openai-compatible \
+  --base-url https://gateway.example/v1 \
+  --api-key-env VENDOR_API_KEY \
+  prompt "Explain this workspace"
+```
+
+Explicit provider namespaces win. Only registered bare `claude-*`, `gpt-*`, `grok-*`, `qwen-*`, and `kimi-*` families are inferred deterministically; an unknown bare model is never guessed from installed credentials. Route and adapter configuration contain no secret value. A key is read only when the factory constructs the selected SDK client. This slice does not read `.env`, persistent config, OAuth, or keyrings, and it does not implement streaming, automatic retries/backoff, fallback execution, live discovery, parallel tools, sessions, or persistence.
+
+A real route can be previewed without constructing a client or accessing the network:
+
+```bash
+uv run leonervis-code --model openai/gpt-5 route
+```
+
+The default fake paths remain unchanged:
+
+```bash
+uv run leonervis-code prompt "Hello"   # fake, no network
+uv run leonervis-code                   # fake REPL, no network
+uv run leonervis-code route             # Foundation 2B fake policy preview, no network
+```
+
+See the [Foundation 3A Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md) and [Foundation 3B multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md). Run live smoke checks only when the user explicitly chooses their own credentials, endpoints, and API budget.
+
+## Foundation 2B: offline adapter-owned compatibility policy
+
+`route` is a deterministic diagnostic surface for the control plane and adapter-policy boundary that a future real provider adapter will use:
+
+```bash
+uv run leonervis-code route
+# primary: fake-messages/alpha
+#   credential: configured
+#   canonical parameters: <none>
+#   native preview: <none>
+#   diagnostics: <none>
+
+uv run leonervis-code route --model beta --max-output-tokens 32 --fallback-model default
+# fake-chat previews max_output_tokens; fake-messages previews max_tokens
+
+uv run leonervis-code route --model beta --temperature 0.2
+# shows a visible fixed-sampling omission diagnostic
+```
+
+The route resolver owns **hard** admission rules: valid provider/model selection, enabled status, required tool-use/streaming capabilities, canonical option types/ranges, fallback validity, and Harness-owned field protection. A selected adapter owns provider-native wire names and documented **soft** compatibility behavior. The fake `beta` model demonstrates the distinction: its requested `temperature` is omitted as a known fixed-sampling incompatibility, and `route` reports that decision instead of silently changing the request or issuing a false hard error.
+
+Provider-specific extensions have a controlled API-level path only for now. They cannot override `model`, messages, tools, streaming, token-limit fields, or adapter-generated parameter fields. This mirrors the future security boundary; the command intentionally does not yet accept arbitrary JSON body overrides.
+
+The Foundation 2B subcommand form of `route` remains completely offline: it constructs no provider client, reads no environment variables, makes no network call, and reveals no credential reference/value. A global-`--model` `route` uses the Foundation 3B resolver to show the real provider, protocol, wire model, base-URL source, and `configured/missing/not required` status, while still constructing no client and sending no request. A successful preview is not proof that the remote provider will accept a request.
+
 ## Foundation 1B: deterministic bounded `read_file` tool loop
 
 The current REPL and `prompt` command now complete this minimal, testable path:
@@ -124,7 +204,7 @@ The default `ScriptedFakeProvider` retains the visible echo behavior and does no
 
 This state exists only in the current process and is not written to disk. It is not a session, transcript, resume mechanism, or long-term memory. The slice makes **no** real model API call, credential or environment-variable read, network request, Bash execution, write operation, approval decision, session write, or persistence. A bare `leonervis-code` invocation in a noninteractive terminal explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
 
-The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), and [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md).
+The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md), [the provider-neutral model-routing decision](./docs/decisions/0005-foundation-2a-provider-neutral-model-routing.md), [the adapter-owned compatibility-policy decision](./docs/decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md), [the non-streaming Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), and [the local multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md).
 
 ## Development and verification
 
@@ -162,12 +242,12 @@ The repository now includes:
 
 - a reproducible Python 3.12–3.13 and uv environment with `uv.lock`;
 - installable `leonervis-code` / `leonervis` entry points plus `python -m leonervis_code`;
-- the structured `UserMessage` / `AssistantText` / `ToolUse` / `ToolResult` contract, deterministic scripted fake provider, an `AgentLoop` with atomic in-memory causal history, and one bounded `read_file` tool;
+- the structured `UserMessage` / `AssistantText` / `ToolUse` / `ToolResult` contract, deterministic scripted fake provider, an `AgentLoop` with atomic in-memory causal history, one bounded `read_file` tool, the Foundation 2B offline route policy, and an explicit local multi-provider runtime covering Anthropic and the OpenAI-compatible provider family;
 - a local REPL with a colored startup mark, minimal controls, Tab completion, `/history`, and ordered process-local completed-turn history;
 - an automation-friendly end-to-end path through the `prompt` command; and
 - a minimal `pytest` and `ruff` quality toolchain.
 
-The next slice can introduce additional read-only workspace tools or a separately designed real provider adapter while retaining the structured causal chain established here. File writes, approvals, sessions, and controlled Bash each still need their own learning slice.
+The next slice can design safe named provider profiles with configuration provenance on this verified multi-provider seam, or return to the local Harness path with additional read-only tools. Streaming, automatic retry/fallback, file writes, approvals, sessions, and controlled Bash each still need their own learning slice.
 
 MCP, plugins, remote/server forms, multi-agent coordination, RAG, and background work are not permanently ruled out. They will be introduced only after a concrete need, boundary design, and test plan exist.
 
@@ -175,10 +255,10 @@ MCP, plugins, remote/server forms, multi-agent coordination, RAG, and background
 
 ```text
 src/leonervis_code/
-  core/                 # neutral structured conversation and tool contracts
+  core/                 # neutral conversation/tool and model-orchestration contracts
   agent/                # AgentLoop with bounded causal history and tool decisions
   tools/                # workspace-confined read_file tool only for now
-  providers/            # deterministic scripted fake provider only for now
+  providers/            # deterministic fake provider plus offline route planning
   cli/                  # command parsing, brand rendering, REPL, and terminal output
 tests/                  # unit, integration, security, and end-to-end tests will grow here
 docs/                   # architecture decisions, learning notes, and security design

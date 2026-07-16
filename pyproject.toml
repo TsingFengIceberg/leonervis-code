@@ -9,6 +9,10 @@ description = "A learning-first, local coding-agent CLI Harness prototype."
 readme = "README_en.md"
 requires-python = ">=3.12,<3.14"
 authors = [{ name = "Leonervis Code contributors" }]
+dependencies = [
+  "anthropic>=0.116.0",
+  "openai>=2.15.0",
+]
 keywords = ["agent", "cli", "coding-agent", "harness", "llm"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",

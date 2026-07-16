@@ -39,6 +39,34 @@ def test_module_entry_visibly_demonstrates_a_read_file_tool_loop(tmp_path) -> No
     assert result.stderr == ""
 
 
+def test_module_entry_renders_a_deterministic_offline_route_plan() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "leonervis_code",
+            "route",
+            "--model",
+            "beta",
+            "--max-output-tokens",
+            "32",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == (
+        "primary: fake-chat/beta/1\n"
+        "  credential: not configured\n"
+        "  canonical parameters: max_output_tokens=32\n"
+        "  native preview: max_output_tokens=32\n"
+        "  diagnostics: <none>\n"
+    )
+    assert result.stderr == ""
+
+
 def test_bare_module_entry_requires_an_interactive_terminal() -> None:
     result = subprocess.run(
         [sys.executable, "-m", "leonervis_code"],
