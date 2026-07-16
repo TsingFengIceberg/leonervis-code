@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. It will incrementally build an understandable and verifiable Harness: a model makes decisions, the host executes controlled tools within explicit workspace and permission boundaries, and structured results return to the model.
 
-> **Current status: Foundation 1A in-memory text history is complete.** Invoking the command with no subcommand opens a local interactive terminal. Later inputs in the same REPL process see prior completed user/assistant text pairs; this is not yet a runtime that can perform real agent tasks.
+> **Current status: Foundation 1B's bounded `read_file` tool loop is complete.** Invoking the command with no subcommand opens a local interactive terminal, and later inputs in the same REPL process see prior completed user/assistant text pairs. The Harness can now represent one safe read-only file request and result structurally, but the default fake provider does not request tools, so this is not yet a runtime that can perform real agent tasks.
 
 ## Project positioning
 
@@ -50,7 +50,7 @@ uv sync
 uv run leonervis-code
 ```
 
-The command shows a colored LEO mark, version, current directory, and Foundation 1A status before displaying:
+The command shows a colored LEO mark, version, current directory (the Foundation 1B workspace root), and Foundation 1B status before displaying:
 
 ```text
 leonervis>
@@ -94,21 +94,25 @@ uv run leonervis-code --help
 uv run leonervis --version
 ```
 
-## Foundation 1A: deterministic prompt, REPL, and in-memory history
+## Foundation 1B: deterministic bounded `read_file` tool loop
 
-The current REPL and `prompt` command complete only this minimal, testable path:
+The current REPL and `prompt` command now complete this minimal, testable path:
 
 ```text
-terminal input → AgentLoop (ordered in-memory history) → ScriptedFakeProvider → text output
+terminal input → AgentLoop (ordered in-memory causal context)
+  → ScriptedFakeProvider → optional read_file within the current workspace
+  → structured tool result → ScriptedFakeProvider → final text output
 ```
 
-Every nonblank input performs exactly one provider call and displays its returned text unchanged. Within one running REPL process, the loop retains ordered text history: the second provider call receives the first successful user/assistant pair plus the new user input. The `prompt` command remains one-shot and begins with empty history on every invocation; each newly launched REPL also begins empty.
+A provider response is either final assistant text or one `read_file` request. The loop returns final text only after the provider finishes, and commits the whole attempted turn—user input, any tool request/result, and final assistant text—only after that success. Each user turn permits at most three file reads; a further request receives a structured limit error, and another tool request after it stops deterministically.
 
-This history exists only in the current process. The REPL can display complete turns through `/history <count>`, but it is not written to disk and is not a session, transcript, resume mechanism, or long-term memory.
+`read_file` accepts only a relative path whose resolved target remains in the current working directory, which is the workspace root for this slice. It rejects absolute paths, `..` or symlink escapes, missing paths, directories, unreadable files, and invalid UTF-8. It returns at most 32 KiB of UTF-8 text with a truncation marker. It cannot write, rename, delete, execute commands, search, or access the network.
 
-This slice makes **no** model API call, credential or environment-variable read, network request, filesystem/tool action, session write, or workspace access. It has no real model, approval, or persistence. A bare `leonervis-code` invocation in a noninteractive terminal explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
+The default `ScriptedFakeProvider` retains the visible echo behavior and does not request tools by itself. Its scripted form provides deterministic proof of the tool cycle in tests. The `prompt` command remains one-shot; each newly launched REPL starts with empty history. Within one running REPL, `/history <count>` shows only completed user/final-assistant pairs, never internal tool data.
 
-The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md) and [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md).
+This state exists only in the current process and is not written to disk. It is not a session, transcript, resume mechanism, or long-term memory. The slice makes **no** real model API call, credential or environment-variable read, network request, Bash execution, write operation, approval decision, session write, or persistence. A bare `leonervis-code` invocation in a noninteractive terminal explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
+
+The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), and [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md).
 
 ## Development and verification
 
@@ -146,12 +150,12 @@ The repository now includes:
 
 - a reproducible Python 3.12–3.13 and uv environment with `uv.lock`;
 - installable `leonervis-code` / `leonervis` entry points plus `python -m leonervis_code`;
-- the `TextMessage` / `ConversationProvider` contract, deterministic scripted fake provider, and an `AgentLoop` with in-memory history;
-- a local REPL with a colored startup mark, minimal controls, Tab completion, and ordered process-local text history;
+- the structured `UserMessage` / `AssistantText` / `ToolUse` / `ToolResult` contract, deterministic scripted fake provider, an `AgentLoop` with atomic in-memory causal history, and one bounded `read_file` tool;
+- a local REPL with a colored startup mark, minimal controls, Tab completion, `/history`, and ordered process-local completed-turn history;
 - an automation-friendly end-to-end path through the `prompt` command; and
 - a minimal `pytest` and `ruff` quality toolchain.
 
-The next slice can introduce richer assistant-content contracts and a bounded tool loop while retaining the text causal chain established here. Real model integration, file tools, write approvals, sessions, and controlled Bash each still need their own learning slice.
+The next slice can introduce additional read-only workspace tools or a separately designed real provider adapter while retaining the structured causal chain established here. File writes, approvals, sessions, and controlled Bash each still need their own learning slice.
 
 MCP, plugins, remote/server forms, multi-agent coordination, RAG, and background work are not permanently ruled out. They will be introduced only after a concrete need, boundary design, and test plan exist.
 
@@ -159,8 +163,9 @@ MCP, plugins, remote/server forms, multi-agent coordination, RAG, and background
 
 ```text
 src/leonervis_code/
-  core/                 # neutral text contracts: TextMessage and ConversationProvider
-  agent/                # AgentLoop with ordered in-memory text history
+  core/                 # neutral structured conversation and tool contracts
+  agent/                # AgentLoop with bounded causal history and tool decisions
+  tools/                # workspace-confined read_file tool only for now
   providers/            # deterministic scripted fake provider only for now
   cli/                  # command parsing, brand rendering, REPL, and terminal output
 tests/                  # unit, integration, security, and end-to-end tests will grow here

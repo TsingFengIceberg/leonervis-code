@@ -9,7 +9,7 @@ from typing import TextIO
 
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.brand import render_banner
-from leonervis_code.core.contracts import TextMessage
+from leonervis_code.core.contracts import ConversationTurn
 
 PROMPT = "leonervis> "
 HELP_TEXT = "Commands: /help, /history <count>, /exit, /quit. Ctrl-D or Ctrl-C exits."
@@ -55,13 +55,13 @@ def parse_history_count(command: str) -> int | None:
     return count if count > 0 else None
 
 
-def render_recent_history(history: tuple[TextMessage, ...], count: int) -> str:
+def render_recent_history(turns: tuple[ConversationTurn, ...], count: int) -> str:
     """Render the most recent complete conversation turns in chronological order."""
-    turns = [history[index : index + 2] for index in range(0, len(history), 2)][-count:]
-    if not turns:
+    recent_turns = turns[-count:]
+    if not recent_turns:
         return "No conversation turns yet."
     return "\n\n".join(
-        f"User: {user.text}\nAssistant: {assistant.text}" for user, assistant in turns
+        f"User: {turn.user.text}\nAssistant: {turn.assistant.text}" for turn in recent_turns
     )
 
 
@@ -104,7 +104,7 @@ def run_repl(
             if count is None:
                 stdout.write("Usage: /history <positive integer>\n")
             else:
-                stdout.write(f"{render_recent_history(loop.history, count)}\n")
+                stdout.write(f"{render_recent_history(loop.turns, count)}\n")
             stdout.flush()
             continue
         if prompt.startswith("/"):

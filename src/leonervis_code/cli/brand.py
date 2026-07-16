@@ -58,11 +58,11 @@ def display_path(path: Path) -> str:
 
 
 def render_banner(*, version: str, cwd: Path, color: bool) -> str:
-    """Render the compact Foundation 0 terminal banner."""
+    """Render the compact Foundation 1B terminal banner."""
     mark = render_mark(color=color)
     details = (
         f"LEONERVIS CODE v{version}",
-        "Foundation 1A · in-memory text history",
+        "Foundation 1B · bounded read_file tool loop",
         display_path(cwd),
     )
     lines = [f"  {mark[row]}    {details[row]}".rstrip() for row in range(len(details))]

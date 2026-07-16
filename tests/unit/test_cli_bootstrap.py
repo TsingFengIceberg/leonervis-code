@@ -25,6 +25,19 @@ def test_prompt_command_runs_the_deterministic_foundation_loop(capsys) -> None:
     assert captured.err == ""
 
 
+def test_prompt_command_uses_its_cwd_as_the_read_file_workspace(monkeypatch, tmp_path) -> None:
+    workspaces = []
+
+    class RecordingReadFileTool:
+        def __init__(self, workspace) -> None:
+            workspaces.append(workspace)
+
+    monkeypatch.setattr("leonervis_code.cli.main.ReadFileTool", RecordingReadFileTool)
+
+    assert main(["prompt", "Hello"], cwd=tmp_path) == 0
+    assert workspaces == [tmp_path]
+
+
 def test_bare_command_launches_the_interactive_terminal(tmp_path) -> None:
     stdout = InteractiveStream()
 

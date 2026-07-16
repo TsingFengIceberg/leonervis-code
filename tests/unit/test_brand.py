@@ -36,7 +36,7 @@ def test_banner_has_version_status_and_display_path(tmp_path) -> None:
     banner = render_banner(version="0.1.0", cwd=tmp_path, color=False)
 
     assert "LEONERVIS CODE v0.1.0" in banner
-    assert "Foundation 1A · in-memory text history" in banner
+    assert "Foundation 1B · bounded read_file tool loop" in banner
     assert str(tmp_path) in banner
     assert "\x1b[" not in banner
 

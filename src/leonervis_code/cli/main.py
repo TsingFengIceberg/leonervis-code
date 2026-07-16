@@ -1,4 +1,4 @@
-"""Command-line interface for the deterministic Foundation 0 slices."""
+"""Command-line interface for the deterministic Foundation 1B slices."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.brand import color_enabled
 from leonervis_code.cli.repl import run_repl
 from leonervis_code.providers.fake import ScriptedFakeProvider
+from leonervis_code.tools.read_file import ReadFileTool
 
 
 def nonblank_prompt(value: str) -> str:
@@ -23,7 +24,7 @@ def nonblank_prompt(value: str) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Create the small CLI surface available in Foundation 0."""
+    """Create the small CLI surface available in Foundation 1B."""
     parser = argparse.ArgumentParser(
         prog="leonervis-code",
         description="Leonervis Code: a learning-first local coding-agent CLI prototype.",
@@ -45,7 +46,8 @@ def main(
 ) -> int:
     """Run a one-shot prompt command or launch the interactive terminal surface."""
     arguments = build_parser().parse_args(argv)
-    loop = AgentLoop(ScriptedFakeProvider())
+    workspace = cwd or Path.cwd()
+    loop = AgentLoop(ScriptedFakeProvider(), ReadFileTool(workspace))
     if arguments.command == "prompt":
         print(loop.run(arguments.prompt))
         return 0
@@ -64,6 +66,6 @@ def main(
         stdin=input_stream,
         stdout=output_stream,
         version=__version__,
-        cwd=cwd or Path.cwd(),
+        cwd=workspace,
         color=color_enabled(output_stream),
     )

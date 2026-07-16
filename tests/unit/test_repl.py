@@ -11,8 +11,9 @@ from leonervis_code.cli.repl import (
     render_recent_history,
     run_repl,
 )
-from leonervis_code.core.contracts import TextMessage
+from leonervis_code.core.contracts import AssistantText, ConversationTurn, ToolUse, UserMessage
 from leonervis_code.providers.fake import ScriptedFakeProvider
+from leonervis_code.tools.read_file import ReadFileTool
 
 
 class RecordingLoop:
@@ -60,16 +61,13 @@ def test_parse_history_count_accepts_positive_integer_only() -> None:
 
 
 def test_render_recent_history_shows_complete_turns_in_chronological_order() -> None:
-    history = (
-        TextMessage(role="user", text="first prompt"),
-        TextMessage(role="assistant", text="first reply"),
-        TextMessage(role="user", text="second prompt"),
-        TextMessage(role="assistant", text="second reply"),
-        TextMessage(role="user", text="third prompt"),
-        TextMessage(role="assistant", text="third reply"),
+    turns = (
+        ConversationTurn(UserMessage("first prompt"), AssistantText("first reply")),
+        ConversationTurn(UserMessage("second prompt"), AssistantText("second reply")),
+        ConversationTurn(UserMessage("third prompt"), AssistantText("third reply")),
     )
 
-    assert render_recent_history(history, 2) == (
+    assert render_recent_history(turns, 2) == (
         "User: second prompt\nAssistant: second reply\n\nUser: third prompt\nAssistant: third reply"
     )
     assert render_recent_history((), 2) == "No conversation turns yet."
@@ -96,25 +94,34 @@ def test_repl_routes_each_nonblank_prompt_and_prints_banner(tmp_path) -> None:
     assert "reply: World\n" in rendered
 
 
-def test_repl_displays_recent_history_without_creating_a_turn(tmp_path) -> None:
-    provider = ScriptedFakeProvider(["first reply", "second reply", "third reply"])
-    loop = AgentLoop(provider)
+def test_repl_displays_only_completed_turns_without_creating_a_turn(tmp_path) -> None:
+    (tmp_path / "README.md").write_text("contents", encoding="utf-8")
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse(tool_use_id="read-1", name="read_file", path="README.md"),
+            AssistantText(text="first reply"),
+            AssistantText(text="second reply"),
+        ]
+    )
+    loop = AgentLoop(provider, ReadFileTool(tmp_path))
     output = io.StringIO()
 
     run_repl(
         loop,
-        stdin=io.StringIO("first prompt\nsecond prompt\nthird prompt\n/history 2\n/exit\n"),
+        stdin=io.StringIO("first prompt\nsecond prompt\n/history 2\n/exit\n"),
         stdout=output,
         version="0.1.0",
         cwd=tmp_path,
         color=False,
     )
 
-    assert output.getvalue().count("User: second prompt\nAssistant: second reply") == 1
-    assert output.getvalue().count("User: third prompt\nAssistant: third reply") == 1
-    assert "User: first prompt\nAssistant: first reply" not in output.getvalue()
+    rendered = output.getvalue()
+    assert "User: first prompt\nAssistant: first reply" in rendered
+    assert "User: second prompt\nAssistant: second reply" in rendered
+    assert "README.md" not in rendered
+    assert "contents" not in rendered
     assert len(provider.received_histories) == 3
-    assert len(loop.history) == 6
+    assert len(loop.turns) == 2
 
 
 def test_repl_rejects_invalid_history_commands_without_creating_a_turn(tmp_path) -> None:
@@ -135,11 +142,11 @@ def test_repl_rejects_invalid_history_commands_without_creating_a_turn(tmp_path)
 
 
 def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
-    provider = ScriptedFakeProvider(["first reply", "second reply"])
+    provider = ScriptedFakeProvider([AssistantText("first reply"), AssistantText("second reply")])
     output = io.StringIO()
 
     run_repl(
-        AgentLoop(provider),
+        AgentLoop(provider, ReadFileTool(tmp_path)),
         stdin=io.StringIO("first prompt\nsecond prompt\n/exit\n"),
         stdout=output,
         version="0.1.0",
@@ -148,9 +155,9 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
     )
 
     assert provider.received_histories[1] == (
-        TextMessage(role="user", text="first prompt"),
-        TextMessage(role="assistant", text="first reply"),
-        TextMessage(role="user", text="second prompt"),
+        UserMessage(text="first prompt"),
+        AssistantText(text="first reply"),
+        UserMessage(text="second prompt"),
     )
 
     loop = RecordingLoop()
