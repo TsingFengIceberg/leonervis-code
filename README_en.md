@@ -50,11 +50,15 @@ uv sync
 uv run leonervis-code
 ```
 
-The command shows a colored LEO mark, version, current workspace, redacted runtime status, stable Session ID, transcript path, and auto-save state before displaying:
+The command shows a colored LEO mark, version, current workspace, redacted runtime status, stable Session ID, transcript path, and auto-save state before displaying a dynamic prompt:
 
 ```text
-leonervis>
+leonervis[3fe4bb27|fake]>
+leonervis[3fe4bb27|deepseek-test]>
+leonervis[3fe4bb27|direct:openai]>
 ```
+
+The first bracketed field is the first eight characters of the current Session UUID and is only a visual cue. The second is current runtime identity: a named profile, `direct:<provider>`, or `fake`. Model, workspace, and turn count stay out of the prompt; use `/status`, `/provider current`, and `/session show` for complete details. Dynamic fields are projected to terminal-safe text and truncated to a fixed width, and the short ID is not accepted as a Session selector.
 
 Enter any nonblank text for a deterministic result:
 
@@ -63,7 +67,7 @@ leonervis> Explain the Harness boundary
 Fake response: Explain the Harness boundary
 ```
 
-The REPL provides durable history, Session controls, and provider-runtime controls:
+The REPL provides durable history, Session controls, and provider-runtime controls. Enter `/session` or `/provider` for focused group help:
 
 ```text
 /help                         show controls
@@ -80,6 +84,8 @@ The REPL provides durable history, Session controls, and provider-runtime contro
 /exit or /quit                exit normally
 Ctrl-D / EOF / Ctrl-C         exit normally
 ```
+
+Terminal semantics use traditional colors: green for success, yellow for usage, warnings, or fake/offline state, red for failures, and blue for ordinary information plus real-runtime/Session context. Final model responses remain unstyled. Colors are enabled only on a TTY and can be disabled completely with `NO_COLOR=1`.
 
 For a visible, deterministic Foundation 1B demonstration of the tool loop, run:
 
@@ -307,7 +313,7 @@ The default `ScriptedFakeProvider` retains the visible echo behavior and does no
 
 Foundation 1B originally proved only process-local atomic history; Foundation 3D now persists each complete turn to workspace JSONL. A bare `leonervis-code` invocation in a noninteractive terminal still explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
 
-The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md), [the provider-neutral model-routing decision](./docs/decisions/0005-foundation-2a-provider-neutral-model-routing.md), [the adapter-owned compatibility-policy decision](./docs/decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md), [the non-streaming Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), [the local multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md), [the named-profile/persistent-runtime decision](./docs/decisions/0009-foundation-3c-named-provider-profiles-and-runtime-manager.md), and [the stable-profile/durable-Session decision](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md).
+The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md), [the provider-neutral model-routing decision](./docs/decisions/0005-foundation-2a-provider-neutral-model-routing.md), [the adapter-owned compatibility-policy decision](./docs/decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md), [the non-streaming Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), [the local multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md), [the named-profile/persistent-runtime decision](./docs/decisions/0009-foundation-3c-named-provider-profiles-and-runtime-manager.md), [the stable-profile/durable-Session decision](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md), and [the decoupled REPL-presentation/slash-dispatch decision](./docs/decisions/0011-decoupled-repl-presentation-and-slash-dispatch.md).
 
 ## Development and verification
 

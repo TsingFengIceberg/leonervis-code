@@ -41,6 +41,18 @@ def test_banner_has_version_status_and_display_path(tmp_path) -> None:
     assert "\x1b[" not in banner
 
 
+class InteractiveStream(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_color_respects_injected_environment() -> None:
+    color_enabled = __import__("leonervis_code.cli.brand", fromlist=["color_enabled"]).color_enabled
+
+    assert color_enabled(InteractiveStream(), {})
+    assert not color_enabled(InteractiveStream(), {"NO_COLOR": "1"})
+
+
 def test_color_is_disabled_for_noninteractive_output(monkeypatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
 

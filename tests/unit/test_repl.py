@@ -4,12 +4,11 @@ import io
 from pathlib import Path
 
 from leonervis_code.agent.loop import AgentLoop
+from leonervis_code.cli.presentation import render_recent_history, render_session_summary
 from leonervis_code.cli.repl import (
     complete_command,
     parse_history_count,
     read_prompt,
-    render_recent_history,
-    render_session_summary,
     run_repl,
 )
 from leonervis_code.core.contracts import AssistantText, ConversationTurn, ToolUse, UserMessage
@@ -209,9 +208,7 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
 
     rendered = output.getvalue()
     assert loop.prompts == []
-    assert (
-        "Commands: /help, /history <count>, /session show, /session list, /session new" in rendered
-    )
+    assert "Commands: /help, /history <count>, /session, /provider" in rendered
     assert "Unknown command: /unknown. Type /help for controls." in rendered
 
 
@@ -298,9 +295,11 @@ def test_invalid_prefix_commands_are_not_treated_as_switches(tmp_path) -> None:
         color=False,
     )
 
+    rendered = output.getvalue()
     assert loop.prompts == []
-    assert "Unknown command: /modelx gpt-5" in output.getvalue()
-    assert "Unknown command: /provider usex one" in output.getvalue()
+    assert "Unknown command: /modelx gpt-5" in rendered
+    assert "Unknown provider command: usex" in rendered
+    assert "Usage: /provider <list|current|use>" in rendered
 
 
 def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -> None:

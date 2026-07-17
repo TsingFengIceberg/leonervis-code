@@ -12,7 +12,8 @@ from typing import TextIO
 from leonervis_code import ProjectSession, __version__
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.brand import color_enabled
-from leonervis_code.cli.repl import render_session_summary, run_repl
+from leonervis_code.cli.presentation import render_session_summary
+from leonervis_code.cli.repl import run_repl
 from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse
 from leonervis_code.core.orchestration import (
     GenerationOptions,
@@ -614,7 +615,7 @@ def main(
                 stdout=output,
                 version=__version__,
                 cwd=workspace,
-                color=color_enabled(output),
+                color=color_enabled(output, env),
             )
         finally:
             session.close()

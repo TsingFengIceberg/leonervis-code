@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import os
 from pathlib import Path
 from typing import TextIO
@@ -17,9 +18,10 @@ E_GLYPH = ("█████", "█    ", "█████", "█    ", "██�
 O_GLYPH = (" ███ ", "█   █", "█   █", "█   █", " ███ ")
 
 
-def color_enabled(stream: TextIO) -> bool:
+def color_enabled(stream: TextIO, environment: Mapping[str, str] | None = None) -> bool:
     """Return whether terminal color should be emitted for ``stream``."""
-    return stream.isatty() and "NO_COLOR" not in os.environ
+    env = os.environ if environment is None else environment
+    return stream.isatty() and "NO_COLOR" not in env
 
 
 def rgb(red: int, green: int, blue: int) -> str:
