@@ -1,11 +1,14 @@
-"""Validated non-secret named provider profiles for the local runtime."""
+"""Validated non-secret provider profile inputs and store-owned identities."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+import hashlib
+import json
 import math
 import re
-from collections.abc import Mapping
+from uuid import UUID, uuid4, uuid5
 
 from leonervis_code.core.orchestration import OrchestrationError
 from leonervis_code.providers.definitions import BUILTIN_PROVIDERS, WireProtocol
@@ -19,7 +22,8 @@ _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 MAX_MODEL_LENGTH = 512
 MAX_BASE_URL_LENGTH = 2048
 MAX_ENVIRONMENT_NAME_LENGTH = 128
-_PROFILE_FIELDS = {
+LEGACY_PROFILE_NAMESPACE = UUID("0f18e3f0-ef73-5a77-9f6c-b4e7f75fca2a")
+_PROFILE_SPEC_FIELDS = {
     "name",
     "provider_id",
     "protocol",
@@ -29,6 +33,7 @@ _PROFILE_FIELDS = {
     "max_output_tokens",
     "temperature",
 }
+_PROFILE_IDENTITY_FIELDS = {"profile_id", "revision"}
 _REQUIRED_PROFILE_FIELDS = {"name", "provider_id", "protocol", "model"}
 
 
@@ -37,8 +42,8 @@ class ProviderProfileError(OrchestrationError):
 
 
 @dataclass(frozen=True)
-class NamedProviderProfile:
-    """One reusable endpoint/model profile that never contains a credential value."""
+class ProviderProfileSpec:
+    """Validated configuration input that contains no persistent store identity."""
 
     name: str
     provider_id: str
@@ -116,7 +121,7 @@ class NamedProviderProfile:
             object.__setattr__(self, "temperature", float(self.temperature))
 
     def to_dict(self) -> dict[str, object]:
-        """Return the complete version-independent JSON representation."""
+        """Return the complete version-independent configuration representation."""
         return {
             "name": self.name,
             "provider_id": self.provider_id,
@@ -128,51 +133,145 @@ class NamedProviderProfile:
             "temperature": self.temperature,
         }
 
+    def fingerprint(self) -> str:
+        """Return a canonical SHA-256 over routing-relevant profile configuration."""
+        return profile_fingerprint(self)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> ProviderProfileSpec:
+        """Decode one closed configuration object without assigning store identity."""
+        values = _decode_profile_mapping(value, allow_identity=False)
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class NamedProviderProfile(ProviderProfileSpec):
+    """A store-owned profile with stable canonical UUID identity and revision."""
+
+    profile_id: str = field(default_factory=lambda: str(uuid4()))
+    revision: int = 1
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _validate_profile_id(self.profile_id)
+        if type(self.revision) is not int or self.revision < 1:
+            raise ProviderProfileError("profile revision must be a positive integer")
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the schema-v2 JSON representation, including store identity."""
+        return {
+            "profile_id": self.profile_id,
+            "revision": self.revision,
+            **super().to_dict(),
+        }
+
+    def to_spec(self) -> ProviderProfileSpec:
+        """Drop persistent identity while preserving validated configuration."""
+        return ProviderProfileSpec(
+            name=self.name,
+            provider_id=self.provider_id,
+            protocol=self.protocol,
+            model=self.model,
+            base_url=self.base_url,
+            api_key_env=self.api_key_env,
+            max_output_tokens=self.max_output_tokens,
+            temperature=self.temperature,
+        )
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> NamedProviderProfile:
-        """Decode one closed profile object and reject unknown or missing fields."""
-        if not isinstance(value, Mapping):
-            raise ProviderProfileError("profile entry must be a JSON object")
-        fields = set(value)
-        unknown = fields - _PROFILE_FIELDS
-        if unknown:
-            raise ProviderProfileError(f"profile contains unknown field: {sorted(unknown)[0]}")
-        missing = _REQUIRED_PROFILE_FIELDS - fields
-        if missing:
-            raise ProviderProfileError(f"profile is missing required field: {sorted(missing)[0]}")
+        """Decode a closed v2 object; omitted identity remains construction-compatible."""
+        values = _decode_profile_mapping(value, allow_identity=True)
+        return cls(**values)
 
-        protocol_value = value["protocol"]
-        if not isinstance(protocol_value, str):
-            raise ProviderProfileError("profile protocol must be text")
-        try:
-            protocol = WireProtocol(protocol_value)
-        except ValueError:
-            raise ProviderProfileError(f"unsupported profile protocol: {protocol_value}") from None
 
-        name = value["name"]
-        provider_id = value["provider_id"]
-        model = value["model"]
-        base_url = value.get("base_url")
-        api_key_env = value.get("api_key_env")
-        max_output_tokens = value.get("max_output_tokens", 1024)
-        temperature = value.get("temperature")
-        if not isinstance(name, str):
-            raise ProviderProfileError("profile name must be text")
-        if not isinstance(provider_id, str):
-            raise ProviderProfileError("profile provider ID must be text")
-        if not isinstance(model, str):
-            raise ProviderProfileError("profile model must be text")
-        if base_url is not None and not isinstance(base_url, str):
-            raise ProviderProfileError("profile base URL must be text or null")
-        if api_key_env is not None and not isinstance(api_key_env, str):
-            raise ProviderProfileError("profile API key environment variable must be text or null")
-        return cls(
-            name=name,
-            provider_id=provider_id,
-            protocol=protocol,
-            model=model,
-            base_url=base_url,
-            api_key_env=api_key_env,
-            max_output_tokens=max_output_tokens,  # type: ignore[arg-type]
-            temperature=temperature,  # type: ignore[arg-type]
-        )
+def legacy_profile_id(name: str) -> str:
+    """Map one exact, case-sensitive schema-v1 name to its stable UUIDv5 identity."""
+    if not isinstance(name, str):
+        raise ProviderProfileError("legacy profile name must be text")
+    return str(uuid5(LEGACY_PROFILE_NAMESPACE, name))
+
+
+def profile_fingerprint(profile: ProviderProfileSpec) -> str:
+    """Hash normalized profile configuration without name, identity, or credential state."""
+    payload = {
+        "fingerprint_version": 1,
+        "provider_id": profile.provider_id,
+        "protocol": profile.protocol.value,
+        "model": profile.model,
+        "base_url": profile.base_url,
+        "api_key_env": profile.api_key_env,
+        "max_output_tokens": profile.max_output_tokens,
+        "temperature": profile.temperature,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _decode_profile_mapping(
+    value: Mapping[str, object], *, allow_identity: bool
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ProviderProfileError("profile entry must be a JSON object")
+    allowed = _PROFILE_SPEC_FIELDS | (_PROFILE_IDENTITY_FIELDS if allow_identity else set())
+    fields = set(value)
+    unknown = fields - allowed
+    if unknown:
+        raise ProviderProfileError(f"profile contains unknown field: {sorted(unknown)[0]}")
+    missing = _REQUIRED_PROFILE_FIELDS - fields
+    if missing:
+        raise ProviderProfileError(f"profile is missing required field: {sorted(missing)[0]}")
+
+    protocol_value = value["protocol"]
+    if not isinstance(protocol_value, str):
+        raise ProviderProfileError("profile protocol must be text")
+    try:
+        protocol = WireProtocol(protocol_value)
+    except ValueError:
+        raise ProviderProfileError(f"unsupported profile protocol: {protocol_value}") from None
+
+    name = value["name"]
+    provider_id = value["provider_id"]
+    model = value["model"]
+    base_url = value.get("base_url")
+    api_key_env = value.get("api_key_env")
+    if not isinstance(name, str):
+        raise ProviderProfileError("profile name must be text")
+    if not isinstance(provider_id, str):
+        raise ProviderProfileError("profile provider ID must be text")
+    if not isinstance(model, str):
+        raise ProviderProfileError("profile model must be text")
+    if base_url is not None and not isinstance(base_url, str):
+        raise ProviderProfileError("profile base URL must be text or null")
+    if api_key_env is not None and not isinstance(api_key_env, str):
+        raise ProviderProfileError("profile API key environment variable must be text or null")
+
+    values: dict[str, object] = {
+        "name": name,
+        "provider_id": provider_id,
+        "protocol": protocol,
+        "model": model,
+        "base_url": base_url,
+        "api_key_env": api_key_env,
+        "max_output_tokens": value.get("max_output_tokens", 1024),
+        "temperature": value.get("temperature"),
+    }
+    if allow_identity:
+        if "profile_id" in value:
+            values["profile_id"] = value["profile_id"]
+        if "revision" in value:
+            values["revision"] = value["revision"]
+    return values
+
+
+def _validate_profile_id(value: object) -> None:
+    if not isinstance(value, str):
+        raise ProviderProfileError("profile ID must be a canonical UUID string")
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise ProviderProfileError("profile ID must be a canonical UUID string") from None
+    if str(parsed) != value:
+        raise ProviderProfileError("profile ID must be a canonical UUID string")

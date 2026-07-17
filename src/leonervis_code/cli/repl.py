@@ -16,9 +16,10 @@ from leonervis_code.providers.resolver import RuntimeRouteError
 
 PROMPT = "leonervis> "
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /exit, /quit. "
-    "Provider controls: /status, /provider list, /provider current, "
-    "/provider use <name>, /model <model>. Ctrl-D or Ctrl-C exits."
+    "Commands: /help, /history <count>, /session show, /session list, "
+    "/resume <latest|id>, /exit, /quit. Provider controls: /status, "
+    "/provider list, /provider current, /provider use <name>, /model <model>. "
+    "Ctrl-D or Ctrl-C exits."
 )
 COMMANDS = (
     "/help",
@@ -28,6 +29,8 @@ COMMANDS = (
     "/status",
     "/provider",
     "/model",
+    "/session",
+    "/resume",
 )
 
 
@@ -97,6 +100,16 @@ def render_runtime_status(status: RuntimeStatus) -> str:
     )
 
 
+def render_session_info(info) -> str:
+    """Render one durable Session without exposing transcript contents."""
+    return (
+        f"Session: {info.session_id}\n"
+        f"Transcript: {info.path}\n"
+        f"Turns: {info.turn_count}\n"
+        f"Created: {info.created_at}"
+    )
+
+
 def run_repl(
     session: object,
     *,
@@ -112,6 +125,9 @@ def run_repl(
     status_method = getattr(session, "status", None)
     if callable(status_method):
         stdout.write(f"\n{render_runtime_status(status_method())}\n")
+    session_info_method = getattr(session, "session_info", None)
+    if callable(session_info_method):
+        stdout.write(f"\n{render_session_info(session_info_method())}\nAuto-save: enabled\n")
     stdout.write("\n")
     stdout.flush()
 
@@ -141,6 +157,49 @@ def run_repl(
                 stdout.write("Usage: /history <positive integer>\n")
             else:
                 stdout.write(f"{render_recent_history(getattr(session, 'turns'), count)}\n")
+            stdout.flush()
+            continue
+        if prompt == "/session show":
+            if not callable(session_info_method):
+                stdout.write("Durable session information is unavailable.\n")
+            else:
+                stdout.write(f"{render_session_info(session_info_method())}\n")
+            stdout.flush()
+            continue
+        if prompt == "/session list":
+            list_sessions = getattr(session, "list_sessions", None)
+            if not callable(list_sessions):
+                stdout.write("Durable sessions are unavailable.\n")
+            else:
+                sessions = list_sessions()
+                if not sessions:
+                    stdout.write("No durable sessions found.\n")
+                for info in sessions:
+                    marker = (
+                        " *"
+                        if callable(session_info_method)
+                        and info.session_id == session_info_method().session_id
+                        else ""
+                    )
+                    stdout.write(f"{info.session_id}{marker}: {info.turn_count} turns\n")
+            stdout.flush()
+            continue
+        if prompt == "/resume" or prompt.startswith("/resume "):
+            parts = prompt.split(maxsplit=1)
+            if len(parts) != 2 or not parts[1].strip():
+                stdout.write("Usage: /resume <latest|session-id>\n")
+            else:
+                switch = getattr(session, "switch_session", None)
+                if not callable(switch):
+                    stdout.write("Session switching is unavailable.\n")
+                else:
+                    try:
+                        info = switch(parts[1].strip())
+                        stdout.write(
+                            f"Resumed session {info.session_id}; runtime provider unchanged.\n"
+                        )
+                    except Exception as error:
+                        stdout.write(f"Session resume failed: {_safe_error(error)}\n")
             stdout.flush()
             continue
         if prompt == "/status":

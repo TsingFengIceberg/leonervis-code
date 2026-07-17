@@ -7,6 +7,7 @@ import pytest
 from leonervis_code import __version__
 from leonervis_code.cli.main import main
 from leonervis_code.core.contracts import AssistantText
+from leonervis_code.providers.profile_store import ProviderProfileStore
 
 
 class InteractiveStream(io.StringIO):
@@ -441,10 +442,95 @@ def test_profile_model_override_is_runtime_only_and_profile_output_is_redacted(t
         == 0
     )
     rendered = output.getvalue()
+    assert "profile ID:" in rendered
+    assert "revision: 1" in rendered
     assert "model: default-model" in rendered
     assert "credential: configured" in rendered
     assert "VENDOR_KEY" not in rendered
     assert "secret-must-not-render" not in rendered
+
+
+def test_profile_identity_cli_supports_rename_replace_ids_and_migrate(tmp_path) -> None:
+    user_path = tmp_path / "providers.json"
+    project_path = tmp_path / "project.json"
+    common = {
+        "cwd": tmp_path,
+        "environment": {},
+        "user_profile_path": user_path,
+        "project_profile_path": project_path,
+    }
+    assert (
+        main(
+            [
+                "provider",
+                "add",
+                "local",
+                "--provider",
+                "custom",
+                "--model",
+                "one",
+                "--protocol",
+                "openai-compatible",
+                "--base-url",
+                "http://127.0.0.1:11434",
+            ],
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    store = ProviderProfileStore(user_path, project_path)
+    profile = store.get_profile("local")
+
+    output = io.StringIO()
+    assert (
+        main(
+            ["provider", "rename", "--id", profile.profile_id, "renamed", "--if-revision", "1"],
+            stdout=output,
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    assert "Renamed provider profile local to renamed" in output.getvalue()
+
+    output = io.StringIO()
+    assert (
+        main(
+            [
+                "provider",
+                "replace",
+                "renamed",
+                "--provider",
+                "custom",
+                "--model",
+                "two",
+                "--protocol",
+                "openai-compatible",
+                "--base-url",
+                "http://127.0.0.1:11434",
+                "--if-revision",
+                "2",
+            ],
+            stdout=output,
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    assert "revision 3" in output.getvalue()
+
+    output = io.StringIO()
+    assert (
+        main(["provider", "list", "--show-ids"], stdout=output, stderr=io.StringIO(), **common) == 0
+    )
+    assert profile.profile_id in output.getvalue()
+    assert "r3" in output.getvalue()
+
+    output = io.StringIO()
+    assert main(["provider", "migrate"], stdout=output, stderr=io.StringIO(), **common) == 0
+    assert output.getvalue() == "Migrated provider configuration to schema v2.\n"
 
 
 @pytest.mark.parametrize(

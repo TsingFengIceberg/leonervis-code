@@ -16,6 +16,8 @@ from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.providers.manager import RuntimeStatus
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.definitions import WireProtocol
+from leonervis_code.session_records import BindingSnapshot
+from leonervis_code.session_store import SessionInfo
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -45,7 +47,9 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 4) == "/status"
     assert complete_command("/", 5) == "/provider"
     assert complete_command("/", 6) == "/model"
-    assert complete_command("/", 7) is None
+    assert complete_command("/", 7) == "/session"
+    assert complete_command("/", 8) == "/resume"
+    assert complete_command("/", 9) is None
     assert complete_command("ordinary prompt", 0) is None
 
 
@@ -180,7 +184,7 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
 
     rendered = output.getvalue()
     assert loop.prompts == []
-    assert "Commands: /help, /history <count>, /exit, /quit." in rendered
+    assert "Commands: /help, /history <count>, /session show, /session list" in rendered
     assert "Unknown command: /unknown. Type /help for controls." in rendered
 
 
@@ -270,6 +274,68 @@ def test_invalid_prefix_commands_are_not_treated_as_switches(tmp_path) -> None:
     assert loop.prompts == []
     assert "Unknown command: /modelx gpt-5" in output.getvalue()
     assert "Unknown command: /provider usex one" in output.getvalue()
+
+
+def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -> None:
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.prompts = []
+            self.turns = ()
+            self.current = "12345678-1234-4234-9234-123456789abc"
+            self.switched = []
+
+        def session_info(self):
+            return self._info(self.current)
+
+        def list_sessions(self):
+            return (
+                self._info("12345678-1234-4234-9234-123456789abc"),
+                self._info("22345678-1234-4234-9234-123456789abc"),
+            )
+
+        def switch_session(self, selector):
+            self.switched.append(selector)
+            self.current = "22345678-1234-4234-9234-123456789abc"
+            return self.session_info()
+
+        def prompt(self, prompt):
+            self.prompts.append(prompt)
+            return f"reply: {prompt}"
+
+        def _info(self, session_id):
+            return SessionInfo(
+                session_id=session_id,
+                path=tmp_path / f"{session_id}.jsonl",
+                workspace=str(tmp_path),
+                workspace_fingerprint="v1-" + "a" * 64,
+                created_at="2026-07-17T12:00:00.000000Z",
+                record_count=1,
+                turn_count=0,
+                closed=False,
+                binding=BindingSnapshot.fake(),
+            )
+
+    session = RecordingSession()
+    output = io.StringIO()
+
+    run_repl(
+        session,
+        stdin=io.StringIO(
+            "/session show\n/session list\n/resume 22345678-1234-4234-9234-123456789abc\n"
+            "Hello\n/exit\n"
+        ),
+        stdout=output,
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+    )
+
+    rendered = output.getvalue()
+    assert session.switched == ["22345678-1234-4234-9234-123456789abc"]
+    assert session.prompts == ["Hello"]
+    assert "Auto-save: enabled" in rendered
+    assert "runtime provider unchanged" in rendered
+    assert rendered.count("12345678-1234-4234-9234-123456789abc") >= 2
 
 
 def test_repl_exits_cleanly_at_end_of_input(tmp_path) -> None:

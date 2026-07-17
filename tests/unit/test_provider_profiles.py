@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+from uuid import UUID
 
 import pytest
 
 from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.providers.profile import NamedProviderProfile, ProviderProfileError
+from leonervis_code.providers.profile import (
+    NamedProviderProfile,
+    ProviderProfileError,
+    ProviderProfileSpec,
+    legacy_profile_id,
+    profile_fingerprint,
+)
 from leonervis_code.providers.profile_store import ProviderProfileStore
 
 
@@ -24,7 +31,7 @@ def test_profiles_validate_and_normalize_non_secret_configuration() -> None:
     configured = profile()
 
     assert configured.base_url == "http://127.0.0.1:11434/v1"
-    assert configured.to_dict() == {
+    assert configured.to_spec().to_dict() == {
         "name": "local-dev",
         "provider_id": "custom",
         "protocol": "openai_chat_completions",
@@ -35,6 +42,8 @@ def test_profiles_validate_and_normalize_non_secret_configuration() -> None:
         "temperature": None,
     }
     assert "api_key" not in configured.to_dict()
+    assert str(UUID(configured.profile_id)) == configured.profile_id
+    assert configured.revision == 1
 
 
 @pytest.mark.parametrize(
@@ -145,6 +154,244 @@ def test_store_protects_active_profiles_and_requires_explicit_replace(tmp_path) 
     )
     store.add_profile(replacement, replace=True)
     assert store.get_profile("local-dev").model == "other-model"
+
+
+def test_store_creates_v2_identity_and_supports_revisioned_no_op_replace(tmp_path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    created = store.add_profile(profile().to_spec())
+    original_bytes = store.user_path.read_bytes()
+
+    unchanged = store.replace_profile(
+        created.profile_id, created.to_spec(), expected_revision=created.revision
+    )
+    assert unchanged == created
+    assert store.user_path.read_bytes() == original_bytes
+
+    changed = store.replace_profile(
+        created.profile_id,
+        ProviderProfileSpec(
+            name=created.name,
+            provider_id=created.provider_id,
+            protocol=created.protocol,
+            model="new-model",
+            base_url=created.base_url,
+        ),
+        expected_revision=created.revision,
+    )
+    assert changed.profile_id == created.profile_id
+    assert changed.revision == 2
+    with pytest.raises(ProviderProfileError, match="revision conflict"):
+        store.rename_profile(changed.profile_id, "renamed", expected_revision=1)
+
+
+def test_store_rename_preserves_id_and_remove_readd_gets_new_id(tmp_path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    created = store.add_profile(profile().to_spec())
+    renamed = store.rename_profile(
+        created.profile_id, "renamed", expected_revision=created.revision
+    )
+
+    assert renamed.name == "renamed"
+    assert renamed.profile_id == created.profile_id
+    assert renamed.revision == 2
+    assert store.get_profile_by_id(created.profile_id) == renamed
+
+    store.remove_profile_by_id(renamed.profile_id, expected_revision=2)
+    readded = store.add_profile(profile("renamed").to_spec())
+    assert readded.profile_id != renamed.profile_id
+    assert readded.revision == 1
+
+
+def test_v1_reads_are_deterministic_and_do_not_write(tmp_path) -> None:
+    user_path = tmp_path / "user.json"
+    project_path = tmp_path / "project.json"
+    write_v1_user(user_path, "Legacy", active="Legacy")
+    write_v1_project(project_path, "Legacy")
+    before_user = user_path.read_bytes()
+    before_project = project_path.read_bytes()
+    store = ProviderProfileStore(user_path, project_path)
+
+    loaded = store.get_profile("Legacy")
+    selection = store.active_selection()
+
+    assert loaded.profile_id == legacy_profile_id("Legacy")
+    assert loaded.profile_id != legacy_profile_id("legacy")
+    assert loaded.revision == 1
+    assert selection.profile_id == loaded.profile_id
+    assert selection.revision == 1
+    assert user_path.read_bytes() == before_user
+    assert project_path.read_bytes() == before_project
+
+
+def test_explicit_migration_rewrites_both_v1_files_as_v2(tmp_path) -> None:
+    user_path = tmp_path / "user.json"
+    project_path = tmp_path / "project.json"
+    write_v1_user(user_path, "Legacy", active="Legacy")
+    write_v1_project(project_path, "Legacy")
+    store = ProviderProfileStore(user_path, project_path)
+
+    store.migrate()
+
+    user = json.loads(user_path.read_text(encoding="utf-8"))
+    project = json.loads(project_path.read_text(encoding="utf-8"))
+    profile_id = legacy_profile_id("Legacy")
+    assert user["schema_version"] == 2
+    assert user["active_profile_id"] == profile_id
+    assert user["profiles"][profile_id]["revision"] == 1
+    assert project == {"schema_version": 2, "active_profile_id": profile_id}
+
+
+@pytest.mark.parametrize(("user_version", "project_version"), [(1, 1), (1, 2), (2, 1), (2, 2)])
+def test_store_resolves_all_mixed_schema_combinations(
+    tmp_path, user_version: int, project_version: int
+) -> None:
+    user_path = tmp_path / "user.json"
+    project_path = tmp_path / "project.json"
+    profile_id = legacy_profile_id("Legacy")
+    if user_version == 1:
+        write_v1_user(user_path, "Legacy", active=None)
+    else:
+        write_v2_user(user_path, profile("Legacy"), profile_id=profile_id)
+    if project_version == 1:
+        write_v1_project(project_path, "Legacy")
+    else:
+        project_path.write_text(
+            json.dumps({"schema_version": 2, "active_profile_id": profile_id}),
+            encoding="utf-8",
+        )
+
+    selection = ProviderProfileStore(user_path, project_path).active_selection()
+
+    assert selection.name == "Legacy"
+    assert selection.profile_id == profile_id
+    assert selection.source == "project"
+
+
+def test_v2_rename_remains_addressable_from_dormant_v1_project_selection(tmp_path) -> None:
+    user_path = tmp_path / "user.json"
+    project_path = tmp_path / "project.json"
+    profile_id = legacy_profile_id("Legacy")
+    write_v2_user(user_path, profile("Legacy"), profile_id=profile_id)
+    write_v1_project(project_path, "Legacy")
+    store = ProviderProfileStore(user_path, project_path)
+
+    renamed = store.rename_profile(profile_id, "Renamed", expected_revision=1)
+    selection = store.active_selection()
+
+    assert renamed.profile_id == profile_id
+    assert selection.name == "Renamed"
+    assert selection.profile_id == profile_id
+    assert json.loads(project_path.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_writes_upgrade_only_the_written_file(tmp_path) -> None:
+    user_path = tmp_path / "user.json"
+    project_path = tmp_path / "project.json"
+    write_v1_user(user_path, "Legacy", active=None)
+    write_v1_project(project_path, None)
+    store = ProviderProfileStore(user_path, project_path)
+
+    store.set_active("Legacy", scope="project")
+
+    assert json.loads(user_path.read_text(encoding="utf-8"))["schema_version"] == 1
+    project = json.loads(project_path.read_text(encoding="utf-8"))
+    assert project["schema_version"] == 2
+    assert project["active_profile_id"] == legacy_profile_id("Legacy")
+
+
+def test_future_schema_versions_fail_closed_for_each_layer(tmp_path) -> None:
+    user_path = tmp_path / "user.json"
+    project_path = tmp_path / "project.json"
+    user_path.write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+    store = ProviderProfileStore(user_path, project_path)
+    with pytest.raises(ProviderProfileError, match="unsupported user"):
+        store.list_profiles()
+
+    write_v1_user(user_path, "Legacy", active=None)
+    project_path.write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
+    with pytest.raises(ProviderProfileError, match="unsupported project"):
+        store.active_selection()
+
+
+def test_v2_profiles_require_store_identity_fields(tmp_path) -> None:
+    user_path = tmp_path / "user.json"
+    configured = profile().to_spec().to_dict()
+    user_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "active_profile_id": None,
+                "profiles": {"00000000-0000-4000-8000-000000000001": configured},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = ProviderProfileStore(user_path, tmp_path / "project.json")
+
+    with pytest.raises(ProviderProfileError, match="missing required field"):
+        store.list_profiles()
+
+
+def test_profile_fingerprint_is_canonical_and_excludes_identity_and_name() -> None:
+    first = profile("one")
+    second = NamedProviderProfile(
+        name="two",
+        provider_id=first.provider_id,
+        protocol=first.protocol,
+        model=first.model,
+        base_url=first.base_url,
+        profile_id="00000000-0000-4000-8000-000000000001",
+        revision=9,
+    )
+
+    assert profile_fingerprint(first) == profile_fingerprint(second)
+    assert len(profile_fingerprint(first)) == 64
+    assert profile_fingerprint(first) != profile_fingerprint(
+        ProviderProfileSpec(
+            name="one",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="different",
+            base_url="http://127.0.0.1:11434/v1",
+        )
+    )
+
+
+def write_v1_user(path, name: str, *, active: str | None) -> None:
+    configured = profile(name).to_spec().to_dict()
+    path.write_text(
+        json.dumps({"schema_version": 1, "active_profile": active, "profiles": {name: configured}}),
+        encoding="utf-8",
+    )
+
+
+def write_v1_project(path, active: str | None) -> None:
+    path.write_text(json.dumps({"schema_version": 1, "active_profile": active}), encoding="utf-8")
+
+
+def write_v2_user(path, configured: NamedProviderProfile, *, profile_id: str) -> None:
+    owned = NamedProviderProfile(
+        name=configured.name,
+        provider_id=configured.provider_id,
+        protocol=configured.protocol,
+        model=configured.model,
+        base_url=configured.base_url,
+        api_key_env=configured.api_key_env,
+        max_output_tokens=configured.max_output_tokens,
+        temperature=configured.temperature,
+        profile_id=profile_id,
+        revision=1,
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "active_profile_id": None,
+                "profiles": {profile_id: owned.to_dict()},
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def stat_mode(path) -> int:

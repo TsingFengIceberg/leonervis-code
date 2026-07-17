@@ -25,7 +25,11 @@ from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.factory import create_provider
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.providers.manager import RuntimeProviderManager
-from leonervis_code.providers.profile import NamedProviderProfile, ProviderProfileError
+from leonervis_code.providers.profile import (
+    NamedProviderProfile,
+    ProviderProfileError,
+    ProviderProfileSpec,
+)
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.providers.request_policy import preview_request
 from leonervis_code.providers.resolver import (
@@ -38,6 +42,7 @@ from leonervis_code.providers.routing import (
     FAKE_PROVIDER_PROFILES,
     resolve_route,
 )
+from leonervis_code.session_store import SessionStore, SessionStoreError
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -62,7 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Leonervis Code: a learning-first local coding-agent CLI prototype.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--profile", help="named endpoint profile for this invocation")
+    parser.add_argument("-C", "--cwd", dest="workspace", help="workspace directory")
+    parser.add_argument("--resume", help="resume latest, a session UUID, or a transcript path")
+    profile_selector = parser.add_mutually_exclusive_group()
+    profile_selector.add_argument("--profile", help="named endpoint profile for this invocation")
+    profile_selector.add_argument(
+        "--profile-id", dest="invocation_profile_id", help="profile UUID for this invocation"
+    )
     parser.add_argument(
         "--model",
         dest="invocation_model",
@@ -120,16 +131,52 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--max-output-tokens", type=int, default=1024)
     add_parser.add_argument("--temperature", type=float)
     add_parser.add_argument("--replace", action="store_true")
-    provider_commands.add_parser("list", help="list global provider profiles")
+    add_parser.add_argument("--if-revision", type=int)
+    list_parser = provider_commands.add_parser("list", help="list global provider profiles")
+    list_parser.add_argument("--show-ids", action="store_true")
     show_parser = provider_commands.add_parser("show", help="show one redacted provider profile")
-    show_parser.add_argument("name")
+    show_selector = show_parser.add_mutually_exclusive_group(required=True)
+    show_selector.add_argument("name", nargs="?")
+    show_selector.add_argument("--id", dest="profile_id")
     use_parser = provider_commands.add_parser("use", help="activate one provider profile")
-    use_parser.add_argument("name")
+    use_selector = use_parser.add_mutually_exclusive_group(required=True)
+    use_selector.add_argument("name", nargs="?")
+    use_selector.add_argument("--id", dest="profile_id")
     use_parser.add_argument("--scope", choices=["project", "user"], default="project")
     clear_parser = provider_commands.add_parser("clear", help="clear one active profile layer")
     clear_parser.add_argument("--scope", choices=["project", "user"], default="project")
     remove_parser = provider_commands.add_parser("remove", help="remove an inactive profile")
-    remove_parser.add_argument("name")
+    remove_selector = remove_parser.add_mutually_exclusive_group(required=True)
+    remove_selector.add_argument("name", nargs="?")
+    remove_selector.add_argument("--id", dest="profile_id")
+    remove_parser.add_argument("--if-revision", type=int)
+    rename_parser = provider_commands.add_parser("rename", help="rename one provider profile")
+    rename_selector = rename_parser.add_mutually_exclusive_group(required=True)
+    rename_selector.add_argument("name", nargs="?")
+    rename_selector.add_argument("--id", dest="profile_id")
+    rename_parser.add_argument("new_name")
+    rename_parser.add_argument("--if-revision", type=int)
+    replace_parser = provider_commands.add_parser(
+        "replace", help="replace one profile configuration"
+    )
+    replace_parser.add_argument("name")
+    replace_parser.add_argument("--provider", required=True, choices=[*BUILTIN_PROVIDERS, "custom"])
+    replace_parser.add_argument("--model", dest="profile_model", required=True, type=nonblank_model)
+    replace_parser.add_argument(
+        "--protocol", dest="profile_protocol", choices=["openai-compatible", "anthropic-messages"]
+    )
+    replace_parser.add_argument("--base-url", dest="profile_base_url")
+    replace_parser.add_argument("--api-key-env", dest="profile_api_key_env")
+    replace_parser.add_argument("--max-output-tokens", type=int, default=1024)
+    replace_parser.add_argument("--temperature", type=float)
+    replace_parser.add_argument("--if-revision", type=int)
+    provider_commands.add_parser("migrate", help="upgrade readable profile files to schema v2")
+
+    session_parser = subcommands.add_parser("session", help="inspect durable workspace sessions")
+    session_commands = session_parser.add_subparsers(dest="session_command", required=True)
+    session_commands.add_parser("list", help="list durable sessions")
+    session_show = session_commands.add_parser("show", help="show one durable session")
+    session_show.add_argument("selector", nargs="?", default="latest")
     return parser
 
 
@@ -244,6 +291,8 @@ def render_profile(
         if name:
             credential = "configured" if environment.get(name, "").strip() else "missing"
     stdout.write(f"name: {profile.name}\n")
+    stdout.write(f"profile ID: {profile.profile_id}\n")
+    stdout.write(f"revision: {profile.revision}\n")
     stdout.write(f"provider: {profile.provider_id}\n")
     stdout.write(f"protocol: {profile.protocol.value}\n")
     stdout.write(f"model: {profile.model}\n")
@@ -288,6 +337,26 @@ def _store(
     )
 
 
+def _profile_spec(arguments: argparse.Namespace) -> ProviderProfileSpec:
+    return ProviderProfileSpec(
+        name=arguments.name,
+        provider_id=arguments.provider,
+        protocol=_profile_protocol(arguments.provider, arguments.profile_protocol),
+        model=arguments.profile_model,
+        base_url=arguments.profile_base_url,
+        api_key_env=arguments.profile_api_key_env,
+        max_output_tokens=arguments.max_output_tokens,
+        temperature=arguments.temperature,
+    )
+
+
+def _selected_profile(
+    store: ProviderProfileStore, arguments: argparse.Namespace
+) -> NamedProviderProfile:
+    profile_id = getattr(arguments, "profile_id", None)
+    return store.get_profile_by_id(profile_id) if profile_id else store.get_profile(arguments.name)
+
+
 def handle_provider_command(
     arguments: argparse.Namespace,
     *,
@@ -302,33 +371,52 @@ def handle_provider_command(
     store = _store(workspace, environment, user_profile_path, project_profile_path)
     command = arguments.provider_command
     if command == "add":
-        configured = NamedProviderProfile(
-            name=arguments.name,
-            provider_id=arguments.provider,
-            protocol=_profile_protocol(arguments.provider, arguments.profile_protocol),
-            model=arguments.profile_model,
-            base_url=arguments.profile_base_url,
-            api_key_env=arguments.profile_api_key_env,
-            max_output_tokens=arguments.max_output_tokens,
-            temperature=arguments.temperature,
+        configured = store.add_profile(
+            _profile_spec(arguments),
+            replace=arguments.replace,
+            expected_revision=arguments.if_revision,
         )
-        store.add_profile(configured, replace=arguments.replace)
         stdout.write(f"Saved provider profile {configured.name}.\n")
+    elif command == "replace":
+        current = store.get_profile(arguments.name)
+        configured = store.replace_profile(
+            current.profile_id,
+            _profile_spec(arguments),
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(
+            f"Replaced provider profile {configured.name} at revision {configured.revision}.\n"
+        )
     elif command == "list":
         profiles = store.list_profiles()
         active = store.active_selection()
         if not profiles:
             stdout.write("No provider profiles configured.\n")
         for configured in profiles:
-            marker = " *" if active and active.name == configured.name else ""
+            marker = " *" if active and active.profile_id == configured.profile_id else ""
+            identity = (
+                f" [{configured.profile_id} r{configured.revision}]" if arguments.show_ids else ""
+            )
             stdout.write(
-                f"{configured.name}{marker}: {configured.provider_id}/{configured.model}\n"
+                f"{configured.name}{marker}: {configured.provider_id}/{configured.model}{identity}\n"
             )
     elif command == "show":
-        render_profile(store.get_profile(arguments.name), environment, stdout)
+        render_profile(_selected_profile(store, arguments), environment, stdout)
     elif command == "remove":
-        store.remove_profile(arguments.name)
-        stdout.write(f"Removed provider profile {arguments.name}.\n")
+        configured = _selected_profile(store, arguments)
+        store.remove_profile_by_id(configured.profile_id, expected_revision=arguments.if_revision)
+        stdout.write(f"Removed provider profile {configured.name}.\n")
+    elif command == "rename":
+        configured = _selected_profile(store, arguments)
+        renamed = store.rename_profile(
+            configured.profile_id,
+            arguments.new_name,
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(f"Renamed provider profile {configured.name} to {renamed.name}.\n")
+    elif command == "migrate":
+        store.migrate()
+        stdout.write("Migrated provider configuration to schema v2.\n")
     elif command == "clear":
         RuntimeProviderManager.prepare_clear(
             store,
@@ -338,14 +426,42 @@ def handle_provider_command(
         )
         stdout.write(f"Cleared {arguments.scope} active provider profile.\n")
     elif command == "use":
+        configured = _selected_profile(store, arguments)
         status = RuntimeProviderManager.prepare_profile(
             store,
-            arguments.name,
+            configured.name,
             scope=arguments.scope,
             environment=environment,
             provider_factory=provider_factory,
         )
         stdout.write(f"Using provider profile {status.profile} at {arguments.scope} scope.\n")
+    return 0
+
+
+def render_session_info(info, stdout: TextIO) -> None:
+    """Render durable Session metadata without transcript content."""
+    stdout.write(f"session ID: {info.session_id}\n")
+    stdout.write(f"workspace: {info.workspace}\n")
+    stdout.write(f"transcript: {info.path}\n")
+    stdout.write(f"created: {info.created_at}\n")
+    stdout.write(f"turns: {info.turn_count}\n")
+    stdout.write(f"records: {info.record_count}\n")
+    stdout.write(f"closed: {'yes' if info.closed else 'no'}\n")
+    stdout.write(f"last provider: {info.binding.provider_id}\n")
+    stdout.write(f"last model: {info.binding.selected_model or '<none>'}\n")
+
+
+def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
+    """List or inspect validated Session transcripts without taking a writer lease."""
+    store = SessionStore(workspace)
+    if arguments.session_command == "show":
+        render_session_info(store.show(arguments.selector), stdout)
+        return 0
+    sessions = store.list()
+    if not sessions:
+        stdout.write("No durable sessions found.\n")
+    for info in sessions:
+        stdout.write(f"{info.session_id}: {info.turn_count} turns, {info.created_at}\n")
     return 0
 
 
@@ -363,7 +479,11 @@ def main(
 ) -> int:
     """Run a command or launch one persistent project conversation session."""
     arguments = build_parser().parse_args(argv)
-    workspace = (cwd or Path.cwd()).resolve()
+    workspace = (
+        Path(arguments.workspace).resolve()
+        if arguments.workspace
+        else (cwd or Path.cwd()).resolve()
+    )
     output = stdout or sys.stdout
     errors = stderr or sys.stderr
     env = os.environ if environment is None else environment
@@ -377,11 +497,20 @@ def main(
         )
     )
     try:
+        if arguments.resume is not None and arguments.command not in {None, "prompt"}:
+            raise ProviderProfileError("--resume is only valid with prompt or interactive mode")
+        if arguments.invocation_profile_id is not None:
+            arguments.profile = (
+                _store(workspace, env, user_profile_path, project_profile_path)
+                .get_profile_by_id(arguments.invocation_profile_id)
+                .name
+            )
         if arguments.profile is not None and custom_requested:
             raise ProviderProfileError("--profile cannot be combined with custom endpoint options")
         if arguments.command == "provider":
             if (
                 arguments.profile is not None
+                or arguments.invocation_profile_id is not None
                 or arguments.invocation_model is not None
                 or custom_requested
             ):
@@ -397,6 +526,16 @@ def main(
                 provider_factory=factory,
                 stdout=output,
             )
+        if arguments.command == "session":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with session inspection"
+                )
+            return handle_session_command(arguments, workspace, output)
         if arguments.command == "demo-read":
             if (
                 arguments.profile is not None
@@ -451,6 +590,7 @@ def main(
                 return 2
         session = ProjectSession.open(
             workspace,
+            resume=arguments.resume,
             profile=arguments.profile,
             model=arguments.invocation_model,
             custom_protocol=arguments.invocation_provider_protocol,
@@ -483,4 +623,7 @@ def main(
         return render_provider_failure(error, errors)
     except ProviderProfileError as error:
         print(f"provider profile error: {error}", file=errors)
+        return 2
+    except SessionStoreError as error:
+        print(f"session error: {error}", file=errors)
         return 2

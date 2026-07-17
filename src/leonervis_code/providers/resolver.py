@@ -20,7 +20,7 @@ from leonervis_code.providers.definitions import (
 )
 
 if TYPE_CHECKING:
-    from leonervis_code.providers.profile import NamedProviderProfile
+    from leonervis_code.providers.profile import ProviderProfileSpec
 
 
 class RuntimeRouteError(OrchestrationError):
@@ -105,7 +105,7 @@ def resolve_runtime_route(
 
 
 def resolve_profile_route(
-    profile: NamedProviderProfile,
+    profile: ProviderProfileSpec,
     *,
     environment: Mapping[str, str],
     model_override: str | None = None,

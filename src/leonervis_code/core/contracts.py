@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, TypeAlias
+from typing import Callable, Protocol, TypeAlias
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,17 @@ class ConversationTurn:
     assistant: AssistantText
 
 
+@dataclass(frozen=True)
+class CommittedTurn:
+    """One complete causal turn ready for durable persistence and memory commit."""
+
+    items: tuple[ConversationItem, ...]
+    user: UserMessage
+    assistant: AssistantText
+
+
 ConversationItem: TypeAlias = UserMessage | AssistantText | ToolUse | ToolResult
+TurnCommitter: TypeAlias = Callable[[CommittedTurn], None]
 ProviderResponse: TypeAlias = AssistantText | ToolUse
 
 

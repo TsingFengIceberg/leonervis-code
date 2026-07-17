@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.providers.resolver import RuntimeRouteError, resolve_runtime_route
+from leonervis_code.providers.definitions import ADAPTER_CONTRACT_VERSION, WireProtocol
+from leonervis_code.providers.profile import NamedProviderProfile, ProviderProfileSpec
+from leonervis_code.providers.resolver import (
+    RuntimeRouteError,
+    resolve_profile_route,
+    resolve_runtime_route,
+)
 
 
 @pytest.mark.parametrize(
@@ -154,3 +159,37 @@ def test_controlled_custom_endpoint_requires_explicit_protocol_and_base_url() ->
     assert route.definition.credential_env == "VENDOR_API_KEY"
     assert route.base_url == "https://example.test/v1"
     assert route.base_url_source == "cli"
+
+
+def test_profile_resolver_is_identity_independent() -> None:
+    spec = ProviderProfileSpec(
+        name="local",
+        provider_id="custom",
+        protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+        model="vendor/model",
+        base_url="https://gateway.example",
+        api_key_env="VENDOR_API_KEY",
+    )
+    owned = NamedProviderProfile(
+        **spec.__dict__,
+        profile_id="00000000-0000-4000-8000-000000000001",
+        revision=7,
+    )
+
+    assert resolve_profile_route(spec, environment={}) == resolve_profile_route(
+        owned, environment={}
+    )
+
+
+def test_route_fingerprint_is_canonical_and_credential_state_independent() -> None:
+    first = resolve_runtime_route("openai/gpt-5", environment={"OPENAI_API_KEY": "first"})
+    second = resolve_runtime_route("openai/gpt-5", environment={"OPENAI_API_KEY": "second"})
+    overridden = resolve_runtime_route(
+        "openai/gpt-5",
+        environment={"OPENAI_API_KEY": "first", "OPENAI_BASE_URL": "https://proxy.test/v1"},
+    )
+
+    assert ADAPTER_CONTRACT_VERSION == 1
+    assert first.fingerprint() == second.fingerprint()
+    assert len(first.fingerprint()) == 64
+    assert first.fingerprint() != overridden.fingerprint()

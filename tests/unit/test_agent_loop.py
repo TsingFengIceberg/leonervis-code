@@ -5,6 +5,7 @@ import pytest
 from leonervis_code.agent.loop import AgentLoop, ToolLoopLimitError
 from leonervis_code.core.contracts import (
     AssistantText,
+    CommittedTurn,
     ConversationTurn,
     ToolResult,
     ToolUse,
@@ -114,6 +115,66 @@ def test_loop_rejects_another_tool_after_the_limit_without_committing(tmp_path) 
 
     assert loop.history == ()
     assert loop.turns == ()
+
+
+def test_loop_persists_complete_turn_before_memory_commit(tmp_path) -> None:
+    committed: list[CommittedTurn] = []
+    provider = ScriptedFakeProvider([AssistantText(text="saved")])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        commit_turn=committed.append,
+    )
+
+    assert loop.run("persist") == "saved"
+    assert committed == [
+        CommittedTurn(
+            items=(UserMessage("persist"), AssistantText("saved")),
+            user=UserMessage("persist"),
+            assistant=AssistantText("saved"),
+        )
+    ]
+    assert loop.history == committed[0].items
+
+
+def test_loop_does_not_commit_memory_when_durable_commit_fails(tmp_path) -> None:
+    provider = ScriptedFakeProvider([AssistantText(text="not durable")])
+
+    def fail(_: CommittedTurn) -> None:
+        raise OSError("disk full")
+
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), commit_turn=fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        loop.run("persist")
+
+    assert loop.history == ()
+    assert loop.turns == ()
+
+
+def test_loop_restores_validated_history_and_rejects_broken_causality(tmp_path) -> None:
+    restored = (
+        UserMessage("read"),
+        ToolUse("call-1", "read_file", "README.md"),
+        ToolResult("call-1", "notes"),
+        AssistantText("done"),
+    )
+    loop = AgentLoop(None, ReadFileTool(tmp_path), initial_history=restored)
+
+    assert loop.history == restored
+    assert loop.turns == (ConversationTurn(UserMessage("read"), AssistantText("done")),)
+
+    with pytest.raises(ValueError, match="does not match"):
+        AgentLoop(
+            None,
+            ReadFileTool(tmp_path),
+            initial_history=(
+                UserMessage("read"),
+                ToolUse("call-1", "read_file", "README.md"),
+                ToolResult("other", "notes"),
+                AssistantText("done"),
+            ),
+        )
 
 
 def test_history_snapshots_cannot_be_mutated_by_later_turns(tmp_path) -> None:

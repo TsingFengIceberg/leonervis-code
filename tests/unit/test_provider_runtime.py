@@ -68,6 +68,13 @@ def test_manager_reuses_client_and_atomically_switches_profiles(tmp_path) -> Non
     status = manager.use_profile("two")
 
     assert status.profile == "two"
+    assert status.profile_name == "two"
+    assert status.profile_id == store.get_profile("two").profile_id
+    assert status.profile_revision == 1
+    assert status.profile_fingerprint == store.get_profile("two").fingerprint()
+    assert status.route_fingerprint is not None
+    assert len(status.route_fingerprint) == 64
+    assert status.model_override is None
     assert status.selected_model == "model-two"
     assert store.active_name("project") == "two"
     assert constructed[0].closed is True
@@ -160,8 +167,48 @@ def test_direct_runtime_supports_process_local_model_switch(tmp_path) -> None:
     status = manager.set_model("model-two")
 
     assert status.profile is None
+    assert status.profile_id is None
+    assert status.profile_revision is None
+    assert status.profile_fingerprint is None
+    assert status.route_fingerprint is not None
+    assert status.model_override == "model-two"
     assert status.selected_model == "model-two"
     assert constructed[-1].wire_model == "model-two"
+
+
+def test_manager_set_model_tracks_profile_by_id_across_rename(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    original = store.get_profile("one")
+    routes = []
+
+    def factory(route, *, environment):
+        routes.append(route)
+        return RecordingProvider(route.wire_model)
+
+    manager = RuntimeProviderManager(store, environment={}, profile="one", provider_factory=factory)
+    renamed = store.rename_profile(original.profile_id, "renamed", expected_revision=1)
+
+    status = manager.set_model("override-model")
+
+    assert status.profile == "renamed"
+    assert status.profile_id == original.profile_id
+    assert status.profile_revision == renamed.revision
+    assert status.model_override == "override-model"
+    assert routes[-1].wire_model == "override-model"
+
+
+def test_fake_runtime_has_explicit_empty_provenance(tmp_path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    manager = RuntimeProviderManager(store, environment={})
+
+    status = manager.status()
+
+    assert status.mode == "fake"
+    assert status.profile_id is None
+    assert status.profile_revision is None
+    assert status.profile_fingerprint is None
+    assert status.route_fingerprint is None
+    assert status.model_override is None
 
 
 def test_session_closes_provider_when_tool_construction_fails(tmp_path) -> None:

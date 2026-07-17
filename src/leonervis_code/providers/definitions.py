@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import hashlib
+import json
+
+
+ADAPTER_CONTRACT_VERSION = 1
 
 
 class WireProtocol(StrEnum):
@@ -37,6 +42,32 @@ class RuntimeProviderRoute:
     base_url_source: str
     max_output_tokens: int = 1024
     temperature: float | None = None
+
+    def fingerprint(self) -> str:
+        """Return a canonical route hash excluding credential value and presence."""
+        return route_fingerprint(self)
+
+
+def route_fingerprint(route: RuntimeProviderRoute) -> str:
+    """Return a canonical SHA-256 for one resolved adapter invocation contract."""
+    payload = {
+        "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
+        "provider_id": route.definition.provider_id,
+        "protocol": route.definition.protocol.value,
+        "credential_env": route.definition.credential_env,
+        "credential_required": route.definition.credential_required,
+        "request_body_limit": route.definition.request_body_limit,
+        "selected_model": route.selected_model,
+        "wire_model": route.wire_model,
+        "base_url": route.base_url,
+        "base_url_source": route.base_url_source,
+        "max_output_tokens": route.max_output_tokens,
+        "temperature": route.temperature,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
 
 
 ANTHROPIC = ProviderDefinition(
