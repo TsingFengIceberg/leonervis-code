@@ -128,7 +128,7 @@ def test_module_entry_resumes_durable_session_across_processes(tmp_path) -> None
         text=True,
     )
     assert listed.returncode == 0
-    assert f"{session_id}: 2 turns" in listed.stdout
+    assert f"{session_id} [latest]: 2 turns, closed, created " in listed.stdout
 
 
 def test_bare_module_entry_requires_an_interactive_terminal(tmp_path) -> None:

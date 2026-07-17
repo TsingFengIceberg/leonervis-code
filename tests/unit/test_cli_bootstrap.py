@@ -36,6 +36,52 @@ def test_prompt_command_runs_the_deterministic_foundation_loop(capsys, tmp_path)
     assert captured.err == ""
 
 
+def test_session_list_marks_actual_latest_without_changing_creation_order(tmp_path) -> None:
+    common = {
+        "cwd": tmp_path,
+        "environment": {},
+        "user_profile_path": tmp_path / "user.json",
+        "project_profile_path": tmp_path / "project.json",
+    }
+    empty = io.StringIO()
+    assert main(["session", "list"], stdout=empty, stderr=io.StringIO(), **common) == 0
+    assert empty.getvalue() == "No durable sessions found.\n"
+
+    assert main(["prompt", "first"], stdout=io.StringIO(), stderr=io.StringIO(), **common) == 0
+    shown = io.StringIO()
+    assert main(["session", "show", "latest"], stdout=shown, stderr=io.StringIO(), **common) == 0
+    first_id = next(
+        line.removeprefix("session ID: ")
+        for line in shown.getvalue().splitlines()
+        if line.startswith("session ID: ")
+    )
+
+    assert main(["prompt", "second"], stdout=io.StringIO(), stderr=io.StringIO(), **common) == 0
+    shown = io.StringIO()
+    assert main(["session", "show", "latest"], stdout=shown, stderr=io.StringIO(), **common) == 0
+    second_id = next(
+        line.removeprefix("session ID: ")
+        for line in shown.getvalue().splitlines()
+        if line.startswith("session ID: ")
+    )
+
+    assert (
+        main(
+            ["--resume", first_id, "prompt", "resumed"],
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    output = io.StringIO()
+    assert main(["session", "list"], stdout=output, stderr=io.StringIO(), **common) == 0
+
+    lines = output.getvalue().splitlines()
+    assert lines[0].startswith(f"{second_id}: 1 turn, closed, created ")
+    assert lines[1].startswith(f"{first_id} [latest]: 2 turns, closed, created ")
+
+
 def test_prompt_command_uses_its_cwd_as_the_read_file_workspace(monkeypatch, tmp_path) -> None:
     workspaces = []
 

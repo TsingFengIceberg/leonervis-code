@@ -128,6 +128,11 @@ class ProjectSession:
         self._ensure_open()
         return self._session_store.list()
 
+    def latest_session_info(self) -> SessionInfo:
+        """Return the Session referenced by this workspace's latest pointer."""
+        self._ensure_open()
+        return self._session_store.show("latest")
+
     def new_session(self) -> SessionInfo:
         """Create and atomically select an empty Session without changing runtime."""
         with self._lock:

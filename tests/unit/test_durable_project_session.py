@@ -131,14 +131,18 @@ def test_project_session_switches_durable_history_without_changing_runtime(tmp_p
     )
     session.prompt("one")
     first_id = session.session_id
+    assert session.latest_session_info().session_id == first_id
     second_id = session.new_session().session_id
+    assert session.latest_session_info().session_id == second_id
     session.prompt("two")
     assert session.history == (UserMessage("two"), AssistantText("runtime: two"))
     session.switch_session(first_id)
+    assert session.latest_session_info().session_id == first_id
 
     info = session.switch_session(second_id)
 
     assert info.session_id == second_id
+    assert session.latest_session_info().session_id == second_id
     assert session.status().selected_model == "local/model"
     assert session.history == (UserMessage("two"), AssistantText("runtime: two"))
     session.close()

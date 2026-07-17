@@ -16,7 +16,7 @@ from leonervis_code.providers.resolver import RuntimeRouteError
 
 PROMPT = "leonervis> "
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /session show, /session list, "
+    "Commands: /help, /history <count>, /session show, /session list, /session new, "
     "/resume <latest|id>, /exit, /quit. Provider controls: /status, "
     "/provider list, /provider current, /provider use <name>, /model <model>. "
     "Ctrl-D or Ctrl-C exits."
@@ -81,6 +81,24 @@ def render_recent_history(turns: tuple[ConversationTurn, ...], count: int) -> st
     return "\n\n".join(
         f"User: {turn.user.text}\nAssistant: {turn.assistant.text}" for turn in recent_turns
     )
+
+
+def render_session_summary(
+    info,
+    *,
+    current_session_id: str | None = None,
+    latest_session_id: str | None = None,
+) -> str:
+    """Render compact Session metadata with explicit pointer markers."""
+    markers = []
+    if info.session_id == current_session_id:
+        markers.append("[current]")
+    if info.session_id == latest_session_id:
+        markers.append("[latest]")
+    marker_text = f" {' '.join(markers)}" if markers else ""
+    turns = f"{info.turn_count} {'turn' if info.turn_count == 1 else 'turns'}"
+    state = "closed" if info.closed else "open"
+    return f"{info.session_id}{marker_text}: {turns}, {state}, created {info.created_at}"
 
 
 def render_runtime_status(status: RuntimeStatus) -> str:
@@ -174,14 +192,31 @@ def run_repl(
                 sessions = list_sessions()
                 if not sessions:
                     stdout.write("No durable sessions found.\n")
+                current_id = (
+                    session_info_method().session_id if callable(session_info_method) else None
+                )
+                latest_session_info = getattr(session, "latest_session_info", None)
+                latest_id = (
+                    latest_session_info().session_id if callable(latest_session_info) else None
+                )
                 for info in sessions:
-                    marker = (
-                        " *"
-                        if callable(session_info_method)
-                        and info.session_id == session_info_method().session_id
-                        else ""
+                    stdout.write(
+                        f"{render_session_summary(info, current_session_id=current_id, latest_session_id=latest_id)}\n"
                     )
-                    stdout.write(f"{info.session_id}{marker}: {info.turn_count} turns\n")
+            stdout.flush()
+            continue
+        if prompt == "/session new":
+            new_session = getattr(session, "new_session", None)
+            if not callable(new_session):
+                stdout.write("Creating durable sessions is unavailable.\n")
+            else:
+                try:
+                    info = new_session()
+                    stdout.write(
+                        f"Started new session {info.session_id}; runtime provider unchanged.\n"
+                    )
+                except Exception as error:
+                    stdout.write(f"Session creation failed: {_safe_error(error)}\n")
             stdout.flush()
             continue
         if prompt == "/resume" or prompt.startswith("/resume "):

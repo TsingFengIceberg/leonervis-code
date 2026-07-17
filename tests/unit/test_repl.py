@@ -9,6 +9,7 @@ from leonervis_code.cli.repl import (
     parse_history_count,
     read_prompt,
     render_recent_history,
+    render_session_summary,
     run_repl,
 )
 from leonervis_code.core.contracts import AssistantText, ConversationTurn, ToolUse, UserMessage
@@ -81,6 +82,30 @@ def test_render_recent_history_shows_complete_turns_in_chronological_order() -> 
         "User: second prompt\nAssistant: second reply\n\nUser: third prompt\nAssistant: third reply"
     )
     assert render_recent_history((), 2) == "No conversation turns yet."
+
+
+def test_render_session_summary_marks_pointers_state_and_turn_plurality(tmp_path) -> None:
+    session_id = "12345678-1234-4234-9234-123456789abc"
+    info = SessionInfo(
+        session_id=session_id,
+        path=tmp_path / f"{session_id}.jsonl",
+        workspace=str(tmp_path),
+        workspace_fingerprint="v1-" + "a" * 64,
+        created_at="2026-07-17T12:00:00.000000Z",
+        record_count=3,
+        turn_count=1,
+        closed=True,
+        binding=BindingSnapshot.fake(),
+    )
+
+    assert render_session_summary(
+        info,
+        current_session_id=session_id,
+        latest_session_id=session_id,
+    ) == (f"{session_id} [current] [latest]: 1 turn, closed, created 2026-07-17T12:00:00.000000Z")
+    assert render_session_summary(
+        SessionInfo(**{**info.__dict__, "turn_count": 0, "closed": False})
+    ).endswith("0 turns, open, created 2026-07-17T12:00:00.000000Z")
 
 
 def test_repl_routes_each_nonblank_prompt_and_prints_banner(tmp_path) -> None:
@@ -184,7 +209,9 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
 
     rendered = output.getvalue()
     assert loop.prompts == []
-    assert "Commands: /help, /history <count>, /session show, /session list" in rendered
+    assert (
+        "Commands: /help, /history <count>, /session show, /session list, /session new" in rendered
+    )
     assert "Unknown command: /unknown. Type /help for controls." in rendered
 
 
@@ -282,10 +309,15 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
             self.prompts = []
             self.turns = ()
             self.current = "12345678-1234-4234-9234-123456789abc"
+            self.latest = "22345678-1234-4234-9234-123456789abc"
             self.switched = []
+            self.created = 0
 
         def session_info(self):
             return self._info(self.current)
+
+        def latest_session_info(self):
+            return self._info(self.latest)
 
         def list_sessions(self):
             return (
@@ -293,9 +325,16 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
                 self._info("22345678-1234-4234-9234-123456789abc"),
             )
 
+        def new_session(self):
+            self.created += 1
+            self.current = "32345678-1234-4234-9234-123456789abc"
+            self.latest = self.current
+            return self.session_info()
+
         def switch_session(self, selector):
             self.switched.append(selector)
             self.current = "22345678-1234-4234-9234-123456789abc"
+            self.latest = self.current
             return self.session_info()
 
         def prompt(self, prompt):
@@ -321,8 +360,8 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
     run_repl(
         session,
         stdin=io.StringIO(
-            "/session show\n/session list\n/resume 22345678-1234-4234-9234-123456789abc\n"
-            "Hello\n/exit\n"
+            "/session show\n/session list\n/session new\n/session show\n"
+            "/resume 22345678-1234-4234-9234-123456789abc\nHello\n/exit\n"
         ),
         stdout=output,
         version="0.1.0",
@@ -331,11 +370,14 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
     )
 
     rendered = output.getvalue()
+    assert session.created == 1
     assert session.switched == ["22345678-1234-4234-9234-123456789abc"]
     assert session.prompts == ["Hello"]
     assert "Auto-save: enabled" in rendered
+    assert "Started new session 32345678-1234-4234-9234-123456789abc" in rendered
     assert "runtime provider unchanged" in rendered
-    assert rendered.count("12345678-1234-4234-9234-123456789abc") >= 2
+    assert "12345678-1234-4234-9234-123456789abc [current]" in rendered
+    assert "22345678-1234-4234-9234-123456789abc [latest]" in rendered
 
 
 def test_repl_exits_cleanly_at_end_of_input(tmp_path) -> None:

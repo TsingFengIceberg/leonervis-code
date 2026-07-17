@@ -69,7 +69,8 @@ REPL 内提供持久历史、Session 和 provider runtime 控制命令：
 /help                         查看控制说明
 /history <count>              显示当前 Session 最近 count 个完整回合
 /session show                 显示当前 Session ID、路径和 turn 数
-/session list                 列出当前 workspace 的 Session
+/session list                 列出 Session，并标记 current/latest 与 open/closed
+/session new                  保持当前 runtime provider，开始空白 Session
 /resume <latest|id>           切换 Session，保持当前 runtime provider 不变
 /status                       显示脱敏后的当前 runtime 状态
 /provider list                列出命名 profile
@@ -143,6 +144,8 @@ uv run leonervis-code session show latest
 uv run leonervis-code --resume latest prompt "继续上一轮"
 uv run leonervis-code -C ../another-workspace --resume latest
 ```
+
+日常使用时，裸启动会创建新 Session，`--resume latest` 会继续该 workspace 的 latest 指针；`session list` 和 `session show latest` 用于查找与检查历史。在 REPL 中，`/session new` 会保留当前 runtime provider 并开始空白历史，`/resume <id>` 则切换到已有历史。列表中的 `[current]` 表示下一条 REPL prompt 的写入目标，`[latest]` 表示 `latest.json` 当前指向；`open/closed` 是 transcript 生命周期记录而不是锁状态，closed Session 仍可恢复。
 
 Session 与 runtime provider 解耦：transcript 记录每个历史 turn 当时实际使用的 profile ID/revision、provider/protocol、model、endpoint和非敏感fingerprint，仅供审计。恢复后真实工作的provider继续由本次`--profile`/`--model`、workspace active、user active或fake fallback决定；不会按历史binding重建client，也不会因profile后来改名、修改或删除而阻止恢复。把旧历史发送给新的当前provider属于显式运行选择，当前adapter若拒绝该历史，失败turn不会提交。
 

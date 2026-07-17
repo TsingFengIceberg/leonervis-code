@@ -12,7 +12,7 @@ from typing import TextIO
 from leonervis_code import ProjectSession, __version__
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.brand import color_enabled
-from leonervis_code.cli.repl import run_repl
+from leonervis_code.cli.repl import render_session_summary, run_repl
 from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse
 from leonervis_code.core.orchestration import (
     GenerationOptions,
@@ -460,8 +460,10 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     sessions = store.list()
     if not sessions:
         stdout.write("No durable sessions found.\n")
+        return 0
+    latest_id = store.show("latest").session_id
     for info in sessions:
-        stdout.write(f"{info.session_id}: {info.turn_count} turns, {info.created_at}\n")
+        stdout.write(f"{render_session_summary(info, latest_session_id=latest_id)}\n")
     return 0
 
 

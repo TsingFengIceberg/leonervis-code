@@ -69,7 +69,8 @@ The REPL provides durable history, Session controls, and provider-runtime contro
 /help                         show controls
 /history <count>              show recent complete turns in the current Session
 /session show                 show the current Session ID, path, and turn count
-/session list                 list Sessions in the current workspace
+/session list                 list Sessions with current/latest and open/closed markers
+/session new                  start empty history while preserving the runtime provider
 /resume <latest|id>           switch Session without changing the runtime provider
 /status                       show redacted current runtime status
 /provider list                list named profiles
@@ -143,6 +144,8 @@ uv run leonervis-code session show latest
 uv run leonervis-code --resume latest prompt "Continue the previous turn"
 uv run leonervis-code -C ../another-workspace --resume latest
 ```
+
+For everyday use, a bare launch creates a new Session, while `--resume latest` continues the workspace's latest pointer; use `session list` and `session show latest` to find and inspect history. Inside the REPL, `/session new` starts empty history without changing the current runtime provider, and `/resume <id>` switches to existing history. `[current]` marks the destination of the next REPL prompt, `[latest]` marks the current `latest.json` target, and `open/closed` describes transcript lifecycle rather than lock ownership; a closed Session remains resumable.
 
 Sessions and runtime providers are decoupled. The transcript records the profile ID/revision, provider/protocol, model, endpoint, and non-secret fingerprints actually used for each historical turn, solely as audit provenance. After resume, the working provider still comes from this invocation's `--profile`/`--model`, workspace active selection, user active selection, or fake fallback. The runtime never reconstructs a client from historical binding metadata, and later profile rename, replacement, or deletion does not block resume. Sending old history to a newly selected provider is an explicit runtime choice; if that adapter rejects the history, the failed turn is not committed.
 
