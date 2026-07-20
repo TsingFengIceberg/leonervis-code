@@ -190,7 +190,7 @@ def render_demo_read(workspace: Path, path: str, stdout: TextIO) -> int:
     demo_loop = AgentLoop(provider, ReadFileTool(workspace))
     stdout.write(f"[demo] provider requested read_file: {path}\n")
     response = demo_loop.run(f"Demo read {path}")
-    result = provider.received_histories[1][-1]
+    result = provider.received_requests[1].history[-1]
     assert isinstance(result, ToolResult)
     if result.is_error:
         stdout.write(f"[read_file] {path}\n  ✗ {result.content}\n")

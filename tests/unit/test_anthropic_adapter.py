@@ -8,7 +8,13 @@ import pytest
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 
 from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ConversationRequest,
+    ToolResult,
+    ToolUse,
+    UserMessage,
+)
 from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.providers.anthropic import (
     AnthropicConversationProvider,
@@ -20,6 +26,7 @@ from leonervis_code.providers.anthropic import (
     serialize_history,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
+from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -59,6 +66,10 @@ def message(
 
 def config() -> AnthropicProviderConfig:
     return AnthropicProviderConfig(model_id="claude-opus-4-8", max_output_tokens=64)
+
+
+def request(*history) -> ConversationRequest:
+    return ConversationRequest(system_prompt=build_system_prompt(), history=tuple(history))
 
 
 def test_production_client_uses_explicit_route_and_disables_redirects(monkeypatch) -> None:
@@ -151,10 +162,18 @@ def test_serializer_rejects_unknown_tools_and_broken_causality() -> None:
 def test_read_file_schema_is_exact_and_closed() -> None:
     assert read_file_tool_definition() == {
         "name": "read_file",
-        "description": "Read one UTF-8 text file relative to the current workspace.",
+        "description": (
+            "Read one workspace-relative UTF-8 text file when its contents are needed to "
+            "answer the user. This tool is read-only and its bounded output may be truncated."
+        ),
         "input_schema": {
             "type": "object",
-            "properties": {"path": {"type": "string"}},
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative path to one UTF-8 text file in the workspace.",
+                }
+            },
             "required": ["path"],
             "additionalProperties": False,
         },
@@ -225,7 +244,7 @@ def test_adapter_sends_explicit_temperature_when_configured() -> None:
     )
     provider = AnthropicConversationProvider(configured, client)
 
-    provider.respond((UserMessage(text="Hello"),))
+    provider.respond(request(UserMessage(text="Hello")))
 
     assert client.requests[0]["temperature"] == 0.2
 
@@ -234,11 +253,12 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
     client = RecordingMessagesClient([message(TextBlock(text="Hello", type="text"))])
     provider = AnthropicConversationProvider(config(), client)
 
-    assert provider.respond((UserMessage(text="Hello"),)) == AssistantText(text="Hello")
+    assert provider.respond(request(UserMessage(text="Hello"))) == AssistantText(text="Hello")
     assert client.requests == [
         {
             "model": "claude-opus-4-8",
             "max_tokens": 64,
+            "system": build_system_prompt().text,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
             "tools": [read_file_tool_definition()],
             "stream": False,

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 from leonervis_code.core.contracts import (
     AssistantText,
-    ConversationItem,
+    ConversationRequest,
     ProviderResponse,
     UserMessage,
 )
@@ -19,18 +19,20 @@ class ScriptedFakeProvider:
         """Create a default echo fake or consume the supplied response script."""
         self._script = tuple(script) if script is not None else None
         self._next_outcome = 0
-        self._received_histories: list[tuple[ConversationItem, ...]] = []
+        self._received_requests: list[ConversationRequest] = []
 
     @property
-    def received_histories(self) -> tuple[tuple[ConversationItem, ...], ...]:
+    def received_requests(self) -> tuple[ConversationRequest, ...]:
         """Return immutable snapshots of every provider request."""
-        return tuple(self._received_histories)
+        return tuple(self._received_requests)
 
-    def respond(self, history: tuple[ConversationItem, ...]) -> ProviderResponse:
-        """Record ``history`` and return its next deterministic outcome."""
-        self._received_histories.append(tuple(history))
+    def respond(self, request: ConversationRequest) -> ProviderResponse:
+        """Record ``request`` and return its next deterministic outcome."""
+        self._received_requests.append(request)
         if self._script is None:
-            latest_user = next(item for item in reversed(history) if isinstance(item, UserMessage))
+            latest_user = next(
+                item for item in reversed(request.history) if isinstance(item, UserMessage)
+            )
             return AssistantText(text=f"Fake response: {latest_user.text}")
         if self._next_outcome == len(self._script):
             raise RuntimeError("fake provider script is exhausted")

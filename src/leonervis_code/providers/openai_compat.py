@@ -10,6 +10,7 @@ import openai
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationItem,
+    ConversationRequest,
     ProviderResponse,
     ToolResult,
     ToolUse,
@@ -23,6 +24,7 @@ from leonervis_code.providers.errors import (
     safe_request_id,
     safe_retry_after,
 )
+from leonervis_code.tools.read_file import read_file_model_definition
 
 
 class ChatCompletionsClient(Protocol):
@@ -52,9 +54,9 @@ class OpenAICompatibleConversationProvider:
         if callable(close):
             close()
 
-    def respond(self, history: tuple[ConversationItem, ...]) -> ProviderResponse:
+    def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
         """Make one non-streaming compatible request through the injected seam."""
-        request = build_request(self._route, history)
+        request = build_request(self._route, request_snapshot)
         try:
             response = self._client.create(**request)
         except openai.APIError as error:
@@ -87,28 +89,27 @@ def create_openai_compatible_provider(
 
 
 def read_file_tool_definition() -> dict[str, object]:
-    """Return the only closed function tool exposed by Foundation 3B."""
+    """Wrap the shared read_file contract as one compatible function tool."""
+    definition = read_file_model_definition()
     return {
         "type": "function",
         "function": {
-            "name": "read_file",
-            "description": "Read one UTF-8 text file relative to the current workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"],
-                "additionalProperties": False,
-            },
+            "name": definition["name"],
+            "description": definition["description"],
+            "parameters": definition["input_schema"],
         },
     }
 
 
 def build_request(
     route: RuntimeProviderRoute,
-    history: tuple[ConversationItem, ...],
+    request_snapshot: ConversationRequest,
 ) -> dict[str, object]:
     """Build a complete provider-native request with deterministic compatibility rules."""
-    messages = serialize_history(history, route=route)
+    messages = [
+        {"role": "system", "content": request_snapshot.system_prompt.text},
+        *serialize_history(request_snapshot.history, route=route),
+    ]
     request: dict[str, object] = {
         "model": route.wire_model,
         "messages": messages,

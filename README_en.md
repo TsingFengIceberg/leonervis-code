@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. It will incrementally build an understandable and verifiable Harness: a model makes decisions, the host executes controlled tools within explicit workspace and permission boundaries, and structured results return to the model.
 
-> **Current status: Foundation 3D stable profile identity and durable Sessions are complete.** Provider profiles now have immutable UUIDs, revisions, and configuration/route fingerprints; legacy schema-v1 files remain readable and upgrade only when their own scope is written. Each workspace conversation is auto-saved as append-only JSONL, with a complete turn entering memory only after fsync. Cross-process `--resume`, Session inspection/listing, and live REPL `/resume` are available. A Session records the provider provenance actually used for each historical turn, but the current runtime provider remains selected by this invocation's CLI/active configuration rather than being bound to old Session metadata. Both real SDK clients still use `max_retries=0`.
+> **Current status: the first provider-neutral canonical model system prompt is complete.** Every fake, Anthropic, and OpenAI-compatible model request now carries the same versioned, fingerprinted stable model contract. Anthropic uses its top-level `system` field, while compatible Chat Completions uses one leading system message. The prompt describes only the current bounded `read_file` capability; it contains no absolute workspace path, Session/provider/model identity, or credential, and it never enters conversation history or Session schema v1. New turns after resume use the current binary's canonical prompt, while exact historical prompt provenance is not yet durable. Stable profile identity, append-only JSONL, persist-before-memory, cross-process `--resume`, runtime/history decoupling, and `max_retries=0` on both real SDK clients remain unchanged.
 
 ## Project positioning
 
@@ -119,6 +119,23 @@ uv run python -m leonervis_code prompt "Hello"
 uv run leonervis-code --help
 uv run leonervis --version
 ```
+
+## First canonical model system prompt
+
+Leonervis Code now builds a provider-neutral `SystemPromptSnapshot` from `src/leonervis_code/system_prompt.py`. The snapshot contains an explicit version, normalized text, and a domain-separated SHA-256 fingerprint. It is built once at the beginning of each user turn and remains pinned across every `read_file` continuation in that turn:
+
+```text
+SystemPromptSnapshot + neutral conversation history
+  -> Anthropic Messages: top-level system + messages
+  -> OpenAI-compatible: one leading system role + messages
+  -> Scripted fake: record the same request snapshot
+```
+
+The first prompt is a stable contract. It contains no absolute workspace path, date, Session ID, provider/model/profile, endpoint, or credential. It tells the model only what the Harness really provides: selective access to one workspace-relative UTF-8 text file, bounded or truncated tool results, and evidence-based answers. It explicitly does not claim write/edit, glob/grep, Bash/tests, network, approval, compaction, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard path, encoding, and size constraints.
+
+The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL still contain only the user/assistant/tool causal chain. A new turn after resume uses the current binary's canonical prompt. Session schema v1 does not yet record the exact historical prompt version/fingerprint; that audit gap is reserved for a separate schema migration. This **model system prompt** is entirely different from the human-facing `leonervis[session8|runtime]>` **REPL prompt**.
+
+See the [canonical model system-prompt decision](./docs/decisions/0012-first-canonical-model-system-prompt.md) for the runtime design and [docs/references/claw-code-prompts](./docs/references/claw-code-prompts/README.md) for the Claw-Code structural study map.
 
 ## Foundation 3D: stable profile identity and durable Sessions
 
@@ -300,7 +317,7 @@ The Foundation 2B subcommand form of `route` remains completely offline: it cons
 The current REPL and `prompt` command now complete this minimal, testable path:
 
 ```text
-terminal input → AgentLoop (ordered in-memory causal context)
+terminal input → AgentLoop (one pinned canonical system-prompt snapshot + ordered in-memory causal context)
   → ScriptedFakeProvider → optional read_file within the current workspace
   → structured tool result → ScriptedFakeProvider → final text output
 ```
@@ -313,7 +330,7 @@ The default `ScriptedFakeProvider` retains the visible echo behavior and does no
 
 Foundation 1B originally proved only process-local atomic history; Foundation 3D now persists each complete turn to workspace JSONL. A bare `leonervis-code` invocation in a noninteractive terminal still explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
 
-The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md), [the provider-neutral model-routing decision](./docs/decisions/0005-foundation-2a-provider-neutral-model-routing.md), [the adapter-owned compatibility-policy decision](./docs/decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md), [the non-streaming Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), [the local multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md), [the named-profile/persistent-runtime decision](./docs/decisions/0009-foundation-3c-named-provider-profiles-and-runtime-manager.md), [the stable-profile/durable-Session decision](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md), and [the decoupled REPL-presentation/slash-dispatch decision](./docs/decisions/0011-decoupled-repl-presentation-and-slash-dispatch.md).
+The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md), [the provider-neutral model-routing decision](./docs/decisions/0005-foundation-2a-provider-neutral-model-routing.md), [the adapter-owned compatibility-policy decision](./docs/decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md), [the non-streaming Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), [the local multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md), [the named-profile/persistent-runtime decision](./docs/decisions/0009-foundation-3c-named-provider-profiles-and-runtime-manager.md), [the stable-profile/durable-Session decision](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md), [the decoupled REPL-presentation/slash-dispatch decision](./docs/decisions/0011-decoupled-repl-presentation-and-slash-dispatch.md), and [the first canonical model-system-prompt decision](./docs/decisions/0012-first-canonical-model-system-prompt.md).
 
 ## Development and verification
 
@@ -351,7 +368,7 @@ The repository now includes:
 
 - a reproducible Python 3.12–3.13 and uv environment with `uv.lock`;
 - installable `leonervis-code` / `leonervis` entry points plus `python -m leonervis_code`;
-- the structured `UserMessage` / `AssistantText` / `ToolUse` / `ToolResult` contract, deterministic scripted fake provider, an `AgentLoop` with atomic in-memory causal history, one bounded `read_file` tool, the Foundation 2B offline route policy, and a local multi-provider runtime covering Anthropic and the OpenAI-compatible family;
+- the structured `SystemPromptSnapshot` / `ConversationRequest` / `UserMessage` / `AssistantText` / `ToolUse` / `ToolResult` contract, a versioned and fingerprinted stable model system prompt, deterministic scripted fake provider, an `AgentLoop` with atomic in-memory causal history, one bounded `read_file` tool, the Foundation 2B offline route policy, and a local multi-provider runtime covering Anthropic and the OpenAI-compatible family;
 - named provider profiles with no credential value, stable UUID/revision identity, v1/v2-compatible migration, user/project active precedence, atomic between-turn client/model switching, and a public `ProjectSession` API for other modules;
 - workspace-bound UUID Sessions with append-only JSONL, complete tool causality, a single-writer lock, tail recovery, cross-process resume, and per-turn provider provenance;
 - a local real/fake REPL with a colored startup mark, Tab completion, `/history`, `/session`, `/resume`, provider/status/model controls, and durable complete-turn history;
@@ -370,6 +387,7 @@ src/leonervis_code/
   agent/                # AgentLoop with bounded causal history and tool decisions
   tools/                # workspace-confined read_file tool only for now
   providers/            # adapters, route/factory, named profile store, and runtime manager
+  system_prompt.py      # canonical model system prompt, version, and fingerprint
   session.py            # ProjectSession facade combining runtime and switchable durable Sessions
   session_records.py    # closed JSONL record schemas and causal replay validation
   session_store.py      # workspace paths, writer locks, append/latest, and recovery

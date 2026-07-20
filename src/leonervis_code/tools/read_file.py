@@ -8,6 +8,30 @@ from leonervis_code.core.contracts import ToolResult, ToolUse
 
 MAX_CONTENT_BYTES = 32 * 1024
 TRUNCATION_MARKER = "\n[truncated]\n"
+READ_FILE_TOOL_NAME = "read_file"
+MAX_READ_FILE_EXECUTIONS_PER_TURN = 3
+
+
+def read_file_model_definition() -> dict[str, object]:
+    """Return a fresh provider-neutral definition of the bounded read tool."""
+    return {
+        "name": READ_FILE_TOOL_NAME,
+        "description": (
+            "Read one workspace-relative UTF-8 text file when its contents are needed to "
+            "answer the user. This tool is read-only and its bounded output may be truncated."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative path to one UTF-8 text file in the workspace.",
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    }
 
 
 class ReadFileTool:

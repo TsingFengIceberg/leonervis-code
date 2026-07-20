@@ -154,7 +154,7 @@ def test_repl_displays_only_completed_turns_without_creating_a_turn(tmp_path) ->
     assert "User: second prompt\nAssistant: second reply" in rendered
     assert "README.md" not in rendered
     assert "contents" not in rendered
-    assert len(provider.received_histories) == 3
+    assert len(provider.received_requests) == 3
     assert len(loop.turns) == 2
 
 
@@ -188,7 +188,7 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
         color=False,
     )
 
-    assert provider.received_histories[1] == (
+    assert provider.received_requests[1].history == (
         UserMessage(text="first prompt"),
         AssistantText(text="first reply"),
         UserMessage(text="second prompt"),

@@ -18,11 +18,11 @@ class RecordingProvider:
     closed: bool = False
 
     def __post_init__(self) -> None:
-        self.histories = []
+        self.requests = []
 
-    def respond(self, history):
-        self.histories.append(history)
-        return AssistantText(text=f"{self.label}: {history[-1].text}")
+    def respond(self, request):
+        self.requests.append(request)
+        return AssistantText(text=f"{self.label}: {request.history[-1].text}")
 
     def close(self) -> None:
         self.closed = True
@@ -127,7 +127,17 @@ def test_project_session_preserves_neutral_history_across_provider_switch(tmp_pa
         UserMessage("second"),
         AssistantText("model-two: second"),
     )
-    assert providers["model-two"].histories[0][:2] == session.history[:2]
+    assert providers["model-two"].requests[0].history[:2] == session.history[:2]
+    assert (
+        providers["model-one"].requests[0].system_prompt
+        == providers["model-two"].requests[0].system_prompt
+    )
+    assert all(
+        request.system_prompt.text not in repr(item)
+        for provider in providers.values()
+        for request in provider.requests
+        for item in request.history
+    )
 
 
 def test_user_scope_switch_respects_existing_project_precedence(tmp_path) -> None:
@@ -236,12 +246,14 @@ def test_project_session_pins_provider_for_tool_continuation(tmp_path) -> None:
     class ToolProvider:
         def __init__(self):
             self.calls = 0
+            self.requests = []
 
-        def respond(self, history):
+        def respond(self, request):
             self.calls += 1
+            self.requests.append(request)
             if self.calls == 1:
                 return ToolUse("call-1", "read_file", "README.md")
-            assert history[-1] == ToolResult("call-1", "notes\n")
+            assert request.history[-1] == ToolResult("call-1", "notes\n")
             return AssistantText("done")
 
     provider = ToolProvider()
@@ -256,4 +268,5 @@ def test_project_session_pins_provider_for_tool_continuation(tmp_path) -> None:
 
     assert session.prompt("read it") == "done"
     assert provider.calls == 2
+    assert provider.requests[0].system_prompt is provider.requests[1].system_prompt
     assert session.status().credential_present is False

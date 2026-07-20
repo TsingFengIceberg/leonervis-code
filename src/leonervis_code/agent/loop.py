@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from leonervis_code.core.contracts import (
     AssistantText,
     CommittedTurn,
     ConversationItem,
     ConversationProvider,
+    ConversationRequest,
     ConversationTurn,
+    SystemPromptSnapshot,
     ToolResult,
     ToolUse,
     TurnCommitter,
     UserMessage,
 )
-from leonervis_code.tools.read_file import ReadFileTool
+from leonervis_code.system_prompt import build_system_prompt
+from leonervis_code.tools.read_file import (
+    MAX_READ_FILE_EXECUTIONS_PER_TURN,
+    READ_FILE_TOOL_NAME,
+    ReadFileTool,
+)
 
-MAX_TOOL_CALLS = 3
+SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 
 
 class ToolLoopLimitError(RuntimeError):
@@ -32,12 +41,14 @@ class AgentLoop:
         *,
         initial_history: tuple[ConversationItem, ...] = (),
         commit_turn: TurnCommitter | None = None,
+        system_prompt_factory: SystemPromptFactory = build_system_prompt,
     ) -> None:
         """Store a provider, confined tool, validated history, and durable commit hook."""
         self._provider = provider
         self._read_file = read_file
         self._history, self._turns = restore_history(initial_history)
         self._commit_turn = commit_turn
+        self._system_prompt_factory = system_prompt_factory
 
     @property
     def history(self) -> tuple[ConversationItem, ...]:
@@ -61,16 +72,19 @@ class AgentLoop:
             raise RuntimeError("conversation provider is required for this turn")
         user = UserMessage(text=prompt)
         candidate: tuple[ConversationItem, ...] = self._history + (user,)
+        system_prompt = self._system_prompt_factory()
         tool_calls = 0
 
         while True:
-            response = turn_provider.respond(candidate)
+            response = turn_provider.respond(
+                ConversationRequest(system_prompt=system_prompt, history=candidate)
+            )
             if isinstance(response, AssistantText):
                 self._commit(candidate + (response,), user, response)
                 return response.text
 
             candidate += (response,)
-            if tool_calls == MAX_TOOL_CALLS:
+            if tool_calls == MAX_READ_FILE_EXECUTIONS_PER_TURN:
                 candidate += (
                     ToolResult(
                         tool_use_id=response.tool_use_id,
@@ -78,7 +92,9 @@ class AgentLoop:
                         is_error=True,
                     ),
                 )
-                final_response = turn_provider.respond(candidate)
+                final_response = turn_provider.respond(
+                    ConversationRequest(system_prompt=system_prompt, history=candidate)
+                )
                 if isinstance(final_response, AssistantText):
                     self._commit(candidate + (final_response,), user, final_response)
                     return final_response.text
@@ -106,7 +122,7 @@ class AgentLoop:
 
     def _execute(self, request: ToolUse) -> ToolResult:
         """Dispatch the only Foundation 1B tool or return a model-visible error."""
-        if request.name == "read_file":
+        if request.name == READ_FILE_TOOL_NAME:
             return self._read_file.execute(request)
         return ToolResult(
             tool_use_id=request.tool_use_id,

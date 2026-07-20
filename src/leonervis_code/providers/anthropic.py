@@ -10,6 +10,7 @@ import anthropic
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationItem,
+    ConversationRequest,
     ProviderResponse,
     ToolResult,
     ToolUse,
@@ -22,6 +23,7 @@ from leonervis_code.providers.errors import (
     safe_request_id,
     safe_retry_after,
 )
+from leonervis_code.tools.read_file import read_file_model_definition
 
 PROVIDER_ID = "anthropic"
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
@@ -94,12 +96,13 @@ class AnthropicConversationProvider:
         if callable(close):
             close()
 
-    def respond(self, history: tuple[ConversationItem, ...]) -> ProviderResponse:
+    def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
         """Make one non-streaming request through the injected SDK seam."""
-        messages = serialize_history(history, config=self._config)
+        messages = serialize_history(request_snapshot.history, config=self._config)
         request: dict[str, object] = {
             "model": self._config.model_id,
             "max_tokens": self._config.max_output_tokens,
+            "system": request_snapshot.system_prompt.text,
             "messages": messages,
             "tools": [read_file_tool_definition()],
             "stream": False,
@@ -114,17 +117,8 @@ class AnthropicConversationProvider:
 
 
 def read_file_tool_definition() -> dict[str, object]:
-    """Return a fresh copy of the only tool schema exposed by Foundation 3A."""
-    return {
-        "name": "read_file",
-        "description": "Read one UTF-8 text file relative to the current workspace.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-            "additionalProperties": False,
-        },
-    }
+    """Wrap the shared read_file contract for Anthropic Messages."""
+    return read_file_model_definition()
 
 
 def serialize_history(

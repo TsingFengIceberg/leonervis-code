@@ -139,7 +139,7 @@ def test_real_prompt_uses_injected_provider_and_workspace(monkeypatch, tmp_path)
     constructed = []
 
     class TextProvider:
-        def respond(self, history):
+        def respond(self, request):
             return AssistantText(text="Real provider response")
 
     def fake_factory(route, *, environment):
@@ -367,7 +367,7 @@ def test_provider_profile_crud_and_active_precedence_use_injected_paths(tmp_path
     constructed = []
 
     class LocalProvider:
-        def respond(self, history):
+        def respond(self, request):
             return AssistantText("local response")
 
     def factory(route, *, environment):
@@ -458,7 +458,7 @@ def test_profile_model_override_is_runtime_only_and_profile_output_is_redacted(t
     captured = []
 
     class TextProvider:
-        def respond(self, history):
+        def respond(self, request):
             return AssistantText("ok")
 
     def factory(route, *, environment):

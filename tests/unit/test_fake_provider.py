@@ -1,19 +1,29 @@
 import pytest
 
-from leonervis_code.core.contracts import AssistantText, ToolUse, UserMessage
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ConversationRequest,
+    ToolUse,
+    UserMessage,
+)
 from leonervis_code.providers.fake import ScriptedFakeProvider
+from leonervis_code.system_prompt import build_system_prompt
+
+
+def request(*history):
+    return ConversationRequest(system_prompt=build_system_prompt(), history=tuple(history))
 
 
 def test_default_fake_provider_uses_the_latest_user_text() -> None:
     provider = ScriptedFakeProvider()
-    history = (
+    model_request = request(
         UserMessage(text="Hello"),
         AssistantText(text="Fake response: Hello"),
         UserMessage(text="Again"),
     )
 
-    assert provider.respond(history) == AssistantText(text="Fake response: Again")
-    assert provider.received_histories == (history,)
+    assert provider.respond(model_request) == AssistantText(text="Fake response: Again")
+    assert provider.received_requests == (model_request,)
 
 
 def test_fake_provider_returns_scripted_outcomes_in_order() -> None:
@@ -23,23 +33,24 @@ def test_fake_provider_returns_scripted_outcomes_in_order() -> None:
             AssistantText(text="summary"),
         ]
     )
-    first_history = (UserMessage(text="Read README"),)
-    second_history = first_history + (
+    first_request = request(UserMessage(text="Read README"))
+    second_request = request(
+        UserMessage(text="Read README"),
         ToolUse(tool_use_id="read-1", name="read_file", path="README.md"),
     )
 
-    assert provider.respond(first_history) == ToolUse(
+    assert provider.respond(first_request) == ToolUse(
         tool_use_id="read-1", name="read_file", path="README.md"
     )
-    assert provider.respond(second_history) == AssistantText(text="summary")
-    assert provider.received_histories == (first_history, second_history)
+    assert provider.respond(second_request) == AssistantText(text="summary")
+    assert provider.received_requests == (first_request, second_request)
 
 
 def test_fake_provider_raises_scripted_errors_and_exhaustion() -> None:
     provider = ScriptedFakeProvider([RuntimeError("planned failure")])
-    history = (UserMessage(text="Hello"),)
+    model_request = request(UserMessage(text="Hello"))
 
     with pytest.raises(RuntimeError, match="planned failure"):
-        provider.respond(history)
+        provider.respond(model_request)
     with pytest.raises(RuntimeError, match="fake provider script is exhausted"):
-        provider.respond(history)
+        provider.respond(model_request)

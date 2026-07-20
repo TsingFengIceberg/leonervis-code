@@ -12,6 +12,7 @@ from leonervis_code.providers.profile import ProviderProfileSpec
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.session import ProjectSession
 from leonervis_code.session_store import SessionStore, SessionStoreError
+from leonervis_code.system_prompt import build_system_prompt
 
 SESSION_ONE = "12345678-1234-4234-9234-123456789abc"
 SESSION_TWO = "22345678-1234-4234-9234-123456789abc"
@@ -21,14 +22,14 @@ NOW = "2026-07-17T12:00:00.000000Z"
 @dataclass
 class RecordingProvider:
     label: str
-    histories: list = None
+    requests: list = None
 
     def __post_init__(self) -> None:
-        self.histories = []
+        self.requests = []
 
-    def respond(self, history):
-        self.histories.append(history)
-        return AssistantText(f"{self.label}: {history[-1].text}")
+    def respond(self, request):
+        self.requests.append(request)
+        return AssistantText(f"{self.label}: {request.history[-1].text}")
 
 
 def session_store_factory(*ids: str):
@@ -101,6 +102,7 @@ def test_project_session_resume_does_not_restore_historical_provider_binding(
         session_store_factory=session_store_factory(SESSION_ONE),
     )
     assert first.prompt("first") == "model-one: first"
+    first_prompt = providers[0].requests[0].system_prompt
     first.close()
 
     store.remove_profile_by_id(stored.profile_id)
@@ -115,6 +117,8 @@ def test_project_session_resume_does_not_restore_historical_provider_binding(
 
     assert resumed.status().mode == "fake"
     assert resumed.history[-1] == AssistantText("model-one: first")
+    assert first_prompt == build_system_prompt()
+    assert all(first_prompt.text not in repr(item) for item in resumed.history)
     assert resumed.prompt("second") == "Fake response: second"
     resumed.close()
 

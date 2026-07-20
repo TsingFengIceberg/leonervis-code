@@ -41,7 +41,7 @@ def test_loop_commits_structured_tool_causality_after_final_text(tmp_path) -> No
     )
 
     assert loop.run("Continue") == "Second reply"
-    assert provider.received_histories[-1] == loop.history[:-1]
+    assert provider.received_requests[-1].history == loop.history[:-1]
 
 
 def test_loop_returns_unknown_tools_as_model_visible_errors(tmp_path) -> None:
@@ -54,7 +54,7 @@ def test_loop_returns_unknown_tools_as_model_visible_errors(tmp_path) -> None:
     loop = AgentLoop(provider, ReadFileTool(tmp_path))
 
     assert loop.run("Search") == "The requested tool is unavailable."
-    assert provider.received_histories[1][-1] == ToolResult(
+    assert provider.received_requests[1].history[-1] == ToolResult(
         tool_use_id="unknown-1", content="unknown tool: search", is_error=True
     )
 
@@ -76,7 +76,7 @@ def test_loop_does_not_commit_candidate_when_provider_fails_after_a_tool(tmp_pat
     assert loop.history == ()
     assert loop.turns == ()
     assert loop.run("retry prompt") == "retry reply"
-    assert provider.received_histories[-1] == (UserMessage(text="retry prompt"),)
+    assert provider.received_requests[-1].history == (UserMessage(text="retry prompt"),)
 
 
 def test_loop_bounds_tool_requests_and_returns_budget_error_before_final_text(tmp_path) -> None:
@@ -183,9 +183,44 @@ def test_history_snapshots_cannot_be_mutated_by_later_turns(tmp_path) -> None:
     )
     loop = AgentLoop(provider, ReadFileTool(tmp_path))
     loop.run("first prompt")
-    first_request = provider.received_histories[0]
+    first_request = provider.received_requests[0].history
 
     loop.run("second prompt")
 
     assert first_request == (UserMessage(text="first prompt"),)
     assert loop.history is not first_request
+
+
+def test_loop_pins_one_system_prompt_snapshot_across_tool_continuations(tmp_path) -> None:
+    (tmp_path / "README.md").write_text("notes\n", encoding="utf-8")
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse("call-1", "read_file", "README.md"),
+            AssistantText("done"),
+        ]
+    )
+    snapshots = []
+
+    def build_snapshot():
+        from leonervis_code.system_prompt import build_system_prompt
+
+        snapshot = build_system_prompt()
+        snapshots.append(snapshot)
+        return snapshot
+
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        system_prompt_factory=build_snapshot,
+    )
+
+    assert loop.run("read") == "done"
+    assert len(snapshots) == 1
+    assert [request.system_prompt for request in provider.received_requests] == [
+        snapshots[0],
+        snapshots[0],
+    ]
+    assert (
+        provider.received_requests[0].system_prompt is provider.received_requests[1].system_prompt
+    )
+    assert all(snapshots[0].text not in repr(item) for item in loop.history)

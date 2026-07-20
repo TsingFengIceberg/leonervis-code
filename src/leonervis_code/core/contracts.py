@@ -7,6 +7,15 @@ from typing import Callable, Protocol, TypeAlias
 
 
 @dataclass(frozen=True)
+class SystemPromptSnapshot:
+    """One immutable, versioned system prompt sent with a provider request."""
+
+    version: int
+    text: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
 class UserMessage:
     """One user text input in an ordered in-memory conversation."""
 
@@ -61,8 +70,16 @@ TurnCommitter: TypeAlias = Callable[[CommittedTurn], None]
 ProviderResponse: TypeAlias = AssistantText | ToolUse
 
 
-class ConversationProvider(Protocol):
-    """Produce one structured assistant response from ordered conversation context."""
+@dataclass(frozen=True)
+class ConversationRequest:
+    """Provider-neutral model request with system policy separate from history."""
 
-    def respond(self, history: tuple[ConversationItem, ...]) -> ProviderResponse:
+    system_prompt: SystemPromptSnapshot
+    history: tuple[ConversationItem, ...]
+
+
+class ConversationProvider(Protocol):
+    """Produce one structured assistant response from a complete request snapshot."""
+
+    def respond(self, request: ConversationRequest) -> ProviderResponse:
         """Return final assistant text or one requested tool action."""

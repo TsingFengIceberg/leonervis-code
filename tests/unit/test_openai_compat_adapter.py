@@ -12,7 +12,13 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
 )
 
 from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ConversationRequest,
+    ToolResult,
+    ToolUse,
+    UserMessage,
+)
 from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.providers.definitions import OPENAI
 from leonervis_code.providers.errors import ProviderAdapterError
@@ -25,6 +31,7 @@ from leonervis_code.providers.openai_compat import (
     serialize_history,
 )
 from leonervis_code.providers.resolver import resolve_runtime_route
+from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -43,6 +50,10 @@ class RecordingChatClient:
 
 def route(selector: str = "openai/gpt-4.1"):
     return resolve_runtime_route(selector, environment={})
+
+
+def request(*history) -> ConversationRequest:
+    return ConversationRequest(system_prompt=build_system_prompt(), history=tuple(history))
 
 
 def completion(
@@ -133,10 +144,18 @@ def test_tool_schema_is_exact_and_closed() -> None:
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read one UTF-8 text file relative to the current workspace.",
+            "description": (
+                "Read one workspace-relative UTF-8 text file when its contents are needed to "
+                "answer the user. This tool is read-only and its bounded output may be truncated."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to one UTF-8 text file in the workspace.",
+                    }
+                },
                 "required": ["path"],
                 "additionalProperties": False,
             },
@@ -181,7 +200,12 @@ def test_request_selects_token_field_and_omits_fixed_sampling_temperature() -> N
     normal = resolve_runtime_route(
         "openai/gpt-4.1", environment={}, max_output_tokens=32, temperature=0.2
     )
-    normal_request = build_request(normal, (UserMessage(text="Hello"),))
+    normal_request = build_request(normal, request(UserMessage(text="Hello")))
+    assert normal_request["messages"][0] == {
+        "role": "system",
+        "content": build_system_prompt().text,
+    }
+    assert normal_request["messages"][1] == {"role": "user", "content": "Hello"}
     assert normal_request["max_tokens"] == 32
     assert normal_request["temperature"] == 0.2
     assert "max_completion_tokens" not in normal_request
@@ -189,7 +213,7 @@ def test_request_selects_token_field_and_omits_fixed_sampling_temperature() -> N
     reasoning = resolve_runtime_route(
         "openai/gpt-5", environment={}, max_output_tokens=64, temperature=0.2
     )
-    reasoning_request = build_request(reasoning, (UserMessage(text="Hello"),))
+    reasoning_request = build_request(reasoning, request(UserMessage(text="Hello")))
     assert reasoning_request["max_completion_tokens"] == 64
     assert "max_tokens" not in reasoning_request
     assert "temperature" not in reasoning_request
@@ -197,7 +221,7 @@ def test_request_selects_token_field_and_omits_fixed_sampling_temperature() -> N
 
 def test_openrouter_preserves_nested_wire_slug_and_custom_preserves_model() -> None:
     openrouter = resolve_runtime_route("openrouter/anthropic/claude-opus-4-8", environment={})
-    assert build_request(openrouter, (UserMessage(text="Hi"),))["model"] == (
+    assert build_request(openrouter, request(UserMessage(text="Hi")))["model"] == (
         "anthropic/claude-opus-4-8"
     )
 
@@ -207,7 +231,7 @@ def test_openrouter_preserves_nested_wire_slug_and_custom_preserves_model() -> N
         custom_protocol="openai-compatible",
         custom_base_url="https://gateway.example/v1",
     )
-    assert build_request(custom, (UserMessage(text="Hi"),))["model"] == "vendor/model"
+    assert build_request(custom, request(UserMessage(text="Hi")))["model"] == "vendor/model"
 
 
 def test_request_body_limit_fails_before_client_call() -> None:
@@ -217,7 +241,7 @@ def test_request_body_limit_fails_before_client_call() -> None:
     provider = OpenAICompatibleConversationProvider(limited_route, client)
 
     with pytest.raises(ProviderAdapterError) as caught:
-        provider.respond((UserMessage(text="a long enough message to cross the body limit"),))
+        provider.respond(request(UserMessage(text="a long enough message to cross the body limit")))
     assert caught.value.failure.kind == ProviderFailureKind.INVALID_REQUEST
     assert client.requests == []
 
@@ -233,6 +257,11 @@ def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:
     loop = AgentLoop(OpenAICompatibleConversationProvider(route(), client), ReadFileTool(tmp_path))
 
     assert loop.run("Read README") == "I read it."
+    assert client.requests[1]["messages"][0] == {
+        "role": "system",
+        "content": build_system_prompt().text,
+    }
+    assert sum(message["role"] == "system" for message in client.requests[1]["messages"]) == 1
     assert client.requests[1]["messages"][-1] == {
         "role": "tool",
         "tool_call_id": "call_read",
