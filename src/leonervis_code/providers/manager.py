@@ -5,15 +5,21 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from pathlib import Path
 from threading import RLock
 
 from leonervis_code.core.contracts import ConversationProvider
-from leonervis_code.providers.definitions import (
-    ADAPTER_CONTRACT_VERSION,
-    RuntimeProviderRoute,
-)
+from leonervis_code.providers.definitions import ADAPTER_CONTRACT_VERSION, RuntimeProviderRoute
 from leonervis_code.providers.factory import create_provider
 from leonervis_code.providers.fake import ScriptedFakeProvider
+from leonervis_code.providers.model_context import (
+    ModelContextCapability,
+    ModelContextCapabilityResolver,
+)
+from leonervis_code.providers.model_context_cache import (
+    ModelContextCapabilityCache,
+    default_model_context_cache_path,
+)
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.providers.resolver import resolve_profile_route, resolve_runtime_route
@@ -48,12 +54,24 @@ class RuntimeStatus:
     profile_fingerprint: str | None = None
     route_fingerprint: str | None = None
     model_override: str | None = None
+    context_window_tokens: int | None = None
+    context_window_source: str = "unknown"
+    context_window_discovered_at: str | None = None
+    context_window_expires_at: str | None = None
+    context_window_diagnostic: str | None = None
     adapter_contract_version: int = ADAPTER_CONTRACT_VERSION
 
     @property
     def profile_name(self) -> str | None:
         """Expose an explicit name while retaining the existing ``profile`` field."""
         return self.profile
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    route: RuntimeProviderRoute
+    provider: ConversationProvider
+    capability: ModelContextCapability
 
 
 class RuntimeProviderManager:
@@ -71,32 +89,43 @@ class RuntimeProviderManager:
         custom_api_key_env: str | None = None,
         provider_factory: ProviderFactory = create_provider,
         fake_factory: Callable[[], ConversationProvider] = ScriptedFakeProvider,
+        context_resolver: ModelContextCapabilityResolver | None = None,
+        context_cache_path: Path | None = None,
     ) -> None:
         self._store = store
         self._environment = environment
         self._provider_factory = provider_factory
         self._fake_factory = fake_factory
+        self._context_resolver = context_resolver or ModelContextCapabilityResolver(
+            ModelContextCapabilityCache(
+                context_cache_path or default_model_context_cache_path(dict(environment))
+            )
+        )
         self._lock = RLock()
         self._turn_active = False
         self._closed = False
+        self._generation = 0
         self._profile_id: str | None = None
         self._loaded_profile: NamedProviderProfile | None = None
         self._model_override: str | None = None
         self._direct_route: RuntimeProviderRoute | None = None
         self._selection_source = "default"
         self._route: RuntimeProviderRoute | None = None
+        self._capability = ModelContextCapability.unknown(None)
 
         if profile is not None:
             selected_profile = store.get_profile(profile)
             route = resolve_profile_route(
                 selected_profile, environment=environment, model_override=model
             )
-            provider_instance = self._construct(route)
+            candidate = self._prepare_candidate(
+                route,
+                _profile_override(selected_profile, model_override=model),
+            )
             self._load_profile(selected_profile)
             self._model_override = model
             self._selection_source = "cli"
-            self._route = route
-            self._provider = provider_instance
+            self._activate(candidate)
         elif model is not None:
             route = resolve_runtime_route(
                 model,
@@ -105,10 +134,10 @@ class RuntimeProviderManager:
                 custom_base_url=custom_base_url,
                 custom_api_key_env=custom_api_key_env,
             )
-            self._route = route
+            candidate = self._prepare_candidate(route, None)
             self._direct_route = route
             self._selection_source = "cli"
-            self._provider = self._construct(route)
+            self._activate(candidate)
         else:
             active = store.active_selection()
             if active is None:
@@ -116,10 +145,10 @@ class RuntimeProviderManager:
             else:
                 selected_profile = store.get_profile_by_id(active.profile_id)
                 route = resolve_profile_route(selected_profile, environment=environment)
+                candidate = self._prepare_candidate(route, selected_profile.context_window_tokens)
                 self._load_profile(selected_profile)
                 self._selection_source = active.source
-                self._route = route
-                self._provider = self._construct(route)
+                self._activate(candidate)
 
     @classmethod
     def prepare_profile(
@@ -130,26 +159,51 @@ class RuntimeProviderManager:
         scope: str,
         environment: Mapping[str, str],
         provider_factory: ProviderFactory = create_provider,
+        context_resolver: ModelContextCapabilityResolver | None = None,
+        context_cache_path: Path | None = None,
     ) -> RuntimeStatus:
-        """Validate and persist a profile selection without constructing the old runtime."""
-        with store.transaction():
-            requested = store.get_profile(name)
-            selection = store.selection_with_id(requested.profile_id, scope)
-            loaded = store.get_profile_by_id(selection.profile_id)
-            route = resolve_profile_route(loaded, environment=environment)
-            candidate = provider_factory(route, environment=environment)
-            try:
+        """Prepare outside locks, then validate and persist one profile selection."""
+        requested = store.get_profile(name)
+        selection = store.selection_with_id(requested.profile_id, scope)
+        loaded = store.get_profile_by_id(selection.profile_id)
+        route = resolve_profile_route(loaded, environment=environment)
+        resolver = context_resolver or ModelContextCapabilityResolver(
+            ModelContextCapabilityCache(
+                context_cache_path or default_model_context_cache_path(dict(environment))
+            )
+        )
+        candidate = _prepare_external_candidate(
+            route,
+            loaded.context_window_tokens,
+            environment,
+            provider_factory,
+            resolver,
+        )
+        try:
+            with store.transaction():
+                current_requested = store.get_profile_by_id(requested.profile_id)
+                current_selection = store.selection_with_id(current_requested.profile_id, scope)
+                current_loaded = store.get_profile_by_id(current_selection.profile_id)
+                if (
+                    current_requested.revision != requested.revision
+                    or current_loaded.profile_id != loaded.profile_id
+                    or current_loaded.revision != loaded.revision
+                ):
+                    raise RuntimeProviderStateError(
+                        "provider profile changed during runtime preparation"
+                    )
                 store.set_active_id(requested.profile_id, scope=scope)
-            except Exception:
-                _close_provider(candidate)
-                raise
-        _close_provider(candidate)
+        except Exception:
+            _close_provider(candidate.provider)
+            raise
+        _close_provider(candidate.provider)
         return _status_for_route(
             route,
             profile=loaded,
             source=selection.source,
             environment=environment,
             model_override=None,
+            capability=candidate.capability,
         )
 
     @classmethod
@@ -160,40 +214,66 @@ class RuntimeProviderManager:
         scope: str,
         environment: Mapping[str, str],
         provider_factory: ProviderFactory = create_provider,
+        context_resolver: ModelContextCapabilityResolver | None = None,
+        context_cache_path: Path | None = None,
     ) -> RuntimeStatus:
-        """Validate and persist a cleared selection without constructing the old runtime."""
-        with store.transaction():
-            selection = store.selection_without(scope)
-            if selection is None:
+        """Prepare the next layer outside locks, then persist a validated clear."""
+        selection = store.selection_without(scope)
+        if selection is None:
+            with store.transaction():
+                if store.selection_without(scope) is not None:
+                    raise RuntimeProviderStateError(
+                        "provider selection changed during runtime preparation"
+                    )
                 store.clear_active(scope=scope)
-                return _fake_status()
-            loaded = store.get_profile_by_id(selection.profile_id)
-            route = resolve_profile_route(loaded, environment=environment)
-            candidate = provider_factory(route, environment=environment)
-            try:
+            return _fake_status()
+        loaded = store.get_profile_by_id(selection.profile_id)
+        route = resolve_profile_route(loaded, environment=environment)
+        resolver = context_resolver or ModelContextCapabilityResolver(
+            ModelContextCapabilityCache(
+                context_cache_path or default_model_context_cache_path(dict(environment))
+            )
+        )
+        candidate = _prepare_external_candidate(
+            route,
+            loaded.context_window_tokens,
+            environment,
+            provider_factory,
+            resolver,
+        )
+        try:
+            with store.transaction():
+                current = store.selection_without(scope)
+                if (
+                    current is None
+                    or current.profile_id != selection.profile_id
+                    or current.revision != selection.revision
+                ):
+                    raise RuntimeProviderStateError(
+                        "provider selection changed during runtime preparation"
+                    )
                 store.clear_active(scope=scope)
-            except Exception:
-                _close_provider(candidate)
-                raise
-        _close_provider(candidate)
+        except Exception:
+            _close_provider(candidate.provider)
+            raise
+        _close_provider(candidate.provider)
         return _status_for_route(
             route,
             profile=loaded,
             source=selection.source,
             environment=environment,
             model_override=None,
+            capability=candidate.capability,
         )
 
     @property
     def current_provider(self) -> ConversationProvider:
-        """Return the current provider for initial loop compatibility wiring."""
         with self._lock:
             self._ensure_open()
             return self._provider
 
     @property
     def store(self) -> ProviderProfileStore:
-        """Return the profile store used by this manager."""
         return self._store
 
     @contextmanager
@@ -212,91 +292,151 @@ class RuntimeProviderManager:
                 self._turn_active = False
 
     def use_profile(self, name: str, *, scope: str = "project") -> RuntimeStatus:
-        """Construct, persist, and commit one effective profile switch atomically."""
-        with self._lock, self._store.transaction():
-            self._ensure_switchable()
-            requested = self._store.get_profile(name)
-            selection = self._store.selection_with_id(requested.profile_id, scope)
-            loaded = self._store.get_profile_by_id(selection.profile_id)
-            route = resolve_profile_route(loaded, environment=self._environment)
-            candidate = self._construct(route)
-            try:
-                self._store.set_active_id(requested.profile_id, scope=scope)
-            except Exception:
-                _close_provider(candidate)
-                raise
-            old = self._provider
-            self._provider = candidate
-            self._route = route
-            self._load_profile(loaded)
-            self._model_override = None
-            self._direct_route = None
-            self._selection_source = selection.source
-            _close_provider(old)
-            return self.status()
-
-    def clear_active(self, *, scope: str = "project") -> RuntimeStatus:
-        """Activate the next layer and commit its persisted clear only after construction."""
-        with self._lock, self._store.transaction():
-            self._ensure_switchable()
-            selection = self._store.selection_without(scope)
-            if selection is None:
-                candidate = self._fake_factory()
-                route = None
-                loaded = None
-                source = "default"
-            else:
-                loaded = self._store.get_profile_by_id(selection.profile_id)
-                route = resolve_profile_route(loaded, environment=self._environment)
-                candidate = self._construct(route)
-                source = selection.source
-            try:
-                self._store.clear_active(scope=scope)
-            except Exception:
-                _close_provider(candidate)
-                raise
-            old = self._provider
-            self._provider = candidate
-            self._route = route
-            if loaded is None:
-                self._profile_id = None
-                self._loaded_profile = None
-            else:
-                self._load_profile(loaded)
-            self._model_override = None
-            self._direct_route = None
-            self._selection_source = source
-            _close_provider(old)
-            return self.status()
-
-    def set_model(self, model: str) -> RuntimeStatus:
-        """Apply a non-persistent override, reloading profile configuration by stable ID."""
+        """Prepare outside locks and atomically commit one effective profile switch."""
         with self._lock:
             self._ensure_switchable()
-            if self._profile_id is not None:
-                loaded = self._store.get_profile_by_id(self._profile_id)
-                route = resolve_profile_route(
-                    loaded,
-                    environment=self._environment,
-                    model_override=model,
+            generation = self._generation
+        requested = self._store.get_profile(name)
+        selection = self._store.selection_with_id(requested.profile_id, scope)
+        loaded = self._store.get_profile_by_id(selection.profile_id)
+        route = resolve_profile_route(loaded, environment=self._environment)
+        candidate = self._prepare_candidate(route, loaded.context_window_tokens)
+        try:
+            with self._lock, self._store.transaction():
+                self._ensure_switchable()
+                if self._generation != generation:
+                    raise RuntimeProviderStateError(
+                        "provider runtime changed during switch preparation"
+                    )
+                current_requested = self._store.get_profile_by_id(requested.profile_id)
+                current_selection = self._store.selection_with_id(
+                    current_requested.profile_id, scope
                 )
-            elif self._direct_route is not None:
-                loaded = None
-                route = _route_with_model(self._direct_route, model)
-            else:
-                raise RuntimeProviderStateError("model override requires a real provider runtime")
-            candidate = self._construct(route)
-            old = self._provider
-            self._provider = candidate
-            self._route = route
-            if loaded is not None:
+                current_loaded = self._store.get_profile_by_id(current_selection.profile_id)
+                if (
+                    current_requested.revision != requested.revision
+                    or current_loaded.profile_id != loaded.profile_id
+                    or current_loaded.revision != loaded.revision
+                ):
+                    raise RuntimeProviderStateError(
+                        "provider profile changed during switch preparation"
+                    )
+                self._store.set_active_id(requested.profile_id, scope=scope)
+                old = self._provider
+                self._activate(candidate)
                 self._load_profile(loaded)
-            self._model_override = model
-            _close_provider(old)
-            return self.status()
+                self._model_override = None
+                self._direct_route = None
+                self._selection_source = selection.source
+                self._generation += 1
+        except Exception:
+            _close_provider(candidate.provider)
+            raise
+        _close_provider(old)
+        return self.status()
+
+    def clear_active(self, *, scope: str = "project") -> RuntimeStatus:
+        """Prepare the next layer outside locks and atomically commit a clear."""
+        with self._lock:
+            self._ensure_switchable()
+            generation = self._generation
+        selection = self._store.selection_without(scope)
+        if selection is None:
+            candidate_provider = self._fake_factory()
+            candidate = None
+            loaded = None
+            source = "default"
+        else:
+            loaded = self._store.get_profile_by_id(selection.profile_id)
+            route = resolve_profile_route(loaded, environment=self._environment)
+            candidate = self._prepare_candidate(route, loaded.context_window_tokens)
+            candidate_provider = candidate.provider
+            source = selection.source
+        try:
+            with self._lock, self._store.transaction():
+                self._ensure_switchable()
+                if self._generation != generation:
+                    raise RuntimeProviderStateError(
+                        "provider runtime changed during switch preparation"
+                    )
+                current = self._store.selection_without(scope)
+                if (current is None) != (selection is None) or (
+                    current is not None
+                    and selection is not None
+                    and (current.profile_id, current.revision)
+                    != (selection.profile_id, selection.revision)
+                ):
+                    raise RuntimeProviderStateError(
+                        "provider selection changed during switch preparation"
+                    )
+                self._store.clear_active(scope=scope)
+                old = self._provider
+                self._provider = candidate_provider
+                if candidate is None:
+                    self._route = None
+                    self._capability = ModelContextCapability.unknown(None)
+                else:
+                    self._route = candidate.route
+                    self._capability = candidate.capability
+                if loaded is None:
+                    self._profile_id = None
+                    self._loaded_profile = None
+                else:
+                    self._load_profile(loaded)
+                self._model_override = None
+                self._direct_route = None
+                self._selection_source = source
+                self._generation += 1
+        except Exception:
+            _close_provider(candidate_provider)
+            raise
+        _close_provider(old)
+        return self.status()
+
+    def set_model(self, model: str) -> RuntimeStatus:
+        """Prepare a process-local model override and commit it atomically."""
+        with self._lock:
+            self._ensure_switchable()
+            generation = self._generation
+            profile_id = self._profile_id
+            direct_route = self._direct_route
+        if profile_id is not None:
+            loaded = self._store.get_profile_by_id(profile_id)
+            route = resolve_profile_route(
+                loaded, environment=self._environment, model_override=model
+            )
+        elif direct_route is not None:
+            loaded = None
+            route = _route_with_model(direct_route, model)
+        else:
+            raise RuntimeProviderStateError("model override requires a real provider runtime")
+        candidate = self._prepare_candidate(route, None)
+        try:
+            with self._lock:
+                self._ensure_switchable()
+                if self._generation != generation:
+                    raise RuntimeProviderStateError(
+                        "provider runtime changed during switch preparation"
+                    )
+                if loaded is not None:
+                    current = self._store.get_profile_by_id(loaded.profile_id)
+                    if current.revision != loaded.revision:
+                        raise RuntimeProviderStateError(
+                            "provider profile changed during switch preparation"
+                        )
+                old = self._provider
+                self._activate(candidate)
+                if loaded is not None:
+                    self._load_profile(loaded)
+                self._model_override = model
+                self._generation += 1
+        except Exception:
+            _close_provider(candidate.provider)
+            raise
+        _close_provider(old)
+        return self.status()
 
     def status(self) -> RuntimeStatus:
-        """Return a redacted snapshot with profile and resolved-route provenance."""
         with self._lock:
             route = self._route
             if route is None:
@@ -307,10 +447,10 @@ class RuntimeProviderManager:
                 source=self._selection_source,
                 environment=self._environment,
                 model_override=self._model_override,
+                capability=self._capability,
             )
 
     def close(self) -> None:
-        """Close the active client once; subsequent operations are rejected."""
         with self._lock:
             if self._closed:
                 return
@@ -322,8 +462,21 @@ class RuntimeProviderManager:
             provider = self._provider
         _close_provider(provider)
 
-    def _construct(self, route: RuntimeProviderRoute) -> ConversationProvider:
-        return self._provider_factory(route, environment=self._environment)
+    def _prepare_candidate(
+        self, route: RuntimeProviderRoute, profile_override: int | None
+    ) -> _Candidate:
+        return _prepare_external_candidate(
+            route,
+            profile_override,
+            self._environment,
+            self._provider_factory,
+            self._context_resolver,
+        )
+
+    def _activate(self, candidate: _Candidate) -> None:
+        self._provider = candidate.provider
+        self._route = candidate.route
+        self._capability = candidate.capability
 
     def _load_profile(self, profile: NamedProviderProfile) -> None:
         self._profile_id = profile.profile_id
@@ -337,6 +490,30 @@ class RuntimeProviderManager:
         self._ensure_open()
         if self._turn_active:
             raise RuntimeProviderStateError("cannot switch provider during a conversation turn")
+
+
+def _prepare_external_candidate(
+    route: RuntimeProviderRoute,
+    profile_override: int | None,
+    environment: Mapping[str, str],
+    provider_factory: ProviderFactory,
+    resolver: ModelContextCapabilityResolver,
+) -> _Candidate:
+    provider = provider_factory(route, environment=environment)
+    try:
+        capability = resolver.resolve(
+            route,
+            profile_override=profile_override,
+            discoverer=provider,
+        )
+    except Exception:
+        _close_provider(provider)
+        raise
+    return _Candidate(route, provider, capability)
+
+
+def _profile_override(profile: NamedProviderProfile, *, model_override: str | None) -> int | None:
+    return profile.context_window_tokens if model_override is None else None
 
 
 def _route_with_model(route: RuntimeProviderRoute, model: str) -> RuntimeProviderRoute:
@@ -375,6 +552,7 @@ def _status_for_route(
     source: str,
     environment: Mapping[str, str],
     model_override: str | None,
+    capability: ModelContextCapability,
 ) -> RuntimeStatus:
     definition = route.definition
     present = bool(
@@ -400,6 +578,11 @@ def _status_for_route(
         profile_fingerprint=profile.fingerprint() if profile is not None else None,
         route_fingerprint=route.fingerprint(),
         model_override=model_override,
+        context_window_tokens=capability.context_window_tokens,
+        context_window_source=capability.source.value,
+        context_window_discovered_at=capability.discovered_at,
+        context_window_expires_at=capability.expires_at,
+        context_window_diagnostic=capability.diagnostic,
     )
 
 

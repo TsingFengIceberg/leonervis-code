@@ -23,6 +23,10 @@ from leonervis_code.providers.errors import (
     safe_request_id,
     safe_retry_after,
 )
+from leonervis_code.providers.model_context import (
+    OFFICIAL_ANTHROPIC_BASE_URL,
+    ModelContextDiscovery,
+)
 from leonervis_code.tools.read_file import read_file_model_definition
 
 PROVIDER_ID = "anthropic"
@@ -45,6 +49,13 @@ class AnthropicProviderConfig:
             raise ValueError("Anthropic max output tokens must be at least 1")
         if self.temperature is not None and not 0.0 <= self.temperature <= 2.0:
             raise ValueError("Anthropic temperature must be between 0.0 and 2.0")
+
+
+class AnthropicModelsClient(Protocol):
+    """The narrow synchronous Models API operation used for discovery."""
+
+    def retrieve(self, model_id: str, **kwargs: object) -> object:
+        """Retrieve metadata for one exact Anthropic model."""
 
 
 class AnthropicMessagesClient(Protocol):
@@ -73,7 +84,12 @@ def create_anthropic_provider(
         max_retries=0,
         http_client=anthropic.DefaultHttpxClient(follow_redirects=False),
     )
-    return AnthropicConversationProvider(config, client.messages, owner=client)
+    return AnthropicConversationProvider(
+        config,
+        client.messages,
+        models_client=getattr(client, "models", None),
+        owner=client,
+    )
 
 
 class AnthropicConversationProvider:
@@ -84,10 +100,12 @@ class AnthropicConversationProvider:
         config: AnthropicProviderConfig,
         client: AnthropicMessagesClient,
         *,
+        models_client: AnthropicModelsClient | None = None,
         owner: object | None = None,
     ) -> None:
         self._config = config
         self._client = client
+        self._models_client = models_client
         self._owner = owner
 
     def close(self) -> None:
@@ -98,22 +116,53 @@ class AnthropicConversationProvider:
 
     def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
         """Make one non-streaming request through the injected SDK seam."""
-        messages = serialize_history(request_snapshot.history, config=self._config)
-        request: dict[str, object] = {
-            "model": self._config.model_id,
-            "max_tokens": self._config.max_output_tokens,
-            "system": request_snapshot.system_prompt.text,
-            "messages": messages,
-            "tools": [read_file_tool_definition()],
-            "stream": False,
-        }
-        if self._config.temperature is not None:
-            request["temperature"] = self._config.temperature
+        request = build_request(self._config, request_snapshot)
         try:
             response = self._client.create(**request)
         except anthropic.APIError as error:
             raise normalize_sdk_error(error, config=self._config) from None
         return parse_response(response, config=self._config)
+
+    def discover_model_context(self) -> ModelContextDiscovery:
+        """Discover one official Anthropic model's maximum input context."""
+        if (
+            self._models_client is None
+            or self._config.base_url.rstrip("/") != OFFICIAL_ANTHROPIC_BASE_URL
+        ):
+            return ModelContextDiscovery(None, "live context discovery is unsupported")
+        try:
+            model = self._models_client.retrieve(self._config.model_id)
+        except anthropic.APIError:
+            return ModelContextDiscovery(None, "Anthropic model discovery failed safely")
+        model_id = getattr(model, "id", None)
+        max_input_tokens = getattr(model, "max_input_tokens", None)
+        if model_id != self._config.model_id:
+            return ModelContextDiscovery(
+                None, "Anthropic model discovery returned a different model ID"
+            )
+        if type(max_input_tokens) is not int or max_input_tokens < 1:
+            return ModelContextDiscovery(
+                None, "Anthropic model discovery returned no valid input limit"
+            )
+        return ModelContextDiscovery(max_input_tokens)
+
+
+def build_request(
+    config: AnthropicProviderConfig,
+    request_snapshot: ConversationRequest,
+) -> dict[str, object]:
+    """Build one complete Anthropic Messages request deterministically."""
+    request: dict[str, object] = {
+        "model": config.model_id,
+        "max_tokens": config.max_output_tokens,
+        "system": request_snapshot.system_prompt.text,
+        "messages": serialize_history(request_snapshot.history, config=config),
+        "tools": [read_file_tool_definition()],
+        "stream": False,
+    }
+    if config.temperature is not None:
+        request["temperature"] = config.temperature
+    return request
 
 
 def read_file_tool_definition() -> dict[str, object]:

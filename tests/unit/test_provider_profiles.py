@@ -39,6 +39,7 @@ def test_profiles_validate_and_normalize_non_secret_configuration() -> None:
         "base_url": "http://127.0.0.1:11434/v1",
         "api_key_env": None,
         "max_output_tokens": 1024,
+        "context_window_tokens": None,
         "temperature": None,
     }
     assert "api_key" not in configured.to_dict()
@@ -223,7 +224,7 @@ def test_v1_reads_are_deterministic_and_do_not_write(tmp_path) -> None:
     assert project_path.read_bytes() == before_project
 
 
-def test_explicit_migration_rewrites_both_v1_files_as_v2(tmp_path) -> None:
+def test_explicit_migration_rewrites_both_v1_files_as_v3(tmp_path) -> None:
     user_path = tmp_path / "user.json"
     project_path = tmp_path / "project.json"
     write_v1_user(user_path, "Legacy", active="Legacy")
@@ -235,10 +236,10 @@ def test_explicit_migration_rewrites_both_v1_files_as_v2(tmp_path) -> None:
     user = json.loads(user_path.read_text(encoding="utf-8"))
     project = json.loads(project_path.read_text(encoding="utf-8"))
     profile_id = legacy_profile_id("Legacy")
-    assert user["schema_version"] == 2
+    assert user["schema_version"] == 3
     assert user["active_profile_id"] == profile_id
     assert user["profiles"][profile_id]["revision"] == 1
-    assert project == {"schema_version": 2, "active_profile_id": profile_id}
+    assert project == {"schema_version": 3, "active_profile_id": profile_id}
 
 
 @pytest.mark.parametrize(("user_version", "project_version"), [(1, 1), (1, 2), (2, 1), (2, 2)])
@@ -295,14 +296,14 @@ def test_writes_upgrade_only_the_written_file(tmp_path) -> None:
 
     assert json.loads(user_path.read_text(encoding="utf-8"))["schema_version"] == 1
     project = json.loads(project_path.read_text(encoding="utf-8"))
-    assert project["schema_version"] == 2
+    assert project["schema_version"] == 3
     assert project["active_profile_id"] == legacy_profile_id("Legacy")
 
 
 def test_future_schema_versions_fail_closed_for_each_layer(tmp_path) -> None:
     user_path = tmp_path / "user.json"
     project_path = tmp_path / "project.json"
-    user_path.write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+    user_path.write_text(json.dumps({"schema_version": 4}), encoding="utf-8")
     store = ProviderProfileStore(user_path, project_path)
     with pytest.raises(ProviderProfileError, match="unsupported user"):
         store.list_profiles()
@@ -357,8 +358,73 @@ def test_profile_fingerprint_is_canonical_and_excludes_identity_and_name() -> No
     )
 
 
+def test_profile_context_window_override_is_validated_and_fingerprinted() -> None:
+    configured = ProviderProfileSpec(
+        name="local",
+        provider_id="custom",
+        protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+        model="model",
+        base_url="http://127.0.0.1:11434/v1",
+        context_window_tokens=131_072,
+    )
+
+    assert configured.to_dict()["context_window_tokens"] == 131_072
+    assert (
+        configured.fingerprint()
+        != ProviderProfileSpec(
+            name="local",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="model",
+            base_url="http://127.0.0.1:11434/v1",
+        ).fingerprint()
+    )
+    for invalid in (0, -1, True, 100_000_001):
+        with pytest.raises(ProviderProfileError, match="context window"):
+            ProviderProfileSpec(
+                name="local",
+                provider_id="custom",
+                protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+                model="model",
+                base_url="http://127.0.0.1:11434/v1",
+                context_window_tokens=invalid,
+            )
+
+
+def test_schema_v2_rejects_context_override_and_v3_accepts_it(tmp_path) -> None:
+    user_path = tmp_path / "user.json"
+    profile_id = "00000000-0000-4000-8000-000000000001"
+    configured = NamedProviderProfile(
+        name="local",
+        provider_id="custom",
+        protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+        model="model",
+        base_url="http://127.0.0.1:11434/v1",
+        context_window_tokens=131_072,
+        profile_id=profile_id,
+    )
+    user_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "active_profile_id": None,
+                "profiles": {profile_id: configured.to_dict()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = ProviderProfileStore(user_path, tmp_path / "project.json")
+    with pytest.raises(ProviderProfileError, match="unknown field"):
+        store.list_profiles()
+
+    data = json.loads(user_path.read_text(encoding="utf-8"))
+    data["schema_version"] = 3
+    user_path.write_text(json.dumps(data), encoding="utf-8")
+    assert store.get_profile("local").context_window_tokens == 131_072
+
+
 def write_v1_user(path, name: str, *, active: str | None) -> None:
-    configured = profile(name).to_spec().to_dict()
+    configured = profile(name).to_spec().to_dict(include_context_window=False)
     path.write_text(
         json.dumps({"schema_version": 1, "active_profile": active, "profiles": {name: configured}}),
         encoding="utf-8",
@@ -387,7 +453,7 @@ def write_v2_user(path, configured: NamedProviderProfile, *, profile_id: str) ->
             {
                 "schema_version": 2,
                 "active_profile_id": None,
-                "profiles": {profile_id: owned.to_dict()},
+                "profiles": {profile_id: owned.to_dict(include_context_window=False)},
             }
         ),
         encoding="utf-8",

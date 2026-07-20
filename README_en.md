@@ -13,389 +13,213 @@ English | [中文](./README.md)
 
 </div>
 
-Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. It will incrementally build an understandable and verifiable Harness: a model makes decisions, the host executes controlled tools within explicit workspace and permission boundaries, and structured results return to the model.
+Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status: the first provider-neutral canonical model system prompt is complete.** Every fake, Anthropic, and OpenAI-compatible model request now carries the same versioned, fingerprinted stable model contract. Anthropic uses its top-level `system` field, while compatible Chat Completions uses one leading system message. The prompt describes only the current bounded `read_file` capability; it contains no absolute workspace path, Session/provider/model identity, or credential, and it never enters conversation history or Session schema v1. New turns after resume use the current binary's canonical prompt, while exact historical prompt provenance is not yet durable. Stable profile identity, append-only JSONL, persist-before-memory, cross-process `--resume`, runtime/history decoupling, and `max_retries=0` on both real SDK clients remain unchanged.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded `read_file` tool loop, and provider-owned context-window capability are implemented. Request token counting, per-invocation preflight, compaction, write tools, Bash, and approval flows are not yet implemented.
 
-## Project positioning
+## Contents
 
-This project does not attempt to reproduce, replace, or promise compatibility with Claude Code or any other existing product. Its first phase focuses on Harness fundamentals: controlled model calls, tool execution, workspace boundaries, approval, structured events, and deterministic tests.
-
-Implementation progresses through small, complete learning slices. Each slice adds only the code and dependencies it needs, and records its design rationale, data flow, reference differences, known boundary, and test evidence. It will not create empty early shells for MCP, plugins, multi-agent systems, servers, RAG, or background tasks merely to appear complete.
-
-Related Harness reading and learning notes are available in [Harness-study](https://github.com/TsingFengIceberg/Harness-study).
-
-## Requirements
-
-| Item | Current requirement | Notes |
-| --- | --- | --- |
-| Python | **3.12** development/test baseline; 3.13 allowed | The project declares `>=3.12,<3.14`. |
-| [uv](https://docs.astral.sh/uv/) | Latest stable version | The sole manager for Python packages, virtual environments, and lockfiles. |
-| Git | Any current stable version | Used for version control; not a Python dependency. |
-| pytest | `>=8.3` | Current deterministic test runner. |
-| Ruff | `>=0.9` | Current static-checking and formatting tool. |
-
-The root [`.python-version`](./.python-version) selects Python 3.12 by default. If that interpreter is unavailable locally, `uv` will prompt during synchronization; alternatively, install it with `uv python install 3.12`.
+- [Quick start](#quick-start)
+- [Main commands](#main-commands)
+  - [Run tasks and start the REPL](#run-tasks-and-start-the-repl)
+  - [Configure providers](#configure-providers)
+  - [Inspect routes and context windows](#inspect-routes-and-context-windows)
+  - [Manage Sessions](#manage-sessions)
+  - [REPL commands](#repl-commands)
+- [Configuration and local state](#configuration-and-local-state)
+- [Development and verification](#development-and-verification)
+- [Detailed documentation](#detailed-documentation)
+- [Current scope and next step](#current-scope-and-next-step)
 
 ## Quick start
 
+Leonervis Code requires Python 3.12 or 3.13, the latest stable [uv](https://docs.astral.sh/uv/), and Git. The project uses `uv.lock` for a reproducible environment.
+
 ```bash
-# 1. Enter the repository after cloning it
 cd leonervis-code
-
-# 2. Create .venv, install dependencies, and synchronize from uv.lock
 uv sync
-
-# 3. Launch the local interactive terminal (requires a real terminal)
 uv run leonervis-code
 ```
 
-The command shows a colored LEO mark, version, current workspace, redacted runtime status, stable Session ID, transcript path, and auto-save state before displaying a dynamic prompt:
+A bare invocation starts the REPL in a real terminal. Without a selected real provider, it uses the deterministic fake provider and performs no network access:
 
 ```text
 leonervis[3fe4bb27|fake]>
-leonervis[3fe4bb27|deepseek-test]>
-leonervis[3fe4bb27|direct:openai]>
 ```
 
-The first bracketed field is the first eight characters of the current Session UUID and is only a visual cue. The second is current runtime identity: a named profile, `direct:<provider>`, or `fake`. Model, workspace, and turn count stay out of the prompt; use `/status`, `/provider current`, and `/session show` for complete details. Dynamic fields are projected to terminal-safe text and truncated to a fixed width, and the short ID is not accepted as a Session selector.
-
-Enter any nonblank text for a deterministic result:
-
-```text
-leonervis> Explain the Harness boundary
-Fake response: Explain the Harness boundary
-```
-
-The REPL provides durable history, Session controls, and provider-runtime controls. Enter `/session` or `/provider` for focused group help:
-
-```text
-/help                         show controls
-/history <count>              show recent complete turns in the current Session
-/session show                 show the current Session ID, path, and turn count
-/session list                 list Sessions with current/latest and open/closed markers
-/session new                  start empty history while preserving the runtime provider
-/resume <latest|id>           switch Session without changing the runtime provider
-/status                       show redacted current runtime status
-/provider list                list named profiles
-/provider current             show the active profile/provider/model
-/provider use <name>          switch and persist this workspace's active profile
-/model <model>                override only this process; do not edit the profile
-/exit or /quit                exit normally
-Ctrl-D / EOF / Ctrl-C         exit normally
-```
-
-Terminal semantics use traditional colors: green for success, yellow for usage, warnings, or fake/offline state, red for failures, and blue for ordinary information plus real-runtime/Session context. Final model responses remain unstyled. Colors are enabled only on a TTY and can be disabled completely with `NO_COLOR=1`.
-
-For a visible, deterministic Foundation 1B demonstration of the tool loop, run:
+The formal command is `leonervis-code`; `leonervis` is a shorthand. A module entry point is also available:
 
 ```bash
-uv run leonervis-code demo-read README.md
+uv run leonervis --version
+uv run python -m leonervis_code --help
 ```
 
-This command visibly reports a scripted provider request, the workspace-confined `read_file` result, and the scripted final response. It is a verification aid, not a real model interface; it never writes files, executes commands, or accesses the network. Try a failure boundary with a path that escapes the workspace:
+## Main commands
 
-```bash
-uv run leonervis-code demo-read ../outside.txt
-```
-
-For one prompt in scripts or automation, use the explicit subcommand:
-
-```bash
-uv run leonervis-code prompt "Explain the Harness boundary"
-# Fake response: Explain the Harness boundary
-```
-
-The two command names point to the same entry point: `leonervis-code` is the formal command and `leonervis` is its shorthand. A module entry point is also available:
-
-```bash
-uv run leonervis prompt "Hello"
-uv run python -m leonervis_code prompt "Hello"
-```
-
-`--help` and `--version` remain available:
+The command's own help is always the authoritative parameter reference:
 
 ```bash
 uv run leonervis-code --help
-uv run leonervis --version
+uv run leonervis-code provider --help
+uv run leonervis-code session --help
 ```
 
-## First canonical model system prompt
+### Run tasks and start the REPL
 
-Leonervis Code now builds a provider-neutral `SystemPromptSnapshot` from `src/leonervis_code/system_prompt.py`. The snapshot contains an explicit version, normalized text, and a domain-separated SHA-256 fingerprint. It is built once at the beginning of each user turn and remains pinned across every `read_file` continuation in that turn:
+| Purpose | Command |
+| --- | --- |
+| Start a REPL with a new Session | `uv run leonervis-code` |
+| Resume the workspace's latest Session | `uv run leonervis-code --resume latest` |
+| Run one prompt | `uv run leonervis-code prompt "Explain this workspace"` |
+| Run in another workspace | `uv run leonervis-code -C ../project prompt "Explain the project structure"` |
+| Use a named profile | `uv run leonervis-code --profile work prompt "Explain the README"` |
+| Override a profile's model temporarily | `uv run leonervis-code --profile work --model model-v2 prompt "Continue"` |
+| Use a direct model route | `uv run leonervis-code --model anthropic/claude-opus-4-8 prompt "Explain the README"` |
+| Show the version | `uv run leonervis-code --version` |
 
-```text
-SystemPromptSnapshot + neutral conversation history
-  -> Anthropic Messages: top-level system + messages
-  -> OpenAI-compatible: one leading system role + messages
-  -> Scripted fake: record the same request snapshot
-```
+Use `prompt` for scripts and one-shot tasks, and the bare command for a stateful multi-turn REPL. Successful turns are automatically saved to the workspace Session transcript.
 
-The first prompt is a stable contract. It contains no absolute workspace path, date, Session ID, provider/model/profile, endpoint, or credential. It tells the model only what the Harness really provides: selective access to one workspace-relative UTF-8 text file, bounded or truncated tool results, and evidence-based answers. It explicitly does not claim write/edit, glob/grep, Bash/tests, network, approval, compaction, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard path, encoding, and size constraints.
+### Configure providers
 
-The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL still contain only the user/assistant/tool causal chain. A new turn after resume uses the current binary's canonical prompt. Session schema v1 does not yet record the exact historical prompt version/fingerprint; that audit gap is reserved for a separate schema migration. This **model system prompt** is entirely different from the human-facing `leonervis[session8|runtime]>` **REPL prompt**.
-
-See the [canonical model system-prompt decision](./docs/decisions/0012-first-canonical-model-system-prompt.md) for the runtime design and [docs/references/claw-code-prompts](./docs/references/claw-code-prompts/README.md) for the Claw-Code structural study map.
-
-## Foundation 3D: stable profile identity and durable Sessions
-
-Profile-registry schema v2 uses an immutable UUID as reference identity, while each name remains a readable, mutable alias and each revision supports update-conflict checks. A legacy schema-v1 profile deterministically maps its original name to a UUID. The reader accepts mixed v1/v2 user and project files, and a write upgrades only the file it actually changes:
+A built-in provider gets its protocol, default endpoint, and credential environment-variable name from the catalog:
 
 ```bash
-uv run leonervis-code provider show vendor       # show profile ID and revision
-uv run leonervis-code provider list --show-ids
+export ANTHROPIC_API_KEY='...'
+uv run leonervis-code provider add work \
+  --provider anthropic \
+  --model claude-opus-4-8
+```
+
+A custom OpenAI-compatible endpoint requires an explicit protocol and base URL. A profile stores only the credential environment-variable name, never the key value:
+
+```bash
+export VENDOR_API_KEY='...'
+uv run leonervis-code provider add vendor \
+  --provider custom \
+  --model vendor/model \
+  --protocol openai-compatible \
+  --base-url https://gateway.example/v1 \
+  --api-key-env VENDOR_API_KEY \
+  --context-window-tokens 1000000
+```
+
+Common profile-management commands:
+
+```bash
+uv run leonervis-code provider list
+uv run leonervis-code provider show vendor
+uv run leonervis-code provider use vendor              # workspace scope
+uv run leonervis-code provider use vendor --scope user
+uv run leonervis-code provider clear --scope project
 uv run leonervis-code provider rename vendor vendor-new --if-revision 1
-uv run leonervis-code provider replace vendor-new \
-  --provider custom --model vendor/model-v2 \
-  --protocol openai-compatible --base-url https://gateway.example/v1 \
-  --if-revision 2
+uv run leonervis-code provider remove vendor-new
 uv run leonervis-code provider migrate
 ```
 
-Every `prompt` or REPL invocation creates or opens:
+Selection precedence is explicit `--profile` → explicit direct `--model` → workspace active → user active → fake/offline. `provider use` prepares the candidate route, credential, and client before atomically switching; failure preserves the old configuration and client.
 
-```text
-<workspace>/.leonervis-code/sessions/<workspace-fingerprint>/<session-id>.jsonl
+### Inspect routes and context windows
+
+`route` is an offline diagnostic command. It constructs no provider client, reads no key value, and sends no network request.
+
+```bash
+uv run leonervis-code --profile vendor route
+uv run leonervis-code --model openai/gpt-5 route
 ```
 
-A Session is append-only JSONL. A successful turn's user message, tool-use/result pairs, and final assistant text are written and fsynced as one complete commit record before in-memory history changes. Each open Session holds an exclusive writer lock. Corrupt middle records, unknown schemas, and invalid tool pairing fail closed; only an incomplete, unterminated crash tail can be truncated under controlled recovery, which also appends a recovery record.
+A named profile can configure the context window for its exact endpoint/model:
+
+```bash
+uv run leonervis-code provider replace vendor \
+  --provider custom \
+  --model vendor/model \
+  --protocol openai-compatible \
+  --base-url https://gateway.example/v1 \
+  --api-key-env VENDOR_API_KEY \
+  --context-window-tokens 1000000 \
+  --if-revision 1
+
+uv run leonervis-code provider show vendor
+uv run leonervis-code --profile vendor route
+```
+
+The runtime resolves a context window in this order: exact profile override → exact built-in catalog → fresh private discovery cache → provider-owned live discovery → `unknown`. This capability currently reports capacity and provenance only; it does not count current request tokens, reject oversized requests, or compact history.
+
+### Manage Sessions
 
 ```bash
 uv run leonervis-code prompt "First turn"
 uv run leonervis-code session list
 uv run leonervis-code session show latest
 uv run leonervis-code --resume latest prompt "Continue the previous turn"
-uv run leonervis-code -C ../another-workspace --resume latest
+uv run leonervis-code --resume <session-uuid>
 ```
 
-For everyday use, a bare launch creates a new Session, while `--resume latest` continues the workspace's latest pointer; use `session list` and `session show latest` to find and inspect history. Inside the REPL, `/session new` starts empty history without changing the current runtime provider, and `/resume <id>` switches to existing history. `[current]` marks the destination of the next REPL prompt, `[latest]` marks the current `latest.json` target, and `open/closed` describes transcript lifecycle rather than lock ownership; a closed Session remains resumable.
+A Session is workspace-bound and stores complete successful turns in append-only JSONL. Resuming restores history only; the current provider still comes from this invocation's CLI selector or active profile.
 
-Sessions and runtime providers are decoupled. The transcript records the profile ID/revision, provider/protocol, model, endpoint, and non-secret fingerprints actually used for each historical turn, solely as audit provenance. After resume, the working provider still comes from this invocation's `--profile`/`--model`, workspace active selection, user active selection, or fake fallback. The runtime never reconstructs a client from historical binding metadata, and later profile rename, replacement, or deletion does not block resume. Sending old history to a newly selected provider is an explicit runtime choice; if that adapter rejects the history, the failed turn is not committed.
+### REPL commands
 
-A local Session can contain user input, model responses, source excerpts, and tool results, so `.leonervis-code/` is sensitive local runtime state and should not be committed, synchronized, or published. Known configured credential values are never written as binding data, but the system cannot generally detect an unknown secret that appears in user text or a file read by a tool.
+| Command | Purpose |
+| --- | --- |
+| `/help` | Show control commands |
+| `/history <count>` | Show recent complete turns in the current Session |
+| `/status` | Show redacted runtime, model, and context-window status |
+| `/provider list` | List named profiles |
+| `/provider current` | Show the current profile/provider/model |
+| `/provider use <name>` | Atomically switch the workspace's active profile |
+| `/model <model>` | Override this process's model without editing the profile |
+| `/session show` | Show the current Session |
+| `/session list` | List workspace Sessions |
+| `/session new` | Start an empty Session while preserving the runtime |
+| `/resume <latest\|id>` | Switch Sessions while preserving the runtime |
+| `/exit`, `/quit` | Exit normally |
 
-`ProjectSession` now exposes `session_id`, `transcript_path`, `session_info()`, `list_sessions()`, `new_session()`, `switch_session()`, and `resume=`. Switching Sessions replaces only durable history and preserves the current provider client.
+Ctrl-D, EOF, or Ctrl-C while waiting for input also exits normally. Terminal colors are enabled only on a TTY; set `NO_COLOR=1` to disable them.
 
-## Foundation 3C: named provider profiles and a real multi-turn REPL
-
-Profile definitions live in `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json`; a workspace stores only its active profile ID in `.leonervis-code/provider.json`. Neither JSON file stores key values. The workspace directory is local runtime state and should be added to the target project's `.gitignore`.
+For a deterministic view of the bounded tool loop:
 
 ```bash
-# Built-in provider: protocol, default endpoint, and credential env come from the catalog
-uv run leonervis-code provider add work-openai \
-  --provider openai --model gpt-5
-
-# Controlled custom OpenAI-compatible endpoint; store only the key's env-variable name
-uv run leonervis-code provider add local-qwen \
-  --provider custom \
-  --model Qwen/Qwen3.5 \
-  --protocol openai-compatible \
-  --base-url http://127.0.0.1:11434
-
-uv run leonervis-code provider add vendor \
-  --provider custom \
-  --model vendor/model \
-  --protocol openai-compatible \
-  --base-url https://gateway.example/v1 \
-  --api-key-env VENDOR_API_KEY
-
-uv run leonervis-code provider list
-uv run leonervis-code provider show vendor
-uv run leonervis-code provider use local-qwen              # workspace scope by default
-uv run leonervis-code provider use work-openai --scope user
-uv run leonervis-code provider clear --scope project
-uv run leonervis-code provider remove vendor
+uv run leonervis-code demo-read README.md
+uv run leonervis-code demo-read ../outside.txt   # verify workspace-escape rejection
 ```
 
-Selection precedence is explicit `--profile` > explicit direct `--model` > workspace active > user active > fake/offline. `--profile NAME --model MODEL` uses a process-local model override on that endpoint without rewriting the profile:
+`demo-read` is not a real model interface. It does not write files, execute shell commands, or access the network.
 
-```bash
-uv run leonervis-code --profile work-openai --model gpt-5-mini prompt "Explain this workspace"
-uv run leonervis-code --profile work-openai       # real multi-turn REPL; client reused across turns
-```
+## Configuration and local state
 
-Both `provider use` and REPL `/provider use` resolve the route, validate the credential, and construct a candidate SDK client before writing active configuration and swapping the current client. On failure, the old active selection and client remain intact. `/model` is likewise atomic and allowed only between turns. Complete neutral history and tool-use/result pairs survive a provider switch; if the new provider rejects old history, the failed turn is not committed.
+| Path | Contents |
+| --- | --- |
+| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json` | user provider profiles and active selection |
+| `<workspace>/.leonervis-code/provider.json` | workspace active profile |
+| `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcripts |
+| `${XDG_CACHE_HOME:-~/.cache}/leonervis-code/model-context-capabilities.json` | private context-capability discovery cache |
 
-Other project modules can use the public facade directly:
-
-```python
-from pathlib import Path
-from leonervis_code import ProjectSession
-
-with ProjectSession.open(Path.cwd(), profile="work-openai") as session:
-    first = session.prompt("Explain the README first")
-    session.set_model("gpt-5-mini")
-    second = session.prompt("Continue")
-```
-
-`ProjectSession` also exposes `list_profiles()`, `use_profile()`, `use_profile_id()`, `clear_active()`, `status()`, `history`, and `turns`. Foundation 3D adds stable Session identity, JSONL auto-save, and resume to this facade.
-
-## Foundation 3B: local multi-provider real-model path
-
-With global `--model`, `prompt` resolves a real adapter through the shared resolver/factory:
-
-```bash
-export ANTHROPIC_API_KEY='...'
-uv run leonervis-code --model anthropic/claude-opus-4-8 prompt "Explain this workspace"
-
-export OPENAI_API_KEY='...'
-uv run leonervis-code --model openai/gpt-5 prompt "Explain this workspace"
-
-export XAI_API_KEY='...'
-uv run leonervis-code --model xai/grok-3 prompt "Explain this workspace"
-
-export DASHSCOPE_API_KEY='...'
-uv run leonervis-code --model dashscope/qwen-plus prompt "Explain this workspace"
-
-uv run leonervis-code --model ollama/qwen3:8b prompt "Explain this workspace"
-
-export OPENROUTER_API_KEY='...'
-uv run leonervis-code --model openrouter/anthropic/claude-opus-4-8 prompt "Explain this workspace"
-```
-
-The Anthropic path uses the official `anthropic` SDK. Every other built-in route reuses the official `openai` SDK through the Chat Completions wire adapter. Both clients are synchronous, non-streaming, and configured with `max_retries=0`. They declare only the current `read_file(path)` tool; local `ReadFileTool` continues to enforce workspace containment, UTF-8, the 32 KiB cap, and the per-turn tool budget.
-
-A one-shot controlled OpenAI-compatible endpoint can also be supplied without persisting a provider or key:
-
-```bash
-export VENDOR_API_KEY='...'
-uv run leonervis-code \
-  --model vendor/model \
-  --provider-protocol openai-compatible \
-  --base-url https://gateway.example/v1 \
-  --api-key-env VENDOR_API_KEY \
-  prompt "Explain this workspace"
-```
-
-Explicit provider namespaces win. Only registered bare `claude-*`, `gpt-*`, `grok-*`, `qwen-*`, and `kimi-*` families are inferred deterministically; an unknown bare model is never guessed from installed credentials. Route and adapter configuration contain no secret value. A key is read only when the factory constructs the selected SDK client. The runtime does not read `.env`, OAuth, or keyrings, and it does not implement streaming, automatic retries/backoff, fallback execution, live discovery, parallel tools, or cross-workspace Session resume.
-
-A real route can be previewed without constructing a client or accessing the network:
-
-```bash
-uv run leonervis-code --model openai/gpt-5 route
-```
-
-The fake fallback remains unchanged, but when a workspace/user active profile exists, `prompt` and the bare REPL use that real profile even without an explicit selector:
-
-```bash
-uv run leonervis-code provider clear --scope project
-uv run leonervis-code provider clear --scope user
-uv run leonervis-code prompt "Hello"   # fake when no active profile exists; no network
-uv run leonervis-code                   # fake REPL when no active profile exists; no network
-uv run leonervis-code route             # Foundation 2B fake policy preview; no network
-```
-
-See the [Foundation 3A Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), [Foundation 3B multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md), and [Foundation 3C named-profile/persistent-runtime decision](./docs/decisions/0009-foundation-3c-named-provider-profiles-and-runtime-manager.md). Run live smoke checks only when the user explicitly chooses their own credentials, endpoints, and API budget.
-
-## Foundation 2B: offline adapter-owned compatibility policy
-
-`route` is a deterministic diagnostic surface for the control plane and adapter-policy boundary that a future real provider adapter will use:
-
-```bash
-uv run leonervis-code route
-# primary: fake-messages/alpha
-#   credential: configured
-#   canonical parameters: <none>
-#   native preview: <none>
-#   diagnostics: <none>
-
-uv run leonervis-code route --model beta --max-output-tokens 32 --fallback-model default
-# fake-chat previews max_output_tokens; fake-messages previews max_tokens
-
-uv run leonervis-code route --model beta --temperature 0.2
-# shows a visible fixed-sampling omission diagnostic
-```
-
-The route resolver owns **hard** admission rules: valid provider/model selection, enabled status, required tool-use/streaming capabilities, canonical option types/ranges, fallback validity, and Harness-owned field protection. A selected adapter owns provider-native wire names and documented **soft** compatibility behavior. The fake `beta` model demonstrates the distinction: its requested `temperature` is omitted as a known fixed-sampling incompatibility, and `route` reports that decision instead of silently changing the request or issuing a false hard error.
-
-Provider-specific extensions have a controlled API-level path only for now. They cannot override `model`, messages, tools, streaming, token-limit fields, or adapter-generated parameter fields. This mirrors the future security boundary; the command intentionally does not yet accept arbitrary JSON body overrides.
-
-The Foundation 2B subcommand form of `route` remains completely offline: it constructs no provider client, reads no environment variables, makes no network call, and reveals no credential reference/value. A global-`--model` `route` uses the Foundation 3B resolver to show the real provider, protocol, wire model, base-URL source, and `configured/missing/not required` status, while still constructing no client and sending no request. A successful preview is not proof that the remote provider will accept a request.
-
-## Foundation 1B: deterministic bounded `read_file` tool loop
-
-The current REPL and `prompt` command now complete this minimal, testable path:
-
-```text
-terminal input → AgentLoop (one pinned canonical system-prompt snapshot + ordered in-memory causal context)
-  → ScriptedFakeProvider → optional read_file within the current workspace
-  → structured tool result → ScriptedFakeProvider → final text output
-```
-
-A provider response is either final assistant text or one `read_file` request. The loop returns final text only after the provider finishes, and commits the whole attempted turn—user input, any tool request/result, and final assistant text—only after that success. Each user turn permits at most three file reads; a further request receives a structured limit error, and another tool request after it stops deterministically.
-
-`read_file` accepts only a relative path whose resolved target remains in the current working directory, which is the workspace root for this slice. It rejects absolute paths, `..` or symlink escapes, missing paths, directories, unreadable files, and invalid UTF-8. It returns at most 32 KiB of UTF-8 text with a truncation marker. It cannot write, rename, delete, execute commands, search, or access the network.
-
-The default `ScriptedFakeProvider` retains the visible echo behavior and does not request tools by itself. Its scripted form provides deterministic proof of the tool cycle in tests, while `demo-read <path>` exposes the same fixed scripted cycle for manual terminal verification. The `prompt` command remains one-shot, but every successful turn is auto-saved. Within one running REPL, `/history <count>` shows only completed user/final-assistant pairs from the current Session, never internal tool data.
-
-Foundation 1B originally proved only process-local atomic history; Foundation 3D now persists each complete turn to workspace JSONL. A bare `leonervis-code` invocation in a noninteractive terminal still explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
-
-The learning design records are [the single-turn loop decision](./docs/decisions/0001-foundation-0-single-turn-loop.md), [the deterministic REPL decision](./docs/decisions/0002-foundation-0-deterministic-repl.md), [the in-memory history decision](./docs/decisions/0003-foundation-1a-in-memory-text-history.md), [the bounded read-file tool-loop decision](./docs/decisions/0004-foundation-1b-bounded-read-file-tool-loop.md), [the provider-neutral model-routing decision](./docs/decisions/0005-foundation-2a-provider-neutral-model-routing.md), [the adapter-owned compatibility-policy decision](./docs/decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md), [the non-streaming Anthropic-adapter decision](./docs/decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md), [the local multi-provider-runtime decision](./docs/decisions/0008-foundation-3b-local-multi-provider-runtime.md), [the named-profile/persistent-runtime decision](./docs/decisions/0009-foundation-3c-named-provider-profiles-and-runtime-manager.md), [the stable-profile/durable-Session decision](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md), [the decoupled REPL-presentation/slash-dispatch decision](./docs/decisions/0011-decoupled-repl-presentation-and-slash-dispatch.md), and [the first canonical model-system-prompt decision](./docs/decisions/0012-first-canonical-model-system-prompt.md).
+`.leonervis-code/` can contain user input, model responses, source excerpts, and tool results. Add it to the target project's `.gitignore`; do not commit, synchronize, or publish it. Configuration and the capability cache do not store known credential values, but the system cannot detect an unknown secret that appears in user text or source code.
 
 ## Development and verification
 
-Run every project command through `uv run` so it uses the locked environment:
-
 ```bash
-# Deterministic tests
 uv run pytest
-
-# Static checks
 uv run ruff check .
-
-# Check formatting; remove --check to apply formatting
 uv run ruff format --check .
-```
-
-When dependencies change, update and verify the lockfile:
-
-```bash
-uv lock
 uv lock --check
+git diff --check
 ```
 
-## Leonervis Code environment vs. target-workspace environment
+After changing dependencies, run `uv lock` before checking the lockfile. Leonervis Code does not install Node, Rust, Java, Docker, databases, or other build environments for a target workspace.
 
-Leonervis Code itself currently requires only Python, uv, Git, and the Python packages locked in `uv.lock`. It does **not** install build environments for projects it will eventually work on.
+## Detailed documentation
 
-For example, when a future agent runs `npm test` in a Node project, Node/npm belongs to that **target workspace**. The same distinction applies to Rust/Cargo, Java, Docker, and a project's database. They are not prerequisites for launching Leonervis Code.
+- [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, and context capability.
+- [Architecture decision records](./docs/decisions/): complete problem statements, trade-offs, boundaries, and verification records for each learning slice.
+- [Provider-owned model context capability](./docs/decisions/0013-provider-owned-model-context-capabilities.md): current context-window resolution and cache design.
+- [Canonical model system prompt](./docs/decisions/0012-first-canonical-model-system-prompt.md): model-visible contract, version, and fingerprint.
+- [Stable profile identity and durable Sessions](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md): profile UUID/revision and Session persistence.
+- [Claw-Code prompt study map](./docs/references/claw-code-prompts/README.md): read-only reference structure and Leonervis-specific differences.
+- [Harness-study](https://github.com/TsingFengIceberg/Harness-study): related Harness reading and learning notes.
 
-Accordingly, Docker, Docker Compose, Node.js, npm, pnpm, Rust, Java, Go, databases, Redis, message queues, web servers, reverse proxies, and Makefiles are not needed today.
+## Current scope and next step
 
-## Current scope and future direction
+The only workspace tool today is bounded `read_file`. There are no write/edit, glob/grep, Bash/test, network, approval, streaming, automatic retry/fallback, parallel-tool, compaction, multi-agent, or remote-service capabilities yet.
 
-The repository now includes:
-
-- a reproducible Python 3.12–3.13 and uv environment with `uv.lock`;
-- installable `leonervis-code` / `leonervis` entry points plus `python -m leonervis_code`;
-- the structured `SystemPromptSnapshot` / `ConversationRequest` / `UserMessage` / `AssistantText` / `ToolUse` / `ToolResult` contract, a versioned and fingerprinted stable model system prompt, deterministic scripted fake provider, an `AgentLoop` with atomic in-memory causal history, one bounded `read_file` tool, the Foundation 2B offline route policy, and a local multi-provider runtime covering Anthropic and the OpenAI-compatible family;
-- named provider profiles with no credential value, stable UUID/revision identity, v1/v2-compatible migration, user/project active precedence, atomic between-turn client/model switching, and a public `ProjectSession` API for other modules;
-- workspace-bound UUID Sessions with append-only JSONL, complete tool causality, a single-writer lock, tail recovery, cross-process resume, and per-turn provider provenance;
-- a local real/fake REPL with a colored startup mark, Tab completion, `/history`, `/session`, `/resume`, provider/status/model controls, and durable complete-turn history;
-- an automation-friendly end-to-end path through the `prompt` command; and
-- a minimal `pytest` and `ruff` quality toolchain.
-
-The recommended next slice is to build context budgeting and controlled compaction on Foundation 3D's stable Sessions, or to move to file-write tools and a `PermissionGate`. Streaming, automatic retry/fallback, approvals, and controlled Bash still require separate learning slices.
-
-MCP, plugins, remote/server forms, multi-agent coordination, RAG, and background work are not permanently ruled out. They will be introduced only after a concrete need, boundary design, and test plan exist.
-
-## Repository layout
-
-```text
-src/leonervis_code/
-  core/                 # neutral conversation/tool and model-orchestration contracts
-  agent/                # AgentLoop with bounded causal history and tool decisions
-  tools/                # workspace-confined read_file tool only for now
-  providers/            # adapters, route/factory, named profile store, and runtime manager
-  system_prompt.py      # canonical model system prompt, version, and fingerprint
-  session.py            # ProjectSession facade combining runtime and switchable durable Sessions
-  session_records.py    # closed JSONL record schemas and causal replay validation
-  session_store.py      # workspace paths, writer locks, append/latest, and recovery
-  cli/                  # command parsing, profile management, branding, REPL, and output
-tests/                  # unit, integration, security, and end-to-end tests will grow here
-docs/                   # architecture decisions, learning notes, and security design
-scripts/                # reproducible local/CI maintenance commands, added when needed
-learning-submodules/    # read-only learning references
-```
-
-Repositories under `learning-submodules/` are read-only study materials. They are not runtime dependencies, and product code must never import them. When their design informs an implementation, Leonervis Code will document both the inspiration and its own deliberate differences.
+The next planned slice is target-specific request counting and preflight before every provider invocation, including tool continuations. Target-aware model switching and controlled compaction follow afterward. [CLAUDE.md](./CLAUDE.md) and the ADRs record the complete scope, development principles, and roadmap.

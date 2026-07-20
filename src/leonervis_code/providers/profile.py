@@ -22,6 +22,7 @@ _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 MAX_MODEL_LENGTH = 512
 MAX_BASE_URL_LENGTH = 2048
 MAX_ENVIRONMENT_NAME_LENGTH = 128
+MAX_CONTEXT_WINDOW_TOKENS = 100_000_000
 LEGACY_PROFILE_NAMESPACE = UUID("0f18e3f0-ef73-5a77-9f6c-b4e7f75fca2a")
 _PROFILE_SPEC_FIELDS = {
     "name",
@@ -31,6 +32,7 @@ _PROFILE_SPEC_FIELDS = {
     "base_url",
     "api_key_env",
     "max_output_tokens",
+    "context_window_tokens",
     "temperature",
 }
 _PROFILE_IDENTITY_FIELDS = {"profile_id", "revision"}
@@ -52,6 +54,7 @@ class ProviderProfileSpec:
     base_url: str | None = None
     api_key_env: str | None = None
     max_output_tokens: int = 1024
+    context_window_tokens: int | None = None
     temperature: float | None = None
 
     def __post_init__(self) -> None:
@@ -75,6 +78,14 @@ class ProviderProfileSpec:
             )
         if type(self.max_output_tokens) is not int or self.max_output_tokens < 1:
             raise ProviderProfileError("profile max output tokens must be a positive integer")
+        if self.context_window_tokens is not None and (
+            type(self.context_window_tokens) is not int
+            or not 1 <= self.context_window_tokens <= MAX_CONTEXT_WINDOW_TOKENS
+        ):
+            raise ProviderProfileError(
+                "profile context window tokens must be a positive integer "
+                f"not exceeding {MAX_CONTEXT_WINDOW_TOKENS}"
+            )
         if self.temperature is not None:
             if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)):
                 raise ProviderProfileError("profile temperature must be a number")
@@ -120,9 +131,9 @@ class ProviderProfileSpec:
         if self.temperature is not None:
             object.__setattr__(self, "temperature", float(self.temperature))
 
-    def to_dict(self) -> dict[str, object]:
-        """Return the complete version-independent configuration representation."""
-        return {
+    def to_dict(self, *, include_context_window: bool = True) -> dict[str, object]:
+        """Return one closed configuration representation for the selected schema."""
+        data = {
             "name": self.name,
             "provider_id": self.provider_id,
             "protocol": self.protocol.value,
@@ -132,15 +143,22 @@ class ProviderProfileSpec:
             "max_output_tokens": self.max_output_tokens,
             "temperature": self.temperature,
         }
+        if include_context_window:
+            data["context_window_tokens"] = self.context_window_tokens
+        return data
 
     def fingerprint(self) -> str:
         """Return a canonical SHA-256 over routing-relevant profile configuration."""
         return profile_fingerprint(self)
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> ProviderProfileSpec:
+    def from_mapping(
+        cls, value: Mapping[str, object], *, allow_context_window: bool = True
+    ) -> ProviderProfileSpec:
         """Decode one closed configuration object without assigning store identity."""
-        values = _decode_profile_mapping(value, allow_identity=False)
+        values = _decode_profile_mapping(
+            value, allow_identity=False, allow_context_window=allow_context_window
+        )
         return cls(**values)
 
 
@@ -157,12 +175,12 @@ class NamedProviderProfile(ProviderProfileSpec):
         if type(self.revision) is not int or self.revision < 1:
             raise ProviderProfileError("profile revision must be a positive integer")
 
-    def to_dict(self) -> dict[str, object]:
-        """Return the schema-v2 JSON representation, including store identity."""
+    def to_dict(self, *, include_context_window: bool = True) -> dict[str, object]:
+        """Return one closed identity-bearing representation."""
         return {
             "profile_id": self.profile_id,
             "revision": self.revision,
-            **super().to_dict(),
+            **super().to_dict(include_context_window=include_context_window),
         }
 
     def to_spec(self) -> ProviderProfileSpec:
@@ -175,13 +193,18 @@ class NamedProviderProfile(ProviderProfileSpec):
             base_url=self.base_url,
             api_key_env=self.api_key_env,
             max_output_tokens=self.max_output_tokens,
+            context_window_tokens=self.context_window_tokens,
             temperature=self.temperature,
         )
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> NamedProviderProfile:
-        """Decode a closed v2 object; omitted identity remains construction-compatible."""
-        values = _decode_profile_mapping(value, allow_identity=True)
+    def from_mapping(
+        cls, value: Mapping[str, object], *, allow_context_window: bool = True
+    ) -> NamedProviderProfile:
+        """Decode one closed identity-bearing object."""
+        values = _decode_profile_mapping(
+            value, allow_identity=True, allow_context_window=allow_context_window
+        )
         return cls(**values)
 
 
@@ -195,13 +218,14 @@ def legacy_profile_id(name: str) -> str:
 def profile_fingerprint(profile: ProviderProfileSpec) -> str:
     """Hash normalized profile configuration without name, identity, or credential state."""
     payload = {
-        "fingerprint_version": 1,
+        "fingerprint_version": 2,
         "provider_id": profile.provider_id,
         "protocol": profile.protocol.value,
         "model": profile.model,
         "base_url": profile.base_url,
         "api_key_env": profile.api_key_env,
         "max_output_tokens": profile.max_output_tokens,
+        "context_window_tokens": profile.context_window_tokens,
         "temperature": profile.temperature,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
@@ -211,11 +235,16 @@ def profile_fingerprint(profile: ProviderProfileSpec) -> str:
 
 
 def _decode_profile_mapping(
-    value: Mapping[str, object], *, allow_identity: bool
+    value: Mapping[str, object], *, allow_identity: bool, allow_context_window: bool
 ) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ProviderProfileError("profile entry must be a JSON object")
-    allowed = _PROFILE_SPEC_FIELDS | (_PROFILE_IDENTITY_FIELDS if allow_identity else set())
+    spec_fields = (
+        _PROFILE_SPEC_FIELDS
+        if allow_context_window
+        else _PROFILE_SPEC_FIELDS - {"context_window_tokens"}
+    )
+    allowed = spec_fields | (_PROFILE_IDENTITY_FIELDS if allow_identity else set())
     fields = set(value)
     unknown = fields - allowed
     if unknown:
@@ -256,6 +285,7 @@ def _decode_profile_mapping(
         "base_url": base_url,
         "api_key_env": api_key_env,
         "max_output_tokens": value.get("max_output_tokens", 1024),
+        "context_window_tokens": value.get("context_window_tokens"),
         "temperature": value.get("temperature"),
     }
     if allow_identity:

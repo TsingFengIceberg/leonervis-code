@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
 from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.manager import RuntimeProviderManager, RuntimeProviderStateError
+from leonervis_code.providers.model_context import (
+    ModelContextCapabilityResolver,
+    ModelContextSource,
+)
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.session import ProjectSession
@@ -205,6 +209,50 @@ def test_manager_set_model_tracks_profile_by_id_across_rename(tmp_path) -> None:
     assert status.profile_revision == renamed.revision
     assert status.model_override == "override-model"
     assert routes[-1].wire_model == "override-model"
+
+
+def test_runtime_resolves_profile_override_and_model_override_independently(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    original = store.get_profile("one")
+    store.replace_profile(
+        original.profile_id,
+        replace(original.to_spec(), context_window_tokens=65_536),
+        expected_revision=original.revision,
+    )
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: RecordingProvider(route.wire_model),
+    )
+    assert manager.status().context_window_tokens == 65_536
+    assert manager.status().context_window_source == ModelContextSource.PROFILE_OVERRIDE
+
+    switched = manager.set_model("other")
+    assert switched.context_window_tokens is None
+    assert switched.context_window_source == ModelContextSource.UNKNOWN
+
+
+def test_runtime_discovery_failure_is_nonfatal_and_redacted(tmp_path) -> None:
+    store = configured_store(tmp_path)
+
+    class DiscoveringProvider(RecordingProvider):
+        def discover_model_context(self):
+            raise RuntimeError("secret provider response")
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: DiscoveringProvider(route.wire_model),
+        context_resolver=ModelContextCapabilityResolver(),
+    )
+
+    status = manager.status()
+    assert status.context_window_tokens is None
+    assert status.context_window_source == ModelContextSource.UNKNOWN
+    assert "secret" not in (status.context_window_diagnostic or "")
 
 
 def test_fake_runtime_has_explicit_empty_provenance(tmp_path) -> None:

@@ -10,6 +10,7 @@ from leonervis_code.cli.presentation import (
     YELLOW,
     render_message,
     render_prompt,
+    render_runtime_status,
 )
 from leonervis_code.providers.manager import RuntimeStatus
 
@@ -73,6 +74,26 @@ def test_prompt_has_safe_fallbacks() -> None:
     assert render_prompt(status(), None, color=False) == "leonervis[fake]> "
     assert render_prompt(None, Info(), color=False) == "leonervis[12345678]> "
     assert render_prompt(status(), Info("bad"), color=False) == "leonervis[unknown|fake]> "
+
+
+def test_runtime_status_renders_context_capability_without_changing_prompt() -> None:
+    resolved = RuntimeStatus(
+        **{
+            **status(
+                mode="real", profile="work", provider="anthropic", model="claude-opus-4-8"
+            ).__dict__,
+            "protocol": "anthropic_messages",
+            "base_url": "https://api.anthropic.com",
+            "base_url_source": "default",
+            "context_window_tokens": 1_000_000,
+            "context_window_source": "builtin_catalog",
+        }
+    )
+
+    rendered = render_runtime_status(resolved)
+
+    assert "Context window: 1000000 tokens (builtin_catalog)" in rendered
+    assert "1000000" not in render_prompt(resolved, Info(), color=False)
 
 
 def test_semantic_colors_are_traditional_and_optional() -> None:

@@ -25,8 +25,8 @@ from leonervis_code.providers.profile import (
     legacy_profile_id,
 )
 
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = {1, 2}
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = {1, 2, 3}
 MAX_CONFIGURATION_BYTES = 1024 * 1024
 MAX_PROFILES = 256
 
@@ -69,7 +69,7 @@ def default_project_profile_path(workspace: Path) -> Path:
 
 
 class ProviderProfileStore:
-    """Read v1/v2 configurations and write schema v2 with per-file atomic replacement."""
+    """Read v1/v2/v3 configurations and write schema v3 atomically."""
 
     def __init__(self, user_path: Path, project_path: Path) -> None:
         self.user_path = Path(user_path)
@@ -356,14 +356,14 @@ class ProviderProfileStore:
                 self._write_user(user.profiles, None)
 
     def migrate(self) -> None:
-        """Explicitly rewrite readable v1 files as v2; each file is independently atomic."""
+        """Explicitly rewrite readable older files as v3; each file is independently atomic."""
         with self.transaction():
             user = self._load_user()
             project = self._load_project()
             project_id = self._resolve_project_id(project, user)
-            if user.schema_version == 1:
+            if user.schema_version != SCHEMA_VERSION:
                 self._write_user(user.profiles, user.active_profile_id)
-            if project.schema_version == 1:
+            if project.schema_version != SCHEMA_VERSION:
                 self._write_project(project_id)
 
     def _load_user(self) -> _UserState:
@@ -383,7 +383,7 @@ class ProviderProfileStore:
             for name, raw_profile in raw_profiles.items():
                 if not isinstance(name, str) or not isinstance(raw_profile, dict):
                     raise ProviderProfileError("user provider profile entries are malformed")
-                spec = ProviderProfileSpec.from_mapping(raw_profile)
+                spec = ProviderProfileSpec.from_mapping(raw_profile, allow_context_window=False)
                 if spec.name != name:
                     raise ProviderProfileError(f"provider profile key/name mismatch: {name}")
                 profile_id = legacy_profile_id(name)
@@ -412,7 +412,9 @@ class ProviderProfileStore:
                 raise ProviderProfileError(
                     f"schema-v2 profile is missing required field: {sorted(missing_identity)[0]}"
                 )
-            profile = NamedProviderProfile.from_mapping(raw_profile)
+            profile = NamedProviderProfile.from_mapping(
+                raw_profile, allow_context_window=version >= 3
+            )
             if profile.profile_id != profile_id:
                 raise ProviderProfileError(f"provider profile key/ID mismatch: {profile_id}")
             if profile.name in names:
@@ -448,7 +450,7 @@ class ProviderProfileStore:
 
     @staticmethod
     def _resolve_project_id(project: _ProjectState, user: _UserState) -> str | None:
-        if project.schema_version == 2:
+        if project.schema_version >= 2:
             profile_id = project.active_profile_id
         elif project.legacy_active_name is None:
             profile_id = None
@@ -611,6 +613,7 @@ def _owned_profile(
         base_url=spec.base_url,
         api_key_env=spec.api_key_env,
         max_output_tokens=spec.max_output_tokens,
+        context_window_tokens=spec.context_window_tokens,
         temperature=spec.temperature,
         profile_id=profile_id,
         revision=revision,

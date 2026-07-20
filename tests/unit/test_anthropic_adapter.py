@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import anthropic
 import httpx
@@ -28,6 +29,19 @@ from leonervis_code.providers.anthropic import (
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.read_file import ReadFileTool
+
+
+class RecordingModelsClient:
+    def __init__(self, outcomes: list[object | Exception]) -> None:
+        self.outcomes = outcomes
+        self.model_ids: list[str] = []
+
+    def retrieve(self, model_id: str, **kwargs: object) -> object:
+        self.model_ids.append(model_id)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 class RecordingMessagesClient:
@@ -79,6 +93,7 @@ def test_production_client_uses_explicit_route_and_disables_redirects(monkeypatc
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
             self.messages = RecordingMessagesClient([])
+            self.models = RecordingModelsClient([])
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://ambient-untrusted.example")
     monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
@@ -264,6 +279,41 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
             "stream": False,
         }
     ]
+
+
+def test_anthropic_models_discovery_is_exact_and_safe() -> None:
+    models = RecordingModelsClient(
+        [SimpleNamespace(id="claude-opus-4-8", max_input_tokens=1_000_000)]
+    )
+    provider = AnthropicConversationProvider(
+        config(), RecordingMessagesClient([]), models_client=models
+    )
+
+    discovered = provider.discover_model_context()
+
+    assert discovered.context_window_tokens == 1_000_000
+    assert discovered.diagnostic is None
+    assert models.model_ids == ["claude-opus-4-8"]
+
+    mismatched = AnthropicConversationProvider(
+        config(),
+        RecordingMessagesClient([]),
+        models_client=RecordingModelsClient(
+            [SimpleNamespace(id="other", max_input_tokens=1_000_000)]
+        ),
+    ).discover_model_context()
+    assert mismatched.context_window_tokens is None
+    assert "different model ID" in mismatched.diagnostic
+
+    missing = AnthropicConversationProvider(
+        config(),
+        RecordingMessagesClient([]),
+        models_client=RecordingModelsClient(
+            [SimpleNamespace(id="claude-opus-4-8", max_input_tokens=None)]
+        ),
+    ).discover_model_context()
+    assert missing.context_window_tokens is None
+    assert "no valid input limit" in missing.diagnostic
 
 
 @dataclass

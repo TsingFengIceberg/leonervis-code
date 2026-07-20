@@ -50,6 +50,9 @@ class RuntimeStatusView(Protocol):
     base_url_source: str | None
     credential_required: bool
     credential_present: bool
+    context_window_tokens: int | None
+    context_window_source: str
+    context_window_diagnostic: str | None
 
 
 class SessionInfoView(Protocol):
@@ -141,13 +144,24 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
     credential = "not required"
     if status.credential_required:
         credential = "configured" if status.credential_present else "missing"
+    context = (
+        f"{status.context_window_tokens} tokens ({status.context_window_source})"
+        if status.context_window_tokens is not None
+        else "unknown"
+    )
+    diagnostic = (
+        f"\nContext diagnostic: {status.context_window_diagnostic}"
+        if status.context_window_diagnostic
+        else ""
+    )
     return (
         f"Mode: real\n"
         f"Profile: {status.profile or '<direct>'} ({status.selection_source})\n"
         f"Provider: {status.provider_id} ({status.protocol})\n"
         f"Model: {status.selected_model}\n"
         f"Base URL: {status.base_url} ({status.base_url_source})\n"
-        f"Credential: {credential}"
+        f"Credential: {credential}\n"
+        f"Context window: {context}{diagnostic}"
     )
 
 

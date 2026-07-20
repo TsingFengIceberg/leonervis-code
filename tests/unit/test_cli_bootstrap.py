@@ -215,6 +215,8 @@ def test_global_model_route_renders_real_provider_metadata_without_secret_values
         "wire model: gpt-5\n"
         "base URL: https://api.openai.com/v1 (default)\n"
         "credential: configured\n"
+        "context window: unknown (unknown)\n"
+        "context diagnostic: live context discovery is unsupported\n"
     )
     assert "secret-must-not-render" not in output.getvalue()
 
@@ -448,6 +450,8 @@ def test_profile_model_override_is_runtime_only_and_profile_output_is_redacted(t
                 "https://gateway.example/v1",
                 "--api-key-env",
                 "VENDOR_KEY",
+                "--context-window-tokens",
+                "131072",
             ],
             stdout=io.StringIO(),
             stderr=io.StringIO(),
@@ -491,6 +495,7 @@ def test_profile_model_override_is_runtime_only_and_profile_output_is_redacted(t
     assert "profile ID:" in rendered
     assert "revision: 1" in rendered
     assert "model: default-model" in rendered
+    assert "context window override: 131072" in rendered
     assert "credential: configured" in rendered
     assert "VENDOR_KEY" not in rendered
     assert "secret-must-not-render" not in rendered
@@ -576,7 +581,7 @@ def test_profile_identity_cli_supports_rename_replace_ids_and_migrate(tmp_path) 
 
     output = io.StringIO()
     assert main(["provider", "migrate"], stdout=output, stderr=io.StringIO(), **common) == 0
-    assert output.getvalue() == "Migrated provider configuration to schema v2.\n"
+    assert output.getvalue() == "Migrated provider configuration to schema v3.\n"
 
 
 @pytest.mark.parametrize(

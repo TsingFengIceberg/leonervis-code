@@ -9,6 +9,12 @@ from leonervis_code.providers.manager import (
     RuntimeProviderStateError,
     RuntimeStatus,
 )
+from leonervis_code.providers.model_context import (
+    ModelContextCapability,
+    ModelContextCapabilityResolver,
+    ModelContextSource,
+    ModelContextTarget,
+)
 from leonervis_code.providers.profile import (
     LEGACY_PROFILE_NAMESPACE,
     NamedProviderProfile,
@@ -26,6 +32,10 @@ __all__ = [
     "ADAPTER_CONTRACT_VERSION",
     "ActiveProfileSelection",
     "LEGACY_PROFILE_NAMESPACE",
+    "ModelContextCapability",
+    "ModelContextCapabilityResolver",
+    "ModelContextSource",
+    "ModelContextTarget",
     "NamedProviderProfile",
     "ProviderProfileError",
     "ProviderProfileSpec",
