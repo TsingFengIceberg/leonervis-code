@@ -8,6 +8,9 @@ from leonervis_code.providers.manager import (
     RuntimeProviderManager,
     RuntimeProviderStateError,
     RuntimeStatus,
+    RuntimeSwitchAuditError,
+    RuntimeSwitchContextError,
+    RuntimeSwitchResult,
 )
 from leonervis_code.providers.model_context import (
     ModelContextCapability,
@@ -59,6 +62,9 @@ __all__ = [
     "RuntimeProviderManager",
     "RuntimeProviderStateError",
     "RuntimeStatus",
+    "RuntimeSwitchAuditError",
+    "RuntimeSwitchContextError",
+    "RuntimeSwitchResult",
     "estimate_serialized_input_tokens",
     "evaluate_context_fit",
     "legacy_profile_id",

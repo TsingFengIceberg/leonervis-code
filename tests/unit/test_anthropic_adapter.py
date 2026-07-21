@@ -119,6 +119,25 @@ def test_official_token_count_uses_shared_input_projection_and_safe_fallback() -
     assert set(client.count_requests[0]) == {"model", "system", "messages", "tools"}
 
 
+def test_counter_accepts_empty_and_complete_committed_history_without_weakening_send() -> None:
+    client = RecordingMessagesClient(
+        [message(TextBlock(text="unused", type="text"))],
+        counts=[SimpleNamespace(input_tokens=7), SimpleNamespace(input_tokens=9)],
+    )
+    provider = AnthropicConversationProvider(config(), client)
+
+    empty = provider.count_input_tokens(request())
+    complete = provider.count_input_tokens(request(UserMessage("hello"), AssistantText("reply")))
+
+    assert empty.input_tokens == 7
+    assert client.count_requests[0]["messages"] == []
+    assert complete.input_tokens == 9
+    assert client.count_requests[1]["messages"][-1]["role"] == "assistant"
+    with pytest.raises(ProviderAdapterError, match="before an assistant response"):
+        provider.respond(request(UserMessage("hello"), AssistantText("reply")))
+    assert client.requests == []
+
+
 def test_production_client_uses_explicit_route_and_disables_redirects(monkeypatch) -> None:
     captured = {}
 

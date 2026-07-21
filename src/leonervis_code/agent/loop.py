@@ -60,6 +60,13 @@ class AgentLoop:
         """Return completed user/final-assistant pairs for user-facing history display."""
         return self._turns
 
+    def committed_context_request(self) -> ConversationRequest:
+        """Snapshot the exact committed context for target compatibility counting."""
+        return ConversationRequest(
+            system_prompt=self._system_prompt_factory(),
+            history=self._history,
+        )
+
     def run(
         self,
         prompt: str,

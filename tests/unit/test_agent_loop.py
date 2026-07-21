@@ -191,6 +191,49 @@ def test_history_snapshots_cannot_be_mutated_by_later_turns(tmp_path) -> None:
     assert loop.history is not first_request
 
 
+def test_committed_context_snapshot_is_exact_read_only_and_independent(tmp_path) -> None:
+    history = (
+        UserMessage("read"),
+        ToolUse("call-1", "read_file", "README.md"),
+        ToolResult("call-1", "notes"),
+        AssistantText("done"),
+    )
+    snapshots = []
+
+    def build_snapshot():
+        from leonervis_code.system_prompt import build_system_prompt
+
+        snapshot = build_system_prompt()
+        snapshots.append(snapshot)
+        return snapshot
+
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        initial_history=history,
+        system_prompt_factory=build_snapshot,
+    )
+
+    request = loop.committed_context_request()
+
+    assert request.history == history
+    assert request.history is loop.history
+    assert isinstance(request.history[-1], AssistantText)
+    assert loop.history == history
+    assert loop.turns == (ConversationTurn(UserMessage("read"), AssistantText("done")),)
+    assert len(snapshots) == 1
+
+
+def test_empty_committed_context_has_no_synthetic_user_message(tmp_path) -> None:
+    loop = AgentLoop(None, ReadFileTool(tmp_path))
+
+    request = loop.committed_context_request()
+
+    assert request.history == ()
+    assert loop.history == ()
+    assert loop.turns == ()
+
+
 def test_loop_pins_one_system_prompt_snapshot_across_tool_continuations(tmp_path) -> None:
     (tmp_path / "README.md").write_text("notes\n", encoding="utf-8")
     provider = ScriptedFakeProvider(

@@ -125,7 +125,11 @@ class AnthropicConversationProvider:
 
     def count_input_tokens(self, request_snapshot: ConversationRequest) -> RequestTokenCount:
         """Count official Anthropic input exactly, falling back to a safe estimate."""
-        projection = build_input_projection(self._config, request_snapshot)
+        projection = build_input_projection(
+            self._config,
+            request_snapshot,
+            committed_context=True,
+        )
         if self._config.base_url.rstrip("/") != OFFICIAL_ANTHROPIC_BASE_URL:
             return estimate_serialized_input_tokens(projection)
         try:
@@ -182,12 +186,18 @@ class AnthropicConversationProvider:
 def build_input_projection(
     config: AnthropicProviderConfig,
     request_snapshot: ConversationRequest,
+    *,
+    committed_context: bool = False,
 ) -> dict[str, object]:
     """Build the Anthropic fields that contribute provider input tokens."""
     return {
         "model": config.model_id,
         "system": request_snapshot.system_prompt.text,
-        "messages": serialize_history(request_snapshot.history, config=config),
+        "messages": serialize_history(
+            request_snapshot.history,
+            config=config,
+            committed_context=committed_context,
+        ),
         "tools": [read_file_tool_definition()],
     }
 
@@ -216,9 +226,12 @@ def serialize_history(
     history: tuple[ConversationItem, ...],
     *,
     config: AnthropicProviderConfig,
+    committed_context: bool = False,
 ) -> list[dict[str, object]]:
-    """Convert a valid neutral causal sequence to Anthropic Messages input."""
+    """Convert neutral causal history for invocation or committed-context counting."""
     if not history:
+        if committed_context:
+            return []
         raise _invalid_history(config, "conversation history must not be empty")
 
     messages: list[dict[str, object]] = []
@@ -290,8 +303,16 @@ def serialize_history(
 
         raise _invalid_history(config, "conversation history contains an unknown item")
 
-    if expected != "assistant":
-        raise _invalid_history(config, "conversation history must end before an assistant response")
+    valid_terminal_states = {"assistant"}
+    if committed_context:
+        valid_terminal_states.add("user")
+    if expected not in valid_terminal_states:
+        message = (
+            "committed conversation history must end with assistant text"
+            if committed_context
+            else "conversation history must end before an assistant response"
+        )
+        raise _invalid_history(config, message)
     return messages
 
 

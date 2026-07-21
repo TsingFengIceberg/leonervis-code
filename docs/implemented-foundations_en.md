@@ -12,6 +12,7 @@
 - [Foundation 3B: local multi-provider real-model path](#foundation-3b-local-multi-provider-real-model-path)
 - [Foundation 2B: offline adapter-owned compatibility policy](#foundation-2b-offline-adapter-owned-compatibility-policy)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
+- [Target-aware runtime switch UX](#target-aware-runtime-switch-ux)
 - [Target-specific request counting and per-invocation preflight](#target-specific-request-counting-and-per-invocation-preflight)
 - [Provider-owned model context capability](#provider-owned-model-context-capability)
 - [ADR index](#adr-index)
@@ -269,6 +270,25 @@ Foundation 1B originally proved only process-local atomic history. Foundation 3D
 
 See [0001: single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md), [0002: deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md), [0003: in-memory text history](./decisions/0003-foundation-1a-in-memory-text-history.md), and [0004: bounded read_file tool loop](./decisions/0004-foundation-1b-bounded-read-file-tool-loop.md) for the detailed decisions.
 
+## Target-aware runtime switch UX
+
+The long-lived runtime now screens the current committed conversation context against a destination before `/provider use`, `/model`, or the matching `ProjectSession` API commits its candidate. `AgentLoop` builds a read-only snapshot from the current canonical system prompt and exact committed causal history. An empty Session remains `history=()`; no synthetic user message is invented for counting.
+
+Adapter counting accepts empty history or complete committed history ending in `AssistantText`, while actual `respond()` remains strict about invocation history ending in `UserMessage` or `ToolResult`. Anthropic and OpenAI-compatible counting therefore continue to share the same native projection as create without weakening send-time causal validation.
+
+The Manager screens the same provider/route/capability candidate it already prepared:
+
+- known context or model-output overflow raises `RuntimeSwitchContextError` before the active selection or client changes, closes the candidate, and preserves the old runtime, selection, and generation;
+- `FITS` commits and returns the count method/value, reserve, and window;
+- `UNKNOWN` fails open, but the REPL warns that compatibility is not confirmed, no history was deleted, and the next real invocation still runs full preflight;
+- a fake destination needs no compatibility report.
+
+Under its facade lock, `ProjectSession` freezes history, screens and commits, and then appends the existing schema-v1 `RuntimeChanged` record. If the runtime changed but audit append fails, `RuntimeSwitchAuditError` carries the applied result rather than falsely claiming that the switch did not happen or attempting an unreliable rollback. Transcript bindings now preserve the real runtime generation. A rejected switch writes no conversation, `TurnFailed`, or runtime-change record.
+
+This slice does not pre-screen `/resume` or startup `--resume`: `SessionStore.open()` currently appends a resume record and updates the latest pointer before returning, so atomic rejection requires a later read-only prepare/commit design. It also does not compact, delete history, or create a new Session automatically.
+
+See [0015: target-aware runtime switch UX](./decisions/0015-target-aware-runtime-switch-ux.md). The canonical model system prompt was reviewed; this remains Host-side runtime control, so version 1 and its fingerprint remain unchanged.
+
 ## Target-specific request counting and per-invocation preflight
 
 The runtime now pins the provider client, exact route, context/model-output capability, and redacted status in one immutable turn snapshot. That snapshot is the only provider-invocation entry point, so the initial request, every `read_file` continuation, and the final invocation after the tool limit are all preflighted again.
@@ -330,3 +350,4 @@ This slice establishes capacity facts only. It does not count current request to
 12. [0012: first canonical model system prompt](./decisions/0012-first-canonical-model-system-prompt.md)
 13. [0013: provider-owned model context capability](./decisions/0013-provider-owned-model-context-capabilities.md)
 14. [0014: target-specific request counting and per-invocation preflight](./decisions/0014-target-specific-request-counting-and-preflight.md)
+15. [0015: target-aware runtime switch UX](./decisions/0015-target-aware-runtime-switch-ux.md)

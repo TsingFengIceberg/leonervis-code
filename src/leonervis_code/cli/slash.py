@@ -12,11 +12,17 @@ from leonervis_code.cli.presentation import (
     MessageKind,
     render_recent_history,
     render_runtime_status,
+    render_runtime_switch,
     render_session_info,
     render_session_summary,
+    render_switch_rejection,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
-from leonervis_code.providers.manager import RuntimeProviderStateError
+from leonervis_code.providers.manager import (
+    RuntimeProviderStateError,
+    RuntimeSwitchAuditError,
+    RuntimeSwitchContextError,
+)
 from leonervis_code.providers.profile import ProviderProfileError
 from leonervis_code.providers.resolver import RuntimeRouteError
 from leonervis_code.session_store import SessionStoreError
@@ -195,14 +201,31 @@ def _provider_use(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     if len(parts) != 3:
         return _usage("Usage: /provider use <name>")
-    return _call(
-        lambda: (
-            f"Using provider profile {session.use_profile(parts[2], scope='project').profile} "
-            "for this workspace."
-        ),
-        kind="success",
-        failure_prefix="Provider switch failed",
-    )
+    try:
+        result = session.use_profile(parts[2], scope="project")
+        message, kind = render_runtime_switch(
+            f"Using provider profile {result.status.profile} for this workspace",
+            result.fit_report,
+            suffix="active workspace selection updated",
+        )
+        return SlashResult(handled=True, message=message, kind=kind)
+    except RuntimeSwitchContextError as error:
+        return SlashResult(
+            handled=True,
+            message=render_switch_rejection(error.report),
+            kind="error",
+        )
+    except RuntimeSwitchAuditError as error:
+        return SlashResult(
+            handled=True,
+            message=(
+                "Runtime changed, but Session audit persistence failed. "
+                f"Effective profile: {error.result.status.profile or '<direct>'}."
+            ),
+            kind="error",
+        )
+    except Exception as error:
+        return _command_error(error, failure_prefix="Provider switch failed")
 
 
 def _model(command: str, session: ReplSession) -> SlashResult:
@@ -210,13 +233,52 @@ def _model(command: str, session: ReplSession) -> SlashResult:
     if len(parts) != 2 or not parts[1].strip():
         return _usage("Usage: /model <model>")
     model = parts[1].strip()
-    return _call(
-        lambda: (
-            f"Runtime model changed to {session.set_model(model).selected_model}; "
-            "profile was not modified."
+    try:
+        result = session.set_model(model)
+        message, kind = render_runtime_switch(
+            f"Runtime model changed to {result.status.selected_model}",
+            result.fit_report,
+            suffix="profile was not modified",
+        )
+        return SlashResult(handled=True, message=message, kind=kind)
+    except RuntimeSwitchContextError as error:
+        return SlashResult(
+            handled=True,
+            message=render_switch_rejection(error.report),
+            kind="error",
+        )
+    except RuntimeSwitchAuditError as error:
+        return SlashResult(
+            handled=True,
+            message=(
+                "Runtime changed, but Session audit persistence failed. "
+                f"Effective model: {error.result.status.selected_model}."
+            ),
+            kind="error",
+        )
+    except Exception as error:
+        return _command_error(error, failure_prefix="Model switch failed")
+
+
+def _command_error(error: Exception, *, failure_prefix: str) -> SlashResult:
+    if isinstance(error, ProviderAdapterError):
+        message = error.failure.message
+    elif isinstance(
+        error,
+        (
+            ProviderProfileError,
+            RuntimeProviderStateError,
+            RuntimeRouteError,
+            SessionStoreError,
         ),
-        kind="success",
-        failure_prefix="Model switch failed",
+    ):
+        message = str(error)
+    else:
+        message = "unexpected internal error"
+    return SlashResult(
+        handled=True,
+        message=f"{failure_prefix}: {message}",
+        kind="error",
     )
 
 
@@ -228,22 +290,8 @@ def _call(
 ) -> SlashResult:
     try:
         return SlashResult(handled=True, message=operation(), kind=kind)
-    except ProviderAdapterError as error:
-        message = error.failure.message
-    except (
-        ProviderProfileError,
-        RuntimeProviderStateError,
-        RuntimeRouteError,
-        SessionStoreError,
-    ) as error:
-        message = str(error)
-    except Exception:
-        message = "unexpected internal error"
-    return SlashResult(
-        handled=True,
-        message=f"{failure_prefix}: {message}",
-        kind="error",
-    )
+    except Exception as error:
+        return _command_error(error, failure_prefix=failure_prefix)
 
 
 def _usage(message: str) -> SlashResult:

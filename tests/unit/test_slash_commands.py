@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from leonervis_code.cli.slash import dispatch_slash
-from leonervis_code.providers.manager import RuntimeStatus
+from leonervis_code.providers.manager import RuntimeStatus, RuntimeSwitchResult
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionInfo
 
@@ -85,10 +85,12 @@ class Session:
         return (Profile(),)
 
     def use_profile(self, name, *, scope):
-        return RuntimeStatus(**{**self.status().__dict__, "mode": "real", "profile": name})
+        status = RuntimeStatus(**{**self.status().__dict__, "mode": "real", "profile": name})
+        return RuntimeSwitchResult(status, None)
 
     def set_model(self, model):
-        return RuntimeStatus(**{**self.status().__dict__, "selected_model": model})
+        status = RuntimeStatus(**{**self.status().__dict__, "selected_model": model})
+        return RuntimeSwitchResult(status, None)
 
     def prompt(self, text):
         self.prompts.append(text)

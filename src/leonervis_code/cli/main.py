@@ -25,7 +25,7 @@ from leonervis_code.providers.definitions import BUILTIN_PROVIDERS, WireProtocol
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.factory import create_provider
 from leonervis_code.providers.fake import ScriptedFakeProvider
-from leonervis_code.providers.manager import RuntimeProviderManager
+from leonervis_code.providers.manager import RuntimeProviderManager, RuntimeProviderStateError
 from leonervis_code.providers.model_context import ModelContextCapabilityResolver
 from leonervis_code.providers.profile import (
     NamedProviderProfile,
@@ -668,6 +668,9 @@ def main(
             )
         finally:
             session.close()
+    except RuntimeProviderStateError as error:
+        print(f"provider runtime state error: {error}", file=errors)
+        return 2
     except RuntimeRouteError as error:
         print(f"provider route error: {error}", file=errors)
         return 2

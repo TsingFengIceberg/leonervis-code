@@ -14,7 +14,12 @@ from leonervis_code.core.contracts import (
     ConversationProvider,
     ConversationTurn,
 )
-from leonervis_code.providers.manager import RuntimeProviderManager, RuntimeStatus
+from leonervis_code.providers.manager import (
+    RuntimeProviderManager,
+    RuntimeStatus,
+    RuntimeSwitchAuditError,
+    RuntimeSwitchResult,
+)
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
@@ -179,30 +184,40 @@ class ProjectSession:
         self._ensure_open()
         return self._store.list_profiles()
 
-    def use_profile(self, name: str, *, scope: str = "project") -> RuntimeStatus:
+    def use_profile(self, name: str, *, scope: str = "project") -> RuntimeSwitchResult:
         with self._lock:
             self._ensure_open()
-            status = self._manager.use_profile(name, scope=scope)
-            self._record_runtime_change(status, "provider_profile")
-            return status
+            result = self._manager.use_profile(
+                name,
+                scope=scope,
+                committed_context=self._loop.committed_context_request(),
+            )
+            self._record_runtime_switch(result, "provider_profile")
+            return result
 
-    def use_profile_id(self, profile_id: str, *, scope: str = "project") -> RuntimeStatus:
+    def use_profile_id(self, profile_id: str, *, scope: str = "project") -> RuntimeSwitchResult:
         profile = self._store.get_profile_by_id(profile_id)
         return self.use_profile(profile.name, scope=scope)
 
-    def clear_active(self, *, scope: str = "project") -> RuntimeStatus:
+    def clear_active(self, *, scope: str = "project") -> RuntimeSwitchResult:
         with self._lock:
             self._ensure_open()
-            status = self._manager.clear_active(scope=scope)
-            self._record_runtime_change(status, "provider_clear")
-            return status
+            result = self._manager.clear_active(
+                scope=scope,
+                committed_context=self._loop.committed_context_request(),
+            )
+            self._record_runtime_switch(result, "provider_clear")
+            return result
 
-    def set_model(self, model: str) -> RuntimeStatus:
+    def set_model(self, model: str) -> RuntimeSwitchResult:
         with self._lock:
             self._ensure_open()
-            status = self._manager.set_model(model)
-            self._record_runtime_change(status, "model_override")
-            return status
+            result = self._manager.set_model(
+                model,
+                committed_context=self._loop.committed_context_request(),
+            )
+            self._record_runtime_switch(result, "model_override")
+            return result
 
     def status(self) -> RuntimeStatus:
         self._ensure_open()
@@ -238,8 +253,11 @@ class ProjectSession:
             raise SessionStoreError("conversation session changed before turn commit")
         writer.append_turn(turn.items, binding=binding_from_status(self._manager.status()))
 
-    def _record_runtime_change(self, status: RuntimeStatus, reason: str) -> None:
-        self._writer.runtime_changed(binding_from_status(status), reason=reason)
+    def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:
+        try:
+            self._writer.runtime_changed(binding_from_status(result.status), reason=reason)
+        except Exception as error:
+            raise RuntimeSwitchAuditError(result) from error
 
     def _record_failure(self, binding: BindingSnapshot, error: Exception) -> None:
         try:
@@ -256,10 +274,13 @@ class ProjectSession:
             raise RuntimeError("project session is closed")
 
 
-def binding_from_status(status: RuntimeStatus, *, generation: int = 0) -> BindingSnapshot:
+def binding_from_status(status: RuntimeStatus) -> BindingSnapshot:
     """Build non-secret per-turn provenance without influencing future runtime selection."""
     if status.mode == "fake":
-        return BindingSnapshot.fake(generation=generation, source=status.selection_source)
+        return BindingSnapshot.fake(
+            generation=status.generation,
+            source=status.selection_source,
+        )
     if status.route_fingerprint is None:
         raise SessionStoreError("real runtime status is missing its route fingerprint")
     return BindingSnapshot(
@@ -277,7 +298,7 @@ def binding_from_status(status: RuntimeStatus, *, generation: int = 0) -> Bindin
         credential_env=status.credential_env,
         max_output_tokens=status.max_output_tokens,
         temperature=status.temperature,
-        generation=generation,
+        generation=status.generation,
         adapter_version=f"route-contract-v{status.adapter_contract_version}",
         route_fingerprint=status.route_fingerprint,
     )

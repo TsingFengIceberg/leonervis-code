@@ -4,21 +4,35 @@ from dataclasses import dataclass, replace
 
 import pytest
 
-from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ConversationRequest,
+    ToolResult,
+    ToolUse,
+    UserMessage,
+)
 from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.providers.manager import RuntimeProviderManager, RuntimeProviderStateError
+from leonervis_code.providers.manager import (
+    RuntimeProviderManager,
+    RuntimeProviderStateError,
+    RuntimeSwitchContextError,
+)
 from leonervis_code.providers.model_context import (
+    ModelContextCapability,
     ModelContextCapabilityResolver,
     ModelContextSource,
+    ModelContextTarget,
 )
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.providers.request_context import (
+    ContextFitDecision,
     ContextPreflightError,
     RequestTokenCount,
     RequestTokenCountMethod,
 )
 from leonervis_code.session import ProjectSession
+from leonervis_code.system_prompt import build_system_prompt
 
 
 @dataclass
@@ -74,8 +88,10 @@ def test_manager_reuses_client_and_atomically_switches_profiles(tmp_path) -> Non
         assert first.provider is constructed[0]
         with pytest.raises(RuntimeProviderStateError, match="during a conversation turn"):
             manager.use_profile("two")
-    status = manager.use_profile("two")
+    result = manager.use_profile("two")
+    status = result.status
 
+    assert result.fit_report is None
     assert status.profile == "two"
     assert status.profile_name == "two"
     assert status.profile_id == store.get_profile("two").profile_id
@@ -160,7 +176,8 @@ def test_user_scope_switch_respects_existing_project_precedence(tmp_path) -> Non
         return provider
 
     manager = RuntimeProviderManager(store, environment={}, provider_factory=factory)
-    status = manager.use_profile("two", scope="user")
+    result = manager.use_profile("two", scope="user")
+    status = result.status
 
     assert store.active_name("user") == "two"
     assert store.active_selection().name == "one"
@@ -183,7 +200,8 @@ def test_direct_runtime_supports_process_local_model_switch(tmp_path) -> None:
         model="local/model-one",
         provider_factory=factory,
     )
-    status = manager.set_model("model-two")
+    result = manager.set_model("model-two")
+    status = result.status
 
     assert status.profile is None
     assert status.profile_id is None
@@ -207,7 +225,8 @@ def test_manager_set_model_tracks_profile_by_id_across_rename(tmp_path) -> None:
     manager = RuntimeProviderManager(store, environment={}, profile="one", provider_factory=factory)
     renamed = store.rename_profile(original.profile_id, "renamed", expected_revision=1)
 
-    status = manager.set_model("override-model")
+    result = manager.set_model("override-model")
+    status = result.status
 
     assert status.profile == "renamed"
     assert status.profile_id == original.profile_id
@@ -234,7 +253,7 @@ def test_runtime_resolves_profile_override_and_model_override_independently(tmp_
     assert manager.status().context_window_tokens == 65_536
     assert manager.status().context_window_source == ModelContextSource.PROFILE_OVERRIDE
 
-    switched = manager.set_model("other")
+    switched = manager.set_model("other").status
     assert switched.context_window_tokens is None
     assert switched.context_window_source == ModelContextSource.UNKNOWN
 
@@ -286,13 +305,138 @@ def test_preflight_rejects_known_overflow_before_provider_send(tmp_path) -> None
         provider_factory=lambda route, *, environment: provider,
     )
     with manager.provider_for_turn() as runtime:
-        from leonervis_code.core.contracts import ConversationRequest
-        from leonervis_code.system_prompt import build_system_prompt
-
         request = ConversationRequest(build_system_prompt(), (UserMessage("too large"),))
         with pytest.raises(ContextPreflightError, match="input=81"):
             runtime.respond(request)
     assert provider.requests == []
+
+
+def test_switch_rejects_known_committed_context_overflow_without_changing_state(
+    tmp_path,
+) -> None:
+    store = configured_store(tmp_path)
+    target = store.get_profile("two")
+    store.replace_profile(
+        target.profile_id,
+        replace(
+            target.to_spec(),
+            context_window_tokens=100,
+            model_max_output_tokens=80,
+            max_output_tokens=20,
+        ),
+        expected_revision=target.revision,
+    )
+    providers = []
+
+    class CountingProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            return RequestTokenCount(81, RequestTokenCountMethod.ESTIMATED)
+
+    def factory(route, *, environment):
+        provider = CountingProvider(route.wire_model)
+        providers.append(provider)
+        return provider
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=factory,
+    )
+    before = manager.status()
+    request = ConversationRequest(
+        build_system_prompt(),
+        (UserMessage("hello"), AssistantText("reply")),
+    )
+
+    with pytest.raises(RuntimeSwitchContextError) as caught:
+        manager.use_profile("two", committed_context=request)
+
+    assert caught.value.report.decision == ContextFitDecision.CONTEXT_EXCEEDED
+    assert manager.status() == before
+    assert store.active_name("project") is None
+    assert providers[0].closed is False
+    assert providers[1].closed is True
+
+
+def test_switch_allows_unknown_count_with_explicit_report(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    target = store.get_profile("two")
+    store.replace_profile(
+        target.profile_id,
+        replace(target.to_spec(), context_window_tokens=100),
+        expected_revision=target.revision,
+    )
+
+    class FailingCounter(RecordingProvider):
+        def count_input_tokens(self, request):
+            raise RuntimeError("raw provider secret")
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: FailingCounter(route.wire_model),
+    )
+    result = manager.use_profile(
+        "two",
+        committed_context=ConversationRequest(
+            build_system_prompt(),
+            (UserMessage("hello"), AssistantText("reply")),
+        ),
+    )
+
+    assert result.status.profile == "two"
+    assert result.fit_report is not None
+    assert result.fit_report.decision == ContextFitDecision.UNKNOWN
+    assert "secret" not in (result.fit_report.input_count.diagnostic or "")
+
+
+def test_switch_model_output_limit_precedes_counting(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    target = store.get_profile("two")
+    store.replace_profile(
+        target.profile_id,
+        replace(
+            target.to_spec(),
+            context_window_tokens=100,
+            max_output_tokens=20,
+        ),
+        expected_revision=target.revision,
+    )
+    count_calls = []
+
+    class OutputLimitedResolver:
+        def resolve(self, route, **kwargs):
+            return ModelContextCapability(
+                target=ModelContextTarget.from_route(route),
+                context_window_tokens=100,
+                source=ModelContextSource.PROFILE_OVERRIDE,
+                model_max_output_tokens=10,
+                model_max_output_source=ModelContextSource.LIVE_DISCOVERY,
+            )
+
+    class CountingProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            count_calls.append(request)
+            return RequestTokenCount(1, RequestTokenCountMethod.EXACT)
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: CountingProvider(route.wire_model),
+        context_resolver=OutputLimitedResolver(),
+    )
+
+    with pytest.raises(RuntimeSwitchContextError) as caught:
+        manager.use_profile(
+            "two",
+            committed_context=ConversationRequest(build_system_prompt(), ()),
+        )
+
+    assert caught.value.report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED
+    assert count_calls == []
 
 
 def test_fake_runtime_has_explicit_empty_provenance(tmp_path) -> None:

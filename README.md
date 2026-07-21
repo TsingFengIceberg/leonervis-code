@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file` 工具循环、provider-owned 模型限制，以及每次 provider invocation 前的 target-specific request counting/preflight。尚未实现 compact、写工具、Bash 或审批流程。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file` 工具循环、provider-owned 模型限制、每次 provider invocation 前的 target-specific request counting/preflight，以及切换 provider/model 前对当前 committed history 的 target-aware screening。尚未实现 compact、写工具、Bash 或审批流程。
 
 ## 目录
 
@@ -143,7 +143,7 @@ uv run leonervis-code provider show vendor
 uv run leonervis-code --profile vendor route
 ```
 
-Runtime 按字段独立解析 context window 与 model max output：profile exact override → exact built-in catalog → fresh private discovery cache → provider-owned live discovery → `unknown`。每次 provider invocation（包括工具 continuation）都会用当前 requested output reserve 做 preflight；Anthropic official endpoint 优先 exact count，OpenAI-compatible 使用明确标记的 deterministic estimate，unknown 时不猜测并允许 provider 最终裁决。该能力不会自动 compact。
+Runtime 按字段独立解析 context window 与 model max output：profile exact override → exact built-in catalog → fresh private discovery cache → provider-owned live discovery → `unknown`。每次 provider invocation（包括工具 continuation）都会用当前 requested output reserve 做 preflight；Anthropic official endpoint 优先 exact count，OpenAI-compatible 使用明确标记的 deterministic estimate，unknown 时不猜测并允许 provider 最终裁决。REPL 的 `/provider use` 与 `/model` 还会在提交切换前计量当前已提交历史：known overflow 保留旧 runtime/selection，unknown 则以 warning 允许切换；下一次真实 invocation 仍执行完整 preflight。该能力不会自动 compact。
 
 ### 管理 Session
 
@@ -212,6 +212,7 @@ git diff --check
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session 和 context capability 的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
+- [Target-aware runtime switch UX](./docs/decisions/0015-target-aware-runtime-switch-ux.md)：切换前 committed-context screening、known reject/unknown allow 与原子审计语义。
 - [Target-specific request counting 与 preflight](./docs/decisions/0014-target-specific-request-counting-and-preflight.md)：每次 provider invocation 的 native input 计量、两类限制与 typed local rejection。
 - [Provider-owned model context capability](./docs/decisions/0013-provider-owned-model-context-capabilities.md)：context/model-output limit 解析与缓存设计。
 - [Canonical model system prompt](./docs/decisions/0012-first-canonical-model-system-prompt.md)：模型可见契约、版本和 fingerprint。
@@ -223,4 +224,4 @@ git diff --check
 
 当前仅提供一个 workspace-bound `read_file` 工具；尚无写/编辑、glob/grep、Bash/test、网络工具、审批、streaming、自动 retry/fallback、并行工具、compact、多 Agent 或远程服务。
 
-下一切片计划实现 target-aware switch UX：在切换 provider/model 前复用当前 counter/fit report 检查目标容量；之后再进入 durable effective context 与 controlled compact。完整范围、开发原则和路线记录在 [CLAUDE.md](./CLAUDE.md) 与各 ADR 中。
+下一切片计划进入 durable effective context 与 controlled compact：先定义可审计的 effective-context representation 和显式 compact transaction；resume 的 target-aware prepare/commit 仍作为独立原子性切片处理。完整范围、开发原则和路线记录在 [CLAUDE.md](./CLAUDE.md) 与各 ADR 中。

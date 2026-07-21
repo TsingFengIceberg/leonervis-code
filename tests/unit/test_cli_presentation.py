@@ -11,8 +11,16 @@ from leonervis_code.cli.presentation import (
     render_message,
     render_prompt,
     render_runtime_status,
+    render_runtime_switch,
+    render_switch_rejection,
 )
 from leonervis_code.providers.manager import RuntimeStatus
+from leonervis_code.providers.request_context import (
+    ContextFitDecision,
+    ContextFitReport,
+    RequestTokenCount,
+    RequestTokenCountMethod,
+)
 
 
 @dataclass
@@ -94,6 +102,47 @@ def test_runtime_status_renders_context_capability_without_changing_prompt() -> 
 
     assert "Context window: 1000000 tokens (builtin_catalog)" in rendered
     assert "1000000" not in render_prompt(resolved, Info(), color=False)
+
+
+def test_runtime_switch_rendering_distinguishes_fits_unknown_and_rejection() -> None:
+    fits = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount(80, RequestTokenCountMethod.ESTIMATED),
+        requested_output_tokens=20,
+        context_window_limit=100,
+        model_output_limit=40,
+        decision=ContextFitDecision.FITS,
+    )
+    message, kind = render_runtime_switch("Switched", fits, suffix="final guard remains")
+    assert kind == "success"
+    assert "input=80 (estimated) + reserve=20 <= window=100" in message
+    assert "next provider invocation still runs full preflight" in message
+
+    unknown = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount.unknown("counter failed safely"),
+        requested_output_tokens=20,
+        context_window_limit=100,
+        model_output_limit=40,
+        decision=ContextFitDecision.UNKNOWN,
+    )
+    message, kind = render_runtime_switch("Switched", unknown, suffix="final guard remains")
+    assert kind == "warning"
+    assert "compatibility not confirmed" in message
+    assert "no history was deleted" in message
+
+    exceeded = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount(81, RequestTokenCountMethod.EXACT),
+        requested_output_tokens=20,
+        context_window_limit=100,
+        model_output_limit=40,
+        decision=ContextFitDecision.CONTEXT_EXCEEDED,
+    )
+    rejected = render_switch_rejection(exceeded)
+    assert "Current runtime and profile selection are unchanged" in rejected
+    assert "/session new" in rejected
+    assert "/compact" not in rejected
 
 
 def test_semantic_colors_are_traditional_and_optional() -> None:

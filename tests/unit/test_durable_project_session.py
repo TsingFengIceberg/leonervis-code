@@ -8,6 +8,7 @@ import pytest
 
 from leonervis_code.core.contracts import AssistantText, UserMessage
 from leonervis_code.providers.definitions import WireProtocol
+from leonervis_code.providers.manager import RuntimeSwitchAuditError
 from leonervis_code.providers.profile import ProviderProfileSpec
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.session import ProjectSession
@@ -150,6 +151,51 @@ def test_project_session_switches_durable_history_without_changing_runtime(tmp_p
     assert session.status().selected_model == "local/model"
     assert session.history == (UserMessage("two"), AssistantText("runtime: two"))
     session.close()
+
+
+def test_runtime_switch_records_real_generation_and_reports_audit_failure(tmp_path: Path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="one",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="model-one",
+            base_url="http://127.0.0.1:11434/v1",
+        )
+    )
+    store.add_profile(
+        ProviderProfileSpec(
+            name="two",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="model-two",
+            base_url="http://127.0.0.1:11435/v1",
+        )
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        profile="one",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: RecordingProvider(route.wire_model),
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    result = session.use_profile("two")
+
+    assert result.status.generation == 1
+    assert session._writer.state.records[-1].binding.generation == 1
+
+    session._writer.release()
+    with pytest.raises(RuntimeSwitchAuditError) as caught:
+        session.set_model("model-three")
+    assert caught.value.result.status.selected_model == "model-three"
+    assert caught.value.result.status.generation == 2
+    assert session.status().selected_model == "model-three"
+    session._closed = True
+    session._manager.close()
 
 
 def test_project_session_durable_append_failure_does_not_commit_memory(tmp_path: Path) -> None:

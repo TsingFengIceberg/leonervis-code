@@ -57,6 +57,20 @@ def test_compatible_counter_estimates_the_shared_native_input_projection() -> No
     assert counted.input_tokens is not None and counted.input_tokens > 0
 
 
+def test_counter_accepts_empty_and_complete_committed_history_without_weakening_send() -> None:
+    client = RecordingChatClient([completion(content="unused")])
+    provider = OpenAICompatibleConversationProvider(route(), client)
+
+    empty = provider.count_input_tokens(request())
+    complete = provider.count_input_tokens(request(UserMessage("hello"), AssistantText("reply")))
+
+    assert empty.input_tokens is not None
+    assert complete.input_tokens is not None and complete.input_tokens > empty.input_tokens
+    with pytest.raises(ProviderAdapterError, match="before an assistant response"):
+        provider.respond(request(UserMessage("hello"), AssistantText("reply")))
+    assert client.requests == []
+
+
 def route(selector: str = "openai/gpt-4.1"):
     return resolve_runtime_route(selector, environment={})
 

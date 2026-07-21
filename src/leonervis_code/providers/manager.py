@@ -27,6 +27,8 @@ from leonervis_code.providers.model_context_cache import (
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.providers.request_context import (
+    ContextFitDecision,
+    ContextFitReport,
     RequestTokenCount,
     evaluate_context_fit,
     raise_for_context_fit,
@@ -38,6 +40,30 @@ ProviderFactory = Callable[..., ConversationProvider]
 
 class RuntimeProviderStateError(RuntimeError):
     """Raised for unsafe provider lifecycle or concurrent-switch operations."""
+
+
+class RuntimeSwitchContextError(RuntimeError):
+    """Raised when a candidate is known not to fit the committed context."""
+
+    def __init__(self, report: ContextFitReport) -> None:
+        self.report = report
+        super().__init__(_switch_context_message(report))
+
+
+@dataclass(frozen=True)
+class RuntimeSwitchResult:
+    """One committed runtime switch and its committed-context fit evidence."""
+
+    status: RuntimeStatus
+    fit_report: ContextFitReport | None
+
+
+class RuntimeSwitchAuditError(RuntimeError):
+    """Raised when an applied switch cannot be persisted to the Session audit."""
+
+    def __init__(self, result: RuntimeSwitchResult) -> None:
+        self.result = result
+        super().__init__("runtime switch applied, but audit persistence failed")
 
 
 @dataclass(frozen=True)
@@ -71,6 +97,7 @@ class RuntimeStatus:
     model_max_output_tokens: int | None = None
     model_max_output_source: str = "unknown"
     model_max_output_diagnostic: str | None = None
+    generation: int = 0
     adapter_contract_version: int = ADAPTER_CONTRACT_VERSION
 
     @property
@@ -91,28 +118,11 @@ class TurnRuntimeSnapshot:
     def respond(self, request: ConversationRequest) -> ProviderResponse:
         if self.route is None:
             return self.provider.respond(request)
-        input_count = RequestTokenCount.unknown("input counting was not required")
-        preliminary = evaluate_context_fit(
-            target=self.capability.target,
-            input_count=input_count,
-            requested_output_tokens=self.route.max_output_tokens,
-            context_window_limit=self.capability.context_window_tokens,
-            model_output_limit=self.capability.model_max_output_tokens,
-        )
-        raise_for_context_fit(preliminary)
-        if self.capability.context_window_tokens is not None:
-            operation = getattr(self.provider, "count_input_tokens", None)
-            input_count = (
-                operation(request)
-                if callable(operation)
-                else RequestTokenCount.unknown("provider does not expose input counting")
-            )
-        report = evaluate_context_fit(
-            target=self.capability.target,
-            input_count=input_count,
-            requested_output_tokens=self.route.max_output_tokens,
-            context_window_limit=self.capability.context_window_tokens,
-            model_output_limit=self.capability.model_max_output_tokens,
+        report = assess_context_fit(
+            provider=self.provider,
+            route=self.route,
+            capability=self.capability,
+            request=request,
         )
         raise_for_context_fit(report)
         return self.provider.respond(request)
@@ -123,6 +133,42 @@ class _Candidate:
     route: RuntimeProviderRoute
     provider: ConversationProvider
     capability: ModelContextCapability
+
+
+def assess_context_fit(
+    *,
+    provider: ConversationProvider,
+    route: RuntimeProviderRoute,
+    capability: ModelContextCapability,
+    request: ConversationRequest,
+) -> ContextFitReport:
+    """Evaluate one adapter-owned request projection without invoking generation."""
+    input_count = RequestTokenCount.unknown("target context window is unknown")
+    preliminary = evaluate_context_fit(
+        target=capability.target,
+        input_count=input_count,
+        requested_output_tokens=route.max_output_tokens,
+        context_window_limit=capability.context_window_tokens,
+        model_output_limit=capability.model_max_output_tokens,
+    )
+    if preliminary.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+        return preliminary
+    if capability.context_window_tokens is not None:
+        operation = getattr(provider, "count_input_tokens", None)
+        if callable(operation):
+            try:
+                input_count = operation(request)
+            except Exception:
+                input_count = RequestTokenCount.unknown("provider input counting failed safely")
+        else:
+            input_count = RequestTokenCount.unknown("provider does not expose input counting")
+    return evaluate_context_fit(
+        target=capability.target,
+        input_count=input_count,
+        requested_output_tokens=route.max_output_tokens,
+        context_window_limit=capability.context_window_tokens,
+        model_output_limit=capability.model_max_output_tokens,
+    )
 
 
 class RuntimeProviderManager:
@@ -344,7 +390,7 @@ class RuntimeProviderManager:
             route = self._route
             capability = self._capability
             status = (
-                _fake_status(source=self._selection_source)
+                _fake_status(source=self._selection_source, generation=self._generation)
                 if route is None
                 else _status_for_route(
                     route,
@@ -353,6 +399,7 @@ class RuntimeProviderManager:
                     environment=self._environment,
                     model_override=self._model_override,
                     capability=capability,
+                    generation=self._generation,
                 )
             )
             snapshot = TurnRuntimeSnapshot(self._provider, route, capability, status)
@@ -362,8 +409,14 @@ class RuntimeProviderManager:
             with self._lock:
                 self._turn_active = False
 
-    def use_profile(self, name: str, *, scope: str = "project") -> RuntimeStatus:
-        """Prepare outside locks and atomically commit one effective profile switch."""
+    def use_profile(
+        self,
+        name: str,
+        *,
+        scope: str = "project",
+        committed_context: ConversationRequest | None = None,
+    ) -> RuntimeSwitchResult:
+        """Prepare, screen, and atomically commit one effective profile switch."""
         with self._lock:
             self._ensure_switchable()
             generation = self._generation
@@ -375,6 +428,7 @@ class RuntimeProviderManager:
             route, loaded.context_window_tokens, loaded.model_max_output_tokens
         )
         try:
+            fit_report = self._screen_candidate(candidate, committed_context)
             with self._lock, self._store.transaction():
                 self._ensure_switchable()
                 if self._generation != generation:
@@ -406,10 +460,15 @@ class RuntimeProviderManager:
             _close_provider(candidate.provider)
             raise
         _close_provider(old)
-        return self.status()
+        return RuntimeSwitchResult(self.status(), fit_report)
 
-    def clear_active(self, *, scope: str = "project") -> RuntimeStatus:
-        """Prepare the next layer outside locks and atomically commit a clear."""
+    def clear_active(
+        self,
+        *,
+        scope: str = "project",
+        committed_context: ConversationRequest | None = None,
+    ) -> RuntimeSwitchResult:
+        """Prepare, screen, and atomically commit one active-selection clear."""
         with self._lock:
             self._ensure_switchable()
             generation = self._generation
@@ -428,6 +487,9 @@ class RuntimeProviderManager:
             candidate_provider = candidate.provider
             source = selection.source
         try:
+            fit_report = (
+                None if candidate is None else self._screen_candidate(candidate, committed_context)
+            )
             with self._lock, self._store.transaction():
                 self._ensure_switchable()
                 if self._generation != generation:
@@ -466,10 +528,15 @@ class RuntimeProviderManager:
             _close_provider(candidate_provider)
             raise
         _close_provider(old)
-        return self.status()
+        return RuntimeSwitchResult(self.status(), fit_report)
 
-    def set_model(self, model: str) -> RuntimeStatus:
-        """Prepare a process-local model override and commit it atomically."""
+    def set_model(
+        self,
+        model: str,
+        *,
+        committed_context: ConversationRequest | None = None,
+    ) -> RuntimeSwitchResult:
+        """Prepare, screen, and atomically commit a process-local model override."""
         with self._lock:
             self._ensure_switchable()
             generation = self._generation
@@ -487,6 +554,7 @@ class RuntimeProviderManager:
             raise RuntimeProviderStateError("model override requires a real provider runtime")
         candidate = self._prepare_candidate(route, None)
         try:
+            fit_report = self._screen_candidate(candidate, committed_context)
             with self._lock:
                 self._ensure_switchable()
                 if self._generation != generation:
@@ -509,13 +577,16 @@ class RuntimeProviderManager:
             _close_provider(candidate.provider)
             raise
         _close_provider(old)
-        return self.status()
+        return RuntimeSwitchResult(self.status(), fit_report)
 
     def status(self) -> RuntimeStatus:
         with self._lock:
             route = self._route
             if route is None:
-                return _fake_status(source=self._selection_source)
+                return _fake_status(
+                    source=self._selection_source,
+                    generation=self._generation,
+                )
             return _status_for_route(
                 route,
                 profile=self._loaded_profile,
@@ -523,6 +594,7 @@ class RuntimeProviderManager:
                 environment=self._environment,
                 model_override=self._model_override,
                 capability=self._capability,
+                generation=self._generation,
             )
 
     def close(self) -> None:
@@ -551,6 +623,26 @@ class RuntimeProviderManager:
             self._provider_factory,
             self._context_resolver,
         )
+
+    @staticmethod
+    def _screen_candidate(
+        candidate: _Candidate,
+        committed_context: ConversationRequest | None,
+    ) -> ContextFitReport | None:
+        if committed_context is None:
+            return None
+        report = assess_context_fit(
+            provider=candidate.provider,
+            route=candidate.route,
+            capability=candidate.capability,
+            request=committed_context,
+        )
+        if report.decision in {
+            ContextFitDecision.CONTEXT_EXCEEDED,
+            ContextFitDecision.MODEL_OUTPUT_EXCEEDED,
+        }:
+            raise RuntimeSwitchContextError(report)
+        return report
 
     def _activate(self, candidate: _Candidate) -> None:
         self._provider = candidate.provider
@@ -614,7 +706,7 @@ def _route_with_model(route: RuntimeProviderRoute, model: str) -> RuntimeProvide
     return replace(route, selected_model=model, wire_model=wire_model)
 
 
-def _fake_status(*, source: str = "default") -> RuntimeStatus:
+def _fake_status(*, source: str = "default", generation: int = 0) -> RuntimeStatus:
     return RuntimeStatus(
         mode="fake",
         profile=None,
@@ -627,6 +719,7 @@ def _fake_status(*, source: str = "default") -> RuntimeStatus:
         base_url_source=None,
         credential_required=False,
         credential_present=False,
+        generation=generation,
     )
 
 
@@ -638,6 +731,7 @@ def _status_for_route(
     environment: Mapping[str, str],
     model_override: str | None,
     capability: ModelContextCapability,
+    generation: int = 0,
 ) -> RuntimeStatus:
     definition = route.definition
     present = bool(
@@ -671,6 +765,26 @@ def _status_for_route(
         model_max_output_tokens=capability.model_max_output_tokens,
         model_max_output_source=capability.model_max_output_source.value,
         model_max_output_diagnostic=capability.model_max_output_diagnostic,
+        generation=generation,
+    )
+
+
+def _switch_context_message(report: ContextFitReport) -> str:
+    if report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+        detail = (
+            f"output reserve={report.requested_output_tokens} > "
+            f"model max output={report.model_output_limit}"
+        )
+    else:
+        detail = (
+            f"input={report.input_count.input_tokens} "
+            f"({report.input_count.method.value}) + output reserve="
+            f"{report.requested_output_tokens} > context window="
+            f"{report.context_window_limit}"
+        )
+    return (
+        f"runtime switch candidate rejected: {detail}; "
+        "current runtime and profile selection are unchanged"
     )
 
 

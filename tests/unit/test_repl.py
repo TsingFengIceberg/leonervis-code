@@ -13,7 +13,7 @@ from leonervis_code.cli.repl import (
 )
 from leonervis_code.core.contracts import AssistantText, ConversationTurn, ToolUse, UserMessage
 from leonervis_code.providers.fake import ScriptedFakeProvider
-from leonervis_code.providers.manager import RuntimeStatus
+from leonervis_code.providers.manager import RuntimeStatus, RuntimeSwitchResult
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.session_records import BindingSnapshot
@@ -248,12 +248,13 @@ def test_repl_provider_commands_switch_without_entering_model_history(tmp_path) 
 
         def use_profile(self, name, *, scope):
             self.used.append((name, scope))
-            return self.status()
+            return RuntimeSwitchResult(self.status(), None)
 
         def set_model(self, model):
             self.models.append(model)
             status = self.status()
-            return RuntimeStatus(**{**status.__dict__, "selected_model": model})
+            switched = RuntimeStatus(**{**status.__dict__, "selected_model": model})
+            return RuntimeSwitchResult(switched, None)
 
         def prompt(self, prompt):
             self.prompts.append(prompt)

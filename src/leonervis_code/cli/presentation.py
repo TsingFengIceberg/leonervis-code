@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Literal, Protocol
 
+from leonervis_code.providers.request_context import ContextFitDecision, ContextFitReport
+
 RESET = "\x1b[0m"
 RED = "\x1b[31m"
 GREEN = "\x1b[32m"
@@ -181,6 +183,52 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
         f"Context window: {context}{diagnostic}\n"
         f"Model max output: {model_output}{output_diagnostic}\n"
         f"Requested output reserve: {output_reserve}"
+    )
+
+
+def render_runtime_switch(
+    destination: str,
+    report: ContextFitReport | None,
+    *,
+    suffix: str,
+) -> tuple[str, MessageKind]:
+    """Render committed switch evidence without claiming more than the probe proved."""
+    if report is None:
+        return f"{destination}; {suffix}", "success"
+    if report.decision == ContextFitDecision.FITS:
+        return (
+            f"{destination}; committed context fits: input="
+            f"{report.input_count.input_tokens} ({report.input_count.method.value}) + "
+            f"reserve={report.requested_output_tokens} <= window="
+            f"{report.context_window_limit}. The next provider invocation still runs "
+            f"full preflight; {suffix}",
+            "success",
+        )
+    diagnostic = report.input_count.diagnostic or "required context facts are unknown"
+    return (
+        f"{destination}; compatibility not confirmed: {diagnostic}. "
+        "The switch was applied, no history was deleted, and the next provider "
+        f"invocation will run full preflight; {suffix}",
+        "warning",
+    )
+
+
+def render_switch_rejection(report: ContextFitReport) -> str:
+    """Render a safe known-overflow rejection with explicit unchanged state."""
+    if report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+        detail = (
+            f"reserve={report.requested_output_tokens} > model max output="
+            f"{report.model_output_limit}"
+        )
+    else:
+        detail = (
+            f"input={report.input_count.input_tokens} "
+            f"({report.input_count.method.value}) + reserve="
+            f"{report.requested_output_tokens} > window={report.context_window_limit}"
+        )
+    return (
+        f"Runtime switch rejected: {detail}. Current runtime and profile selection "
+        "are unchanged. Keep the current runtime or use /session new before switching."
     )
 
 

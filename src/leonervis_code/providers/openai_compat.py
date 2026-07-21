@@ -61,7 +61,11 @@ class OpenAICompatibleConversationProvider:
     def count_input_tokens(self, request_snapshot: ConversationRequest) -> RequestTokenCount:
         """Estimate the exact native input-bearing chat projection locally."""
         return estimate_serialized_input_tokens(
-            build_input_projection(self._route, request_snapshot)
+            build_input_projection(
+                self._route,
+                request_snapshot,
+                committed_context=True,
+            )
         )
 
     def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
@@ -114,13 +118,19 @@ def read_file_tool_definition() -> dict[str, object]:
 def build_input_projection(
     route: RuntimeProviderRoute,
     request_snapshot: ConversationRequest,
+    *,
+    committed_context: bool = False,
 ) -> dict[str, object]:
     """Build the native fields that contribute provider input tokens."""
     return {
         "model": route.wire_model,
         "messages": [
             {"role": "system", "content": request_snapshot.system_prompt.text},
-            *serialize_history(request_snapshot.history, route=route),
+            *serialize_history(
+                request_snapshot.history,
+                route=route,
+                committed_context=committed_context,
+            ),
         ],
         "tools": [read_file_tool_definition()],
         "parallel_tool_calls": False,
@@ -148,9 +158,12 @@ def serialize_history(
     history: tuple[ConversationItem, ...],
     *,
     route: RuntimeProviderRoute,
+    committed_context: bool = False,
 ) -> list[dict[str, object]]:
-    """Translate the current neutral causal sequence to chat-completions messages."""
+    """Translate neutral history for invocation or committed-context counting."""
     if not history:
+        if committed_context:
+            return []
         raise _invalid_history(route, "conversation history must not be empty")
     messages: list[dict[str, object]] = []
     expected = "user"
@@ -212,8 +225,16 @@ def serialize_history(
             continue
         raise _invalid_history(route, "conversation history contains an unknown item")
 
-    if expected != "assistant":
-        raise _invalid_history(route, "conversation history must end before an assistant response")
+    valid_terminal_states = {"assistant"}
+    if committed_context:
+        valid_terminal_states.add("user")
+    if expected not in valid_terminal_states:
+        message = (
+            "committed conversation history must end with assistant text"
+            if committed_context
+            else "conversation history must end before an assistant response"
+        )
+        raise _invalid_history(route, message)
     return messages
 
 
