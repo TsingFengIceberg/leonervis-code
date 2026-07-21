@@ -18,6 +18,7 @@ from leonervis_code.providers.manager import RuntimeProviderManager, RuntimeStat
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
+from leonervis_code.providers.request_context import ContextPreflightError
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionInfo, SessionStore, SessionStoreError, SessionWriter
 from leonervis_code.tools.read_file import ReadFileTool
@@ -165,12 +166,13 @@ class ProjectSession:
         """Run one complete turn; transcript fsync succeeds before memory commit."""
         with self._lock:
             self._ensure_open()
-            binding = binding_from_status(self._manager.status())
+            binding: BindingSnapshot | None = None
             try:
-                with self._manager.provider_for_turn() as provider:
-                    return self._loop.run(text, provider=provider)
+                with self._manager.provider_for_turn() as runtime:
+                    binding = binding_from_status(runtime.status)
+                    return self._loop.run(text, provider=runtime)
             except Exception as error:
-                self._record_failure(binding, error)
+                self._record_failure(binding or binding_from_status(self._manager.status()), error)
                 raise
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
@@ -282,6 +284,8 @@ def binding_from_status(status: RuntimeStatus, *, generation: int = 0) -> Bindin
 
 
 def _safe_failure_message(error: Exception) -> str:
+    if isinstance(error, ContextPreflightError):
+        return str(error)[:4096]
     if isinstance(error, ProviderAdapterError):
         return error.failure.message[:4096]
     if isinstance(error, SessionStoreError):

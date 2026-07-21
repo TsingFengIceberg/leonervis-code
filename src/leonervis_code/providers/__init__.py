@@ -27,10 +27,24 @@ from leonervis_code.providers.profile_store import (
     ActiveProfileSelection,
     ProviderProfileStore,
 )
+from leonervis_code.providers.request_context import (
+    ContextFitDecision,
+    ContextFitReport,
+    ContextPreflightError,
+    ContextPreflightErrorKind,
+    RequestTokenCount,
+    RequestTokenCountMethod,
+    estimate_serialized_input_tokens,
+    evaluate_context_fit,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
     "ActiveProfileSelection",
+    "ContextFitDecision",
+    "ContextFitReport",
+    "ContextPreflightError",
+    "ContextPreflightErrorKind",
     "LEGACY_PROFILE_NAMESPACE",
     "ModelContextCapability",
     "ModelContextCapabilityResolver",
@@ -40,9 +54,13 @@ __all__ = [
     "ProviderProfileError",
     "ProviderProfileSpec",
     "ProviderProfileStore",
+    "RequestTokenCount",
+    "RequestTokenCountMethod",
     "RuntimeProviderManager",
     "RuntimeProviderStateError",
     "RuntimeStatus",
+    "estimate_serialized_input_tokens",
+    "evaluate_context_fit",
     "legacy_profile_id",
     "profile_fingerprint",
     "route_fingerprint",

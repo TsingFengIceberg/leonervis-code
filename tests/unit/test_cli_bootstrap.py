@@ -216,6 +216,8 @@ def test_global_model_route_renders_real_provider_metadata_without_secret_values
         "base URL: https://api.openai.com/v1 (default)\n"
         "credential: configured\n"
         "context window: unknown (unknown)\n"
+        "model max output: unknown (unknown)\n"
+        "requested output reserve: 1024\n"
         "context diagnostic: live context discovery is unsupported\n"
     )
     assert "secret-must-not-render" not in output.getvalue()
@@ -581,7 +583,7 @@ def test_profile_identity_cli_supports_rename_replace_ids_and_migrate(tmp_path) 
 
     output = io.StringIO()
     assert main(["provider", "migrate"], stdout=output, stderr=io.StringIO(), **common) == 0
-    assert output.getvalue() == "Migrated provider configuration to schema v3.\n"
+    assert output.getvalue() == "Migrated provider configuration to schema v4.\n"
 
 
 @pytest.mark.parametrize(

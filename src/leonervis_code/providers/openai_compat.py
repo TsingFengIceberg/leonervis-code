@@ -24,6 +24,10 @@ from leonervis_code.providers.errors import (
     safe_request_id,
     safe_retry_after,
 )
+from leonervis_code.providers.request_context import (
+    RequestTokenCount,
+    estimate_serialized_input_tokens,
+)
 from leonervis_code.tools.read_file import read_file_model_definition
 
 
@@ -53,6 +57,12 @@ class OpenAICompatibleConversationProvider:
         close = getattr(self._owner, "close", None)
         if callable(close):
             close()
+
+    def count_input_tokens(self, request_snapshot: ConversationRequest) -> RequestTokenCount:
+        """Estimate the exact native input-bearing chat projection locally."""
+        return estimate_serialized_input_tokens(
+            build_input_projection(self._route, request_snapshot)
+        )
 
     def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
         """Make one non-streaming compatible request through the injected seam."""
@@ -101,20 +111,29 @@ def read_file_tool_definition() -> dict[str, object]:
     }
 
 
+def build_input_projection(
+    route: RuntimeProviderRoute,
+    request_snapshot: ConversationRequest,
+) -> dict[str, object]:
+    """Build the native fields that contribute provider input tokens."""
+    return {
+        "model": route.wire_model,
+        "messages": [
+            {"role": "system", "content": request_snapshot.system_prompt.text},
+            *serialize_history(request_snapshot.history, route=route),
+        ],
+        "tools": [read_file_tool_definition()],
+        "parallel_tool_calls": False,
+    }
+
+
 def build_request(
     route: RuntimeProviderRoute,
     request_snapshot: ConversationRequest,
 ) -> dict[str, object]:
     """Build a complete provider-native request with deterministic compatibility rules."""
-    messages = [
-        {"role": "system", "content": request_snapshot.system_prompt.text},
-        *serialize_history(request_snapshot.history, route=route),
-    ]
     request: dict[str, object] = {
-        "model": route.wire_model,
-        "messages": messages,
-        "tools": [read_file_tool_definition()],
-        "parallel_tool_calls": False,
+        **build_input_projection(route, request_snapshot),
         "stream": False,
     }
     token_field = token_limit_field(route.wire_model)

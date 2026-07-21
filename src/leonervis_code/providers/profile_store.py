@@ -25,8 +25,8 @@ from leonervis_code.providers.profile import (
     legacy_profile_id,
 )
 
-SCHEMA_VERSION = 3
-SUPPORTED_SCHEMA_VERSIONS = {1, 2, 3}
+SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSIONS = {1, 2, 3, 4}
 MAX_CONFIGURATION_BYTES = 1024 * 1024
 MAX_PROFILES = 256
 
@@ -69,7 +69,7 @@ def default_project_profile_path(workspace: Path) -> Path:
 
 
 class ProviderProfileStore:
-    """Read v1/v2/v3 configurations and write schema v3 atomically."""
+    """Read v1-v4 configurations and write schema v4 atomically."""
 
     def __init__(self, user_path: Path, project_path: Path) -> None:
         self.user_path = Path(user_path)
@@ -356,7 +356,7 @@ class ProviderProfileStore:
                 self._write_user(user.profiles, None)
 
     def migrate(self) -> None:
-        """Explicitly rewrite readable older files as v3; each file is independently atomic."""
+        """Explicitly rewrite readable older files as v4; each file is independently atomic."""
         with self.transaction():
             user = self._load_user()
             project = self._load_project()
@@ -383,7 +383,11 @@ class ProviderProfileStore:
             for name, raw_profile in raw_profiles.items():
                 if not isinstance(name, str) or not isinstance(raw_profile, dict):
                     raise ProviderProfileError("user provider profile entries are malformed")
-                spec = ProviderProfileSpec.from_mapping(raw_profile, allow_context_window=False)
+                spec = ProviderProfileSpec.from_mapping(
+                    raw_profile,
+                    allow_context_window=False,
+                    allow_model_max_output=False,
+                )
                 if spec.name != name:
                     raise ProviderProfileError(f"provider profile key/name mismatch: {name}")
                 profile_id = legacy_profile_id(name)
@@ -413,7 +417,9 @@ class ProviderProfileStore:
                     f"schema-v2 profile is missing required field: {sorted(missing_identity)[0]}"
                 )
             profile = NamedProviderProfile.from_mapping(
-                raw_profile, allow_context_window=version >= 3
+                raw_profile,
+                allow_context_window=version >= 3,
+                allow_model_max_output=version >= 4,
             )
             if profile.profile_id != profile_id:
                 raise ProviderProfileError(f"provider profile key/ID mismatch: {profile_id}")
@@ -614,6 +620,7 @@ def _owned_profile(
         api_key_env=spec.api_key_env,
         max_output_tokens=spec.max_output_tokens,
         context_window_tokens=spec.context_window_tokens,
+        model_max_output_tokens=spec.model_max_output_tokens,
         temperature=spec.temperature,
         profile_id=profile_id,
         revision=revision,

@@ -30,6 +30,7 @@ from leonervis_code.providers.openai_compat import (
     read_file_tool_definition,
     serialize_history,
 )
+from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.providers.resolver import resolve_runtime_route
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.read_file import ReadFileTool
@@ -46,6 +47,14 @@ class RecordingChatClient:
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+
+def test_compatible_counter_estimates_the_shared_native_input_projection() -> None:
+    provider = OpenAICompatibleConversationProvider(route(), RecordingChatClient([]))
+    counted = provider.count_input_tokens(request(UserMessage("hello")))
+
+    assert counted.method == RequestTokenCountMethod.ESTIMATED
+    assert counted.input_tokens is not None and counted.input_tokens > 0
 
 
 def route(selector: str = "openai/gpt-4.1"):

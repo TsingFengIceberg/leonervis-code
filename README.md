@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file` 工具循环，以及 provider-owned context-window capability。尚未实现 request token counting、每次调用 preflight、compact、写工具、Bash 或审批流程。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file` 工具循环、provider-owned 模型限制，以及每次 provider invocation 前的 target-specific request counting/preflight。尚未实现 compact、写工具、Bash 或审批流程。
 
 ## 目录
 
@@ -143,7 +143,7 @@ uv run leonervis-code provider show vendor
 uv run leonervis-code --profile vendor route
 ```
 
-Runtime 按以下优先级解析 context window：profile exact override → exact built-in catalog → fresh private discovery cache → provider-owned live discovery → `unknown`。该能力目前只报告容量和来源，还不会计算当前请求 token、阻止超限请求或执行 compact。
+Runtime 按字段独立解析 context window 与 model max output：profile exact override → exact built-in catalog → fresh private discovery cache → provider-owned live discovery → `unknown`。每次 provider invocation（包括工具 continuation）都会用当前 requested output reserve 做 preflight；Anthropic official endpoint 优先 exact count，OpenAI-compatible 使用明确标记的 deterministic estimate，unknown 时不猜测并允许 provider 最终裁决。该能力不会自动 compact。
 
 ### 管理 Session
 
@@ -212,7 +212,8 @@ git diff --check
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session 和 context capability 的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
-- [Provider-owned model context capability](./docs/decisions/0013-provider-owned-model-context-capabilities.md)：当前 context-window 解析与缓存设计。
+- [Target-specific request counting 与 preflight](./docs/decisions/0014-target-specific-request-counting-and-preflight.md)：每次 provider invocation 的 native input 计量、两类限制与 typed local rejection。
+- [Provider-owned model context capability](./docs/decisions/0013-provider-owned-model-context-capabilities.md)：context/model-output limit 解析与缓存设计。
 - [Canonical model system prompt](./docs/decisions/0012-first-canonical-model-system-prompt.md)：模型可见契约、版本和 fingerprint。
 - [Stable profile identity and durable Sessions](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md)：profile UUID/revision 与 Session 持久化。
 - [Claw-Code prompt 学习入口](./docs/references/claw-code-prompts/README.md)：只读参考结构与 Leonervis 的采用差异。
@@ -222,4 +223,4 @@ git diff --check
 
 当前仅提供一个 workspace-bound `read_file` 工具；尚无写/编辑、glob/grep、Bash/test、网络工具、审批、streaming、自动 retry/fallback、并行工具、compact、多 Agent 或远程服务。
 
-下一切片计划实现 target-specific request counting，并在每次 provider invocation（包括工具 continuation）前执行 preflight；之后再进入 target-aware model switch 和 controlled compact。完整范围、开发原则和路线记录在 [CLAUDE.md](./CLAUDE.md) 与各 ADR 中。
+下一切片计划实现 target-aware switch UX：在切换 provider/model 前复用当前 counter/fit report 检查目标容量；之后再进入 durable effective context 与 controlled compact。完整范围、开发原则和路线记录在 [CLAUDE.md](./CLAUDE.md) 与各 ADR 中。

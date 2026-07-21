@@ -53,6 +53,10 @@ class RuntimeStatusView(Protocol):
     context_window_tokens: int | None
     context_window_source: str
     context_window_diagnostic: str | None
+    model_max_output_tokens: int | None
+    model_max_output_source: str
+    model_max_output_diagnostic: str | None
+    max_output_tokens: int | None
 
 
 class SessionInfoView(Protocol):
@@ -149,9 +153,22 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
         if status.context_window_tokens is not None
         else "unknown"
     )
+    model_output = (
+        f"{status.model_max_output_tokens} tokens ({status.model_max_output_source})"
+        if status.model_max_output_tokens is not None
+        else "unknown"
+    )
+    output_reserve = (
+        f"{status.max_output_tokens} tokens" if status.max_output_tokens is not None else "unknown"
+    )
     diagnostic = (
         f"\nContext diagnostic: {status.context_window_diagnostic}"
         if status.context_window_diagnostic
+        else ""
+    )
+    output_diagnostic = (
+        f"\nModel output diagnostic: {status.model_max_output_diagnostic}"
+        if status.model_max_output_diagnostic
         else ""
     )
     return (
@@ -161,7 +178,9 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
         f"Model: {status.selected_model}\n"
         f"Base URL: {status.base_url} ({status.base_url_source})\n"
         f"Credential: {credential}\n"
-        f"Context window: {context}{diagnostic}"
+        f"Context window: {context}{diagnostic}\n"
+        f"Model max output: {model_output}{output_diagnostic}\n"
+        f"Requested output reserve: {output_reserve}"
     )
 
 

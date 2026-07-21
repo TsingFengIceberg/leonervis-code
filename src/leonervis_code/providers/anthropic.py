@@ -27,6 +27,12 @@ from leonervis_code.providers.model_context import (
     OFFICIAL_ANTHROPIC_BASE_URL,
     ModelContextDiscovery,
 )
+from leonervis_code.providers.request_context import (
+    MAX_REQUEST_INPUT_TOKENS,
+    RequestTokenCount,
+    RequestTokenCountMethod,
+    estimate_serialized_input_tokens,
+)
 from leonervis_code.tools.read_file import read_file_model_definition
 
 PROVIDER_ID = "anthropic"
@@ -60,6 +66,9 @@ class AnthropicModelsClient(Protocol):
 
 class AnthropicMessagesClient(Protocol):
     """The narrow synchronous SDK operation used by the adapter."""
+
+    def count_tokens(self, **kwargs: object) -> object:
+        """Count input tokens for one Anthropic Messages projection."""
 
     def create(self, **kwargs: object) -> object:
         """Create one non-streaming Anthropic message."""
@@ -114,6 +123,25 @@ class AnthropicConversationProvider:
         if callable(close):
             close()
 
+    def count_input_tokens(self, request_snapshot: ConversationRequest) -> RequestTokenCount:
+        """Count official Anthropic input exactly, falling back to a safe estimate."""
+        projection = build_input_projection(self._config, request_snapshot)
+        if self._config.base_url.rstrip("/") != OFFICIAL_ANTHROPIC_BASE_URL:
+            return estimate_serialized_input_tokens(projection)
+        try:
+            result = self._client.count_tokens(**projection)
+            input_tokens = getattr(result, "input_tokens", None)
+            if type(input_tokens) is not int or not (0 <= input_tokens <= MAX_REQUEST_INPUT_TOKENS):
+                raise ValueError
+            return RequestTokenCount(input_tokens, RequestTokenCountMethod.EXACT)
+        except Exception:
+            estimated = estimate_serialized_input_tokens(projection)
+            return RequestTokenCount(
+                estimated.input_tokens,
+                RequestTokenCountMethod.ESTIMATED,
+                "Anthropic token counting failed safely; used serialized estimate",
+            )
+
     def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
         """Make one non-streaming request through the injected SDK seam."""
         request = build_request(self._config, request_snapshot)
@@ -136,15 +164,32 @@ class AnthropicConversationProvider:
             return ModelContextDiscovery(None, "Anthropic model discovery failed safely")
         model_id = getattr(model, "id", None)
         max_input_tokens = getattr(model, "max_input_tokens", None)
+        max_tokens = getattr(model, "max_tokens", None)
         if model_id != self._config.model_id:
             return ModelContextDiscovery(
                 None, "Anthropic model discovery returned a different model ID"
             )
-        if type(max_input_tokens) is not int or max_input_tokens < 1:
-            return ModelContextDiscovery(
-                None, "Anthropic model discovery returned no valid input limit"
-            )
-        return ModelContextDiscovery(max_input_tokens)
+        context_value = (
+            max_input_tokens if type(max_input_tokens) is int and max_input_tokens > 0 else None
+        )
+        output_value = max_tokens if type(max_tokens) is int and max_tokens > 0 else None
+        diagnostic = None
+        if context_value is None or output_value is None:
+            diagnostic = "Anthropic model discovery returned an incomplete limit set"
+        return ModelContextDiscovery(context_value, diagnostic, output_value)
+
+
+def build_input_projection(
+    config: AnthropicProviderConfig,
+    request_snapshot: ConversationRequest,
+) -> dict[str, object]:
+    """Build the Anthropic fields that contribute provider input tokens."""
+    return {
+        "model": config.model_id,
+        "system": request_snapshot.system_prompt.text,
+        "messages": serialize_history(request_snapshot.history, config=config),
+        "tools": [read_file_tool_definition()],
+    }
 
 
 def build_request(
@@ -153,11 +198,8 @@ def build_request(
 ) -> dict[str, object]:
     """Build one complete Anthropic Messages request deterministically."""
     request: dict[str, object] = {
-        "model": config.model_id,
+        **build_input_projection(config, request_snapshot),
         "max_tokens": config.max_output_tokens,
-        "system": request_snapshot.system_prompt.text,
-        "messages": serialize_history(request_snapshot.history, config=config),
-        "tools": [read_file_tool_definition()],
         "stream": False,
     }
     if config.temperature is not None:

@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded `read_file` tool loop, and provider-owned context-window capability are implemented. Request token counting, per-invocation preflight, compaction, write tools, Bash, and approval flows are not yet implemented.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded `read_file` tool loop, provider-owned model limits, and target-specific request counting/preflight before every provider invocation are implemented. Compaction, write tools, Bash, and approval flows are not yet implemented.
 
 ## Contents
 
@@ -143,7 +143,7 @@ uv run leonervis-code provider show vendor
 uv run leonervis-code --profile vendor route
 ```
 
-The runtime resolves a context window in this order: exact profile override → exact built-in catalog → fresh private discovery cache → provider-owned live discovery → `unknown`. This capability currently reports capacity and provenance only; it does not count current request tokens, reject oversized requests, or compact history.
+The runtime resolves the context window and model maximum output independently: exact profile override → exact built-in catalog → fresh private discovery cache → provider-owned live discovery → `unknown`. Every provider invocation, including tool continuations, is preflighted with the current requested output reserve. The official Anthropic endpoint prefers an exact count, OpenAI-compatible routes use an explicitly marked deterministic estimate, and unknown facts are not guessed—the provider remains the final authority. This capability does not compact automatically.
 
 ### Manage Sessions
 
@@ -212,7 +212,8 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 - [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, and context capability.
 - [Architecture decision records](./docs/decisions/): complete problem statements, trade-offs, boundaries, and verification records for each learning slice.
-- [Provider-owned model context capability](./docs/decisions/0013-provider-owned-model-context-capabilities.md): current context-window resolution and cache design.
+- [Target-specific request counting and preflight](./docs/decisions/0014-target-specific-request-counting-and-preflight.md): native-input counting, two distinct limits, and typed local rejection before every provider invocation.
+- [Provider-owned model context capability](./docs/decisions/0013-provider-owned-model-context-capabilities.md): context/model-output limit resolution and cache design.
 - [Canonical model system prompt](./docs/decisions/0012-first-canonical-model-system-prompt.md): model-visible contract, version, and fingerprint.
 - [Stable profile identity and durable Sessions](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md): profile UUID/revision and Session persistence.
 - [Claw-Code prompt study map](./docs/references/claw-code-prompts/README.md): read-only reference structure and Leonervis-specific differences.
@@ -222,4 +223,4 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 The only workspace tool today is bounded `read_file`. There are no write/edit, glob/grep, Bash/test, network, approval, streaming, automatic retry/fallback, parallel-tool, compaction, multi-agent, or remote-service capabilities yet.
 
-The next planned slice is target-specific request counting and preflight before every provider invocation, including tool continuations. Target-aware model switching and controlled compaction follow afterward. [CLAUDE.md](./CLAUDE.md) and the ADRs record the complete scope, development principles, and roadmap.
+The next planned slice is target-aware switch UX: reuse the current counter and fit report to check a destination provider/model before committing a switch. Durable effective context and controlled compaction follow afterward. [CLAUDE.md](./CLAUDE.md) and the ADRs record the complete scope, development principles, and roadmap.

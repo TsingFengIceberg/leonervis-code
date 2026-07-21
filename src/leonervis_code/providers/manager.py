@@ -8,7 +8,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 
-from leonervis_code.core.contracts import ConversationProvider
+from leonervis_code.core.contracts import (
+    ConversationProvider,
+    ConversationRequest,
+    ProviderResponse,
+)
 from leonervis_code.providers.definitions import ADAPTER_CONTRACT_VERSION, RuntimeProviderRoute
 from leonervis_code.providers.factory import create_provider
 from leonervis_code.providers.fake import ScriptedFakeProvider
@@ -22,6 +26,11 @@ from leonervis_code.providers.model_context_cache import (
 )
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
+from leonervis_code.providers.request_context import (
+    RequestTokenCount,
+    evaluate_context_fit,
+    raise_for_context_fit,
+)
 from leonervis_code.providers.resolver import resolve_profile_route, resolve_runtime_route
 
 ProviderFactory = Callable[..., ConversationProvider]
@@ -59,12 +68,54 @@ class RuntimeStatus:
     context_window_discovered_at: str | None = None
     context_window_expires_at: str | None = None
     context_window_diagnostic: str | None = None
+    model_max_output_tokens: int | None = None
+    model_max_output_source: str = "unknown"
+    model_max_output_diagnostic: str | None = None
     adapter_contract_version: int = ADAPTER_CONTRACT_VERSION
 
     @property
     def profile_name(self) -> str | None:
         """Expose an explicit name while retaining the existing ``profile`` field."""
         return self.profile
+
+
+@dataclass(frozen=True)
+class TurnRuntimeSnapshot:
+    """One immutable provider target pinned for a complete conversation turn."""
+
+    provider: ConversationProvider
+    route: RuntimeProviderRoute | None
+    capability: ModelContextCapability
+    status: RuntimeStatus
+
+    def respond(self, request: ConversationRequest) -> ProviderResponse:
+        if self.route is None:
+            return self.provider.respond(request)
+        input_count = RequestTokenCount.unknown("input counting was not required")
+        preliminary = evaluate_context_fit(
+            target=self.capability.target,
+            input_count=input_count,
+            requested_output_tokens=self.route.max_output_tokens,
+            context_window_limit=self.capability.context_window_tokens,
+            model_output_limit=self.capability.model_max_output_tokens,
+        )
+        raise_for_context_fit(preliminary)
+        if self.capability.context_window_tokens is not None:
+            operation = getattr(self.provider, "count_input_tokens", None)
+            input_count = (
+                operation(request)
+                if callable(operation)
+                else RequestTokenCount.unknown("provider does not expose input counting")
+            )
+        report = evaluate_context_fit(
+            target=self.capability.target,
+            input_count=input_count,
+            requested_output_tokens=self.route.max_output_tokens,
+            context_window_limit=self.capability.context_window_tokens,
+            model_output_limit=self.capability.model_max_output_tokens,
+        )
+        raise_for_context_fit(report)
+        return self.provider.respond(request)
 
 
 @dataclass(frozen=True)
@@ -120,7 +171,7 @@ class RuntimeProviderManager:
             )
             candidate = self._prepare_candidate(
                 route,
-                _profile_override(selected_profile, model_override=model),
+                *_profile_overrides(selected_profile, model_override=model),
             )
             self._load_profile(selected_profile)
             self._model_override = model
@@ -145,7 +196,11 @@ class RuntimeProviderManager:
             else:
                 selected_profile = store.get_profile_by_id(active.profile_id)
                 route = resolve_profile_route(selected_profile, environment=environment)
-                candidate = self._prepare_candidate(route, selected_profile.context_window_tokens)
+                candidate = self._prepare_candidate(
+                    route,
+                    selected_profile.context_window_tokens,
+                    selected_profile.model_max_output_tokens,
+                )
                 self._load_profile(selected_profile)
                 self._selection_source = active.source
                 self._activate(candidate)
@@ -175,6 +230,7 @@ class RuntimeProviderManager:
         candidate = _prepare_external_candidate(
             route,
             loaded.context_window_tokens,
+            loaded.model_max_output_tokens,
             environment,
             provider_factory,
             resolver,
@@ -237,6 +293,7 @@ class RuntimeProviderManager:
         candidate = _prepare_external_candidate(
             route,
             loaded.context_window_tokens,
+            loaded.model_max_output_tokens,
             environment,
             provider_factory,
             resolver,
@@ -277,16 +334,30 @@ class RuntimeProviderManager:
         return self._store
 
     @contextmanager
-    def provider_for_turn(self) -> Iterator[ConversationProvider]:
-        """Pin and yield the current client for one complete conversation turn."""
+    def provider_for_turn(self) -> Iterator[TurnRuntimeSnapshot]:
+        """Pin and yield the complete runtime for one conversation turn."""
         with self._lock:
             self._ensure_open()
             if self._turn_active:
                 raise RuntimeProviderStateError("a conversation turn is already active")
             self._turn_active = True
-            provider = self._provider
+            route = self._route
+            capability = self._capability
+            status = (
+                _fake_status(source=self._selection_source)
+                if route is None
+                else _status_for_route(
+                    route,
+                    profile=self._loaded_profile,
+                    source=self._selection_source,
+                    environment=self._environment,
+                    model_override=self._model_override,
+                    capability=capability,
+                )
+            )
+            snapshot = TurnRuntimeSnapshot(self._provider, route, capability, status)
         try:
-            yield provider
+            yield snapshot
         finally:
             with self._lock:
                 self._turn_active = False
@@ -300,7 +371,9 @@ class RuntimeProviderManager:
         selection = self._store.selection_with_id(requested.profile_id, scope)
         loaded = self._store.get_profile_by_id(selection.profile_id)
         route = resolve_profile_route(loaded, environment=self._environment)
-        candidate = self._prepare_candidate(route, loaded.context_window_tokens)
+        candidate = self._prepare_candidate(
+            route, loaded.context_window_tokens, loaded.model_max_output_tokens
+        )
         try:
             with self._lock, self._store.transaction():
                 self._ensure_switchable()
@@ -349,7 +422,9 @@ class RuntimeProviderManager:
         else:
             loaded = self._store.get_profile_by_id(selection.profile_id)
             route = resolve_profile_route(loaded, environment=self._environment)
-            candidate = self._prepare_candidate(route, loaded.context_window_tokens)
+            candidate = self._prepare_candidate(
+                route, loaded.context_window_tokens, loaded.model_max_output_tokens
+            )
             candidate_provider = candidate.provider
             source = selection.source
         try:
@@ -463,11 +538,15 @@ class RuntimeProviderManager:
         _close_provider(provider)
 
     def _prepare_candidate(
-        self, route: RuntimeProviderRoute, profile_override: int | None
+        self,
+        route: RuntimeProviderRoute,
+        profile_override: int | None,
+        model_max_output_override: int | None = None,
     ) -> _Candidate:
         return _prepare_external_candidate(
             route,
             profile_override,
+            model_max_output_override,
             self._environment,
             self._provider_factory,
             self._context_resolver,
@@ -495,6 +574,7 @@ class RuntimeProviderManager:
 def _prepare_external_candidate(
     route: RuntimeProviderRoute,
     profile_override: int | None,
+    model_max_output_override: int | None,
     environment: Mapping[str, str],
     provider_factory: ProviderFactory,
     resolver: ModelContextCapabilityResolver,
@@ -504,6 +584,7 @@ def _prepare_external_candidate(
         capability = resolver.resolve(
             route,
             profile_override=profile_override,
+            model_max_output_override=model_max_output_override,
             discoverer=provider,
         )
     except Exception:
@@ -512,8 +593,12 @@ def _prepare_external_candidate(
     return _Candidate(route, provider, capability)
 
 
-def _profile_override(profile: NamedProviderProfile, *, model_override: str | None) -> int | None:
-    return profile.context_window_tokens if model_override is None else None
+def _profile_overrides(
+    profile: NamedProviderProfile, *, model_override: str | None
+) -> tuple[int | None, int | None]:
+    if model_override is not None:
+        return None, None
+    return profile.context_window_tokens, profile.model_max_output_tokens
 
 
 def _route_with_model(route: RuntimeProviderRoute, model: str) -> RuntimeProviderRoute:
@@ -583,6 +668,9 @@ def _status_for_route(
         context_window_discovered_at=capability.discovered_at,
         context_window_expires_at=capability.expires_at,
         context_window_diagnostic=capability.diagnostic,
+        model_max_output_tokens=capability.model_max_output_tokens,
+        model_max_output_source=capability.model_max_output_source.value,
+        model_max_output_diagnostic=capability.model_max_output_diagnostic,
     )
 
 

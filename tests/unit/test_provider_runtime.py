@@ -13,6 +13,11 @@ from leonervis_code.providers.model_context import (
 )
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
+from leonervis_code.providers.request_context import (
+    ContextPreflightError,
+    RequestTokenCount,
+    RequestTokenCountMethod,
+)
 from leonervis_code.session import ProjectSession
 
 
@@ -66,7 +71,7 @@ def test_manager_reuses_client_and_atomically_switches_profiles(tmp_path) -> Non
 
     manager = RuntimeProviderManager(store, environment={}, profile="one", provider_factory=factory)
     with manager.provider_for_turn() as first:
-        assert first is constructed[0]
+        assert first.provider is constructed[0]
         with pytest.raises(RuntimeProviderStateError, match="during a conversation turn"):
             manager.use_profile("two")
     status = manager.use_profile("two")
@@ -83,7 +88,7 @@ def test_manager_reuses_client_and_atomically_switches_profiles(tmp_path) -> Non
     assert store.active_name("project") == "two"
     assert constructed[0].closed is True
     with manager.provider_for_turn() as current:
-        assert current is constructed[1]
+        assert current.provider is constructed[1]
 
 
 def test_manager_failed_switch_preserves_client_and_persistence(tmp_path) -> None:
@@ -253,6 +258,41 @@ def test_runtime_discovery_failure_is_nonfatal_and_redacted(tmp_path) -> None:
     assert status.context_window_tokens is None
     assert status.context_window_source == ModelContextSource.UNKNOWN
     assert "secret" not in (status.context_window_diagnostic or "")
+
+
+def test_preflight_rejects_known_overflow_before_provider_send(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    original = store.get_profile("one")
+    store.replace_profile(
+        original.profile_id,
+        replace(
+            original.to_spec(),
+            context_window_tokens=100,
+            model_max_output_tokens=80,
+            max_output_tokens=20,
+        ),
+        expected_revision=original.revision,
+    )
+
+    class CountingProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            return RequestTokenCount(81, RequestTokenCountMethod.ESTIMATED)
+
+    provider = CountingProvider("model-one")
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: provider,
+    )
+    with manager.provider_for_turn() as runtime:
+        from leonervis_code.core.contracts import ConversationRequest
+        from leonervis_code.system_prompt import build_system_prompt
+
+        request = ConversationRequest(build_system_prompt(), (UserMessage("too large"),))
+        with pytest.raises(ContextPreflightError, match="input=81"):
+            runtime.respond(request)
+    assert provider.requests == []
 
 
 def test_fake_runtime_has_explicit_empty_provenance(tmp_path) -> None:

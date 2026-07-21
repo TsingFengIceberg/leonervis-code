@@ -33,6 +33,7 @@ from leonervis_code.providers.profile import (
     ProviderProfileSpec,
 )
 from leonervis_code.providers.profile_store import ProviderProfileStore
+from leonervis_code.providers.request_context import ContextPreflightError
 from leonervis_code.providers.request_policy import preview_request
 from leonervis_code.providers.resolver import (
     RuntimeRouteError,
@@ -132,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--api-key-env", dest="profile_api_key_env")
     add_parser.add_argument("--max-output-tokens", type=int, default=1024)
     add_parser.add_argument("--context-window-tokens", type=int)
+    add_parser.add_argument("--model-max-output-tokens", type=int)
     add_parser.add_argument("--temperature", type=float)
     add_parser.add_argument("--replace", action="store_true")
     add_parser.add_argument("--if-revision", type=int)
@@ -172,9 +174,10 @@ def build_parser() -> argparse.ArgumentParser:
     replace_parser.add_argument("--api-key-env", dest="profile_api_key_env")
     replace_parser.add_argument("--max-output-tokens", type=int, default=1024)
     replace_parser.add_argument("--context-window-tokens", type=int)
+    replace_parser.add_argument("--model-max-output-tokens", type=int)
     replace_parser.add_argument("--temperature", type=float)
     replace_parser.add_argument("--if-revision", type=int)
-    provider_commands.add_parser("migrate", help="upgrade readable profile files to schema v3")
+    provider_commands.add_parser("migrate", help="upgrade readable profile files to schema v4")
 
     session_parser = subcommands.add_parser("session", help="inspect durable workspace sessions")
     session_commands = session_parser.add_subparsers(dest="session_command", required=True)
@@ -264,11 +267,14 @@ def render_runtime_route(
     stdout: TextIO,
     *,
     profile_override: int | None = None,
+    model_max_output_override: int | None = None,
 ) -> int:
     """Render one real route without constructing a client or exposing secrets."""
     definition = route.definition
     capability = ModelContextCapabilityResolver().resolve_offline(
-        route, profile_override=profile_override
+        route,
+        profile_override=profile_override,
+        model_max_output_override=model_max_output_override,
     )
     credential = "not required"
     if definition.credential_env:
@@ -283,6 +289,9 @@ def render_runtime_route(
     stdout.write(f"credential: {credential}\n")
     context = capability.context_window_tokens or "unknown"
     stdout.write(f"context window: {context} ({capability.source.value})\n")
+    model_output = capability.model_max_output_tokens or "unknown"
+    stdout.write(f"model max output: {model_output} ({capability.model_max_output_source.value})\n")
+    stdout.write(f"requested output reserve: {route.max_output_tokens}\n")
     if capability.diagnostic:
         stdout.write(f"context diagnostic: {capability.diagnostic}\n")
     return 0
@@ -319,6 +328,10 @@ def render_profile(
     stdout.write(
         "context window override: "
         f"{profile.context_window_tokens if profile.context_window_tokens is not None else '<none>'}\n"
+    )
+    stdout.write(
+        "model max output override: "
+        f"{profile.model_max_output_tokens if profile.model_max_output_tokens is not None else '<none>'}\n"
     )
     stdout.write(
         f"temperature: {profile.temperature if profile.temperature is not None else '<default>'}\n"
@@ -368,6 +381,7 @@ def _profile_spec(arguments: argparse.Namespace) -> ProviderProfileSpec:
         api_key_env=arguments.profile_api_key_env,
         max_output_tokens=arguments.max_output_tokens,
         context_window_tokens=arguments.context_window_tokens,
+        model_max_output_tokens=arguments.model_max_output_tokens,
         temperature=arguments.temperature,
     )
 
@@ -438,7 +452,7 @@ def handle_provider_command(
         stdout.write(f"Renamed provider profile {configured.name} to {renamed.name}.\n")
     elif command == "migrate":
         store.migrate()
-        stdout.write("Migrated provider configuration to schema v3.\n")
+        stdout.write("Migrated provider configuration to schema v4.\n")
     elif command == "clear":
         RuntimeProviderManager.prepare_clear(
             store,
@@ -585,6 +599,11 @@ def main(
                         if arguments.invocation_model is None
                         else None
                     ),
+                    model_max_output_override=(
+                        configured.model_max_output_tokens
+                        if arguments.invocation_model is None
+                        else None
+                    ),
                 )
             if arguments.invocation_model is not None:
                 route = resolve_runtime_route(
@@ -651,6 +670,9 @@ def main(
             session.close()
     except RuntimeRouteError as error:
         print(f"provider route error: {error}", file=errors)
+        return 2
+    except ContextPreflightError as error:
+        print(f"context preflight error: {error}", file=errors)
         return 2
     except ProviderAdapterError as error:
         return render_provider_failure(error, errors)

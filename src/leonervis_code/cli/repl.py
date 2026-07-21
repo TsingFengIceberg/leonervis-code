@@ -18,6 +18,7 @@ from leonervis_code.cli.slash import TOP_LEVEL_COMMANDS, dispatch_slash
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.manager import RuntimeProviderStateError
 from leonervis_code.providers.profile import ProviderProfileError
+from leonervis_code.providers.request_context import ContextPreflightError
 
 PLAIN_PROMPT = "leonervis> "
 
@@ -122,6 +123,9 @@ def run_repl(
             else:
                 response = getattr(session, "run")(prompt)
             stdout.write(f"{response}\n")
+        except ContextPreflightError as error:
+            message = f"Context preflight error: {error}"
+            stdout.write(f"{render_message(message, 'error', color=color)}\n")
         except ProviderAdapterError as error:
             message = f"Provider error [{error.failure.kind}]: {error.failure.message}"
             stdout.write(f"{render_message(message, 'error', color=color)}\n")

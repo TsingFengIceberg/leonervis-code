@@ -37,14 +37,20 @@ def route(
 
 
 class RecordingDiscoverer:
-    def __init__(self, value: int | None, diagnostic: str | None = None) -> None:
+    def __init__(
+        self,
+        value: int | None,
+        diagnostic: str | None = None,
+        model_max_output: int | None = None,
+    ) -> None:
         self.calls = 0
         self.value = value
         self.diagnostic = diagnostic
+        self.model_max_output = model_max_output
 
     def discover_model_context(self) -> ModelContextDiscovery:
         self.calls += 1
-        return ModelContextDiscovery(self.value, self.diagnostic)
+        return ModelContextDiscovery(self.value, self.diagnostic, self.model_max_output)
 
 
 def test_resolution_precedence_and_exact_catalog_matching(tmp_path) -> None:
@@ -59,6 +65,8 @@ def test_resolution_precedence_and_exact_catalog_matching(tmp_path) -> None:
 
     builtin = resolver.resolve(known, discoverer=discoverer)
     assert builtin.context_window_tokens == 1_000_000
+    assert builtin.model_max_output_tokens == 128_000
+    assert builtin.model_max_output_source == ModelContextSource.BUILTIN_CATALOG
     assert builtin.source == ModelContextSource.BUILTIN_CATALOG
     assert discoverer.calls == 0
 
@@ -84,16 +92,18 @@ def test_live_discovery_is_cached_and_expires(tmp_path) -> None:
     cache = ModelContextCapabilityCache(tmp_path / "cache.json", ttl=timedelta(hours=24))
     first_resolver = ModelContextCapabilityResolver(cache, clock=lambda: current[0])
     requested = route()
-    discoverer = RecordingDiscoverer(222_000)
+    discoverer = RecordingDiscoverer(222_000, model_max_output=8_192)
 
     first = first_resolver.resolve(requested, discoverer=discoverer)
     assert first.source == ModelContextSource.LIVE_DISCOVERY
     assert first.context_window_tokens == 222_000
+    assert first.model_max_output_tokens == 8_192
     assert discoverer.calls == 1
 
     cached = first_resolver.resolve(requested, discoverer=discoverer)
     assert cached.source == ModelContextSource.DISCOVERY_CACHE
     assert cached.context_window_tokens == 222_000
+    assert cached.model_max_output_tokens == 8_192
     assert discoverer.calls == 1
 
     current[0] = NOW + timedelta(hours=24)

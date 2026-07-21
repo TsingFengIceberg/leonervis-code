@@ -19,12 +19,13 @@ else:
 
 from leonervis_code.providers.model_context import (
     MAX_CONTEXT_WINDOW_TOKENS,
+    MAX_MODEL_OUTPUT_TOKENS,
     ModelContextCapability,
     ModelContextSource,
     ModelContextTarget,
 )
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 DEFAULT_CACHE_TTL = timedelta(hours=24)
 MAX_CACHE_BYTES = 1024 * 1024
 MAX_CACHE_ENTRIES = 512
@@ -73,10 +74,38 @@ class ModelContextCapabilityCache:
         return (
             ModelContextCapability(
                 target=target,
-                context_window_tokens=entry["context_window_tokens"],
-                source=ModelContextSource.DISCOVERY_CACHE,
-                discovered_at=_format_time(fetched_at),
-                expires_at=_format_time(expires_at),
+                context_window_tokens=entry.get("context_window_tokens"),
+                source=(
+                    ModelContextSource.DISCOVERY_CACHE
+                    if entry.get("context_window_tokens") is not None
+                    else ModelContextSource.UNKNOWN
+                ),
+                discovered_at=(
+                    _format_time(fetched_at)
+                    if entry.get("context_window_tokens") is not None
+                    else None
+                ),
+                expires_at=(
+                    _format_time(expires_at)
+                    if entry.get("context_window_tokens") is not None
+                    else None
+                ),
+                model_max_output_tokens=entry.get("model_max_output_tokens"),
+                model_max_output_source=(
+                    ModelContextSource.DISCOVERY_CACHE
+                    if entry.get("model_max_output_tokens") is not None
+                    else ModelContextSource.UNKNOWN
+                ),
+                model_max_output_discovered_at=(
+                    _format_time(fetched_at)
+                    if entry.get("model_max_output_tokens") is not None
+                    else None
+                ),
+                model_max_output_expires_at=(
+                    _format_time(expires_at)
+                    if entry.get("model_max_output_tokens") is not None
+                    else None
+                ),
             ),
             None,
         )
@@ -84,12 +113,23 @@ class ModelContextCapabilityCache:
     def put(
         self,
         target: ModelContextTarget,
-        context_window_tokens: int,
+        context_window_tokens: int | None,
+        model_max_output_tokens: int | None = None,
         *,
         now: datetime,
     ) -> str | None:
-        if type(context_window_tokens) is not int or not (
-            1 <= context_window_tokens <= MAX_CONTEXT_WINDOW_TOKENS
+        context_valid = context_window_tokens is None or (
+            type(context_window_tokens) is int
+            and 1 <= context_window_tokens <= MAX_CONTEXT_WINDOW_TOKENS
+        )
+        output_valid = model_max_output_tokens is None or (
+            type(model_max_output_tokens) is int
+            and 1 <= model_max_output_tokens <= MAX_MODEL_OUTPUT_TOKENS
+        )
+        if (
+            not context_valid
+            or not output_valid
+            or (context_window_tokens is None and model_max_output_tokens is None)
         ):
             return "model context cache rejected an invalid limit"
         try:
@@ -99,6 +139,7 @@ class ModelContextCapabilityCache:
                 entries[key] = {
                     "target": _target_dict(target),
                     "context_window_tokens": context_window_tokens,
+                    "model_max_output_tokens": model_max_output_tokens,
                     "fetched_at": _format_time(_normalized_time(now)),
                 }
                 if len(entries) > MAX_CACHE_ENTRIES:
@@ -148,7 +189,12 @@ class ModelContextCapabilityCache:
         for key, entry in raw_entries.items():
             if not isinstance(key, str) or not isinstance(entry, dict):
                 raise _CacheError
-            if set(entry) != {"target", "context_window_tokens", "fetched_at"}:
+            if set(entry) != {
+                "target",
+                "context_window_tokens",
+                "model_max_output_tokens",
+                "fetched_at",
+            }:
                 raise _CacheError
             target = entry["target"]
             if not isinstance(target, dict) or set(target) != {
@@ -171,7 +217,16 @@ class ModelContextCapabilityCache:
             ):
                 raise _CacheError
             tokens = entry["context_window_tokens"]
-            if type(tokens) is not int or not 1 <= tokens <= MAX_CONTEXT_WINDOW_TOKENS:
+            if tokens is not None and (
+                type(tokens) is not int or not 1 <= tokens <= MAX_CONTEXT_WINDOW_TOKENS
+            ):
+                raise _CacheError
+            output_tokens = entry["model_max_output_tokens"]
+            if output_tokens is not None and (
+                type(output_tokens) is not int or not 1 <= output_tokens <= MAX_MODEL_OUTPUT_TOKENS
+            ):
+                raise _CacheError
+            if tokens is None and output_tokens is None:
                 raise _CacheError
             fetched_at = entry["fetched_at"]
             if not isinstance(fetched_at, str):

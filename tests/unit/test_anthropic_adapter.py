@@ -27,6 +27,7 @@ from leonervis_code.providers.anthropic import (
     serialize_history,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
+from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.read_file import ReadFileTool
 
@@ -45,9 +46,23 @@ class RecordingModelsClient:
 
 
 class RecordingMessagesClient:
-    def __init__(self, outcomes: list[object | Exception]) -> None:
+    def __init__(
+        self,
+        outcomes: list[object | Exception],
+        *,
+        counts: list[object | Exception] | None = None,
+    ) -> None:
         self.outcomes = outcomes
+        self.counts = counts or []
         self.requests: list[dict[str, object]] = []
+        self.count_requests: list[dict[str, object]] = []
+
+    def count_tokens(self, **kwargs: object) -> object:
+        self.count_requests.append(kwargs)
+        outcome = self.counts.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
     def create(self, **kwargs: object) -> object:
         self.requests.append(kwargs)
@@ -84,6 +99,24 @@ def config() -> AnthropicProviderConfig:
 
 def request(*history) -> ConversationRequest:
     return ConversationRequest(system_prompt=build_system_prompt(), history=tuple(history))
+
+
+def test_official_token_count_uses_shared_input_projection_and_safe_fallback() -> None:
+    client = RecordingMessagesClient(
+        [],
+        counts=[SimpleNamespace(input_tokens=321), RuntimeError("secret raw count failure")],
+    )
+    provider = AnthropicConversationProvider(config(), client)
+    snapshot = request(UserMessage("hello"))
+
+    exact = provider.count_input_tokens(snapshot)
+    estimated = provider.count_input_tokens(snapshot)
+
+    assert exact.input_tokens == 321
+    assert exact.method == RequestTokenCountMethod.EXACT
+    assert estimated.method == RequestTokenCountMethod.ESTIMATED
+    assert "secret" not in (estimated.diagnostic or "")
+    assert set(client.count_requests[0]) == {"model", "system", "messages", "tools"}
 
 
 def test_production_client_uses_explicit_route_and_disables_redirects(monkeypatch) -> None:
@@ -283,7 +316,13 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
 
 def test_anthropic_models_discovery_is_exact_and_safe() -> None:
     models = RecordingModelsClient(
-        [SimpleNamespace(id="claude-opus-4-8", max_input_tokens=1_000_000)]
+        [
+            SimpleNamespace(
+                id="claude-opus-4-8",
+                max_input_tokens=1_000_000,
+                max_tokens=128_000,
+            )
+        ]
     )
     provider = AnthropicConversationProvider(
         config(), RecordingMessagesClient([]), models_client=models
@@ -292,6 +331,7 @@ def test_anthropic_models_discovery_is_exact_and_safe() -> None:
     discovered = provider.discover_model_context()
 
     assert discovered.context_window_tokens == 1_000_000
+    assert discovered.model_max_output_tokens == 128_000
     assert discovered.diagnostic is None
     assert models.model_ids == ["claude-opus-4-8"]
 
@@ -313,7 +353,7 @@ def test_anthropic_models_discovery_is_exact_and_safe() -> None:
         ),
     ).discover_model_context()
     assert missing.context_window_tokens is None
-    assert "no valid input limit" in missing.diagnostic
+    assert "incomplete limit set" in missing.diagnostic
 
 
 @dataclass

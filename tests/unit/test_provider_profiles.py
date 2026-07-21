@@ -40,6 +40,7 @@ def test_profiles_validate_and_normalize_non_secret_configuration() -> None:
         "api_key_env": None,
         "max_output_tokens": 1024,
         "context_window_tokens": None,
+        "model_max_output_tokens": None,
         "temperature": None,
     }
     assert "api_key" not in configured.to_dict()
@@ -224,7 +225,7 @@ def test_v1_reads_are_deterministic_and_do_not_write(tmp_path) -> None:
     assert project_path.read_bytes() == before_project
 
 
-def test_explicit_migration_rewrites_both_v1_files_as_v3(tmp_path) -> None:
+def test_explicit_migration_rewrites_both_v1_files_as_v4(tmp_path) -> None:
     user_path = tmp_path / "user.json"
     project_path = tmp_path / "project.json"
     write_v1_user(user_path, "Legacy", active="Legacy")
@@ -236,10 +237,10 @@ def test_explicit_migration_rewrites_both_v1_files_as_v3(tmp_path) -> None:
     user = json.loads(user_path.read_text(encoding="utf-8"))
     project = json.loads(project_path.read_text(encoding="utf-8"))
     profile_id = legacy_profile_id("Legacy")
-    assert user["schema_version"] == 3
+    assert user["schema_version"] == 4
     assert user["active_profile_id"] == profile_id
     assert user["profiles"][profile_id]["revision"] == 1
-    assert project == {"schema_version": 3, "active_profile_id": profile_id}
+    assert project == {"schema_version": 4, "active_profile_id": profile_id}
 
 
 @pytest.mark.parametrize(("user_version", "project_version"), [(1, 1), (1, 2), (2, 1), (2, 2)])
@@ -296,14 +297,14 @@ def test_writes_upgrade_only_the_written_file(tmp_path) -> None:
 
     assert json.loads(user_path.read_text(encoding="utf-8"))["schema_version"] == 1
     project = json.loads(project_path.read_text(encoding="utf-8"))
-    assert project["schema_version"] == 3
+    assert project["schema_version"] == 4
     assert project["active_profile_id"] == legacy_profile_id("Legacy")
 
 
 def test_future_schema_versions_fail_closed_for_each_layer(tmp_path) -> None:
     user_path = tmp_path / "user.json"
     project_path = tmp_path / "project.json"
-    user_path.write_text(json.dumps({"schema_version": 4}), encoding="utf-8")
+    user_path.write_text(json.dumps({"schema_version": 5}), encoding="utf-8")
     store = ProviderProfileStore(user_path, project_path)
     with pytest.raises(ProviderProfileError, match="unsupported user"):
         store.list_profiles()
@@ -391,6 +392,30 @@ def test_profile_context_window_override_is_validated_and_fingerprinted() -> Non
             )
 
 
+def test_profile_model_max_output_override_is_validated_and_fingerprinted() -> None:
+    configured = ProviderProfileSpec(
+        name="local",
+        provider_id="custom",
+        protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+        model="model",
+        base_url="http://127.0.0.1:11434/v1",
+        max_output_tokens=2_048,
+        model_max_output_tokens=4_096,
+    )
+    assert configured.to_dict()["model_max_output_tokens"] == 4_096
+    assert configured.fingerprint() != profile("local").fingerprint()
+    with pytest.raises(ProviderProfileError, match="must not exceed"):
+        ProviderProfileSpec(
+            name="local",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="model",
+            base_url="http://127.0.0.1:11434/v1",
+            max_output_tokens=4_097,
+            model_max_output_tokens=4_096,
+        )
+
+
 def test_schema_v2_rejects_context_override_and_v3_accepts_it(tmp_path) -> None:
     user_path = tmp_path / "user.json"
     profile_id = "00000000-0000-4000-8000-000000000001"
@@ -408,7 +433,7 @@ def test_schema_v2_rejects_context_override_and_v3_accepts_it(tmp_path) -> None:
             {
                 "schema_version": 2,
                 "active_profile_id": None,
-                "profiles": {profile_id: configured.to_dict()},
+                "profiles": {profile_id: configured.to_dict(include_model_max_output=False)},
             }
         ),
         encoding="utf-8",
@@ -424,7 +449,14 @@ def test_schema_v2_rejects_context_override_and_v3_accepts_it(tmp_path) -> None:
 
 
 def write_v1_user(path, name: str, *, active: str | None) -> None:
-    configured = profile(name).to_spec().to_dict(include_context_window=False)
+    configured = (
+        profile(name)
+        .to_spec()
+        .to_dict(
+            include_context_window=False,
+            include_model_max_output=False,
+        )
+    )
     path.write_text(
         json.dumps({"schema_version": 1, "active_profile": active, "profiles": {name: configured}}),
         encoding="utf-8",
@@ -453,7 +485,12 @@ def write_v2_user(path, configured: NamedProviderProfile, *, profile_id: str) ->
             {
                 "schema_version": 2,
                 "active_profile_id": None,
-                "profiles": {profile_id: owned.to_dict(include_context_window=False)},
+                "profiles": {
+                    profile_id: owned.to_dict(
+                        include_context_window=False,
+                        include_model_max_output=False,
+                    )
+                },
             }
         ),
         encoding="utf-8",

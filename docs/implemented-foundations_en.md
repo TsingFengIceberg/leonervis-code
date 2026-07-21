@@ -12,6 +12,7 @@
 - [Foundation 3B: local multi-provider real-model path](#foundation-3b-local-multi-provider-real-model-path)
 - [Foundation 2B: offline adapter-owned compatibility policy](#foundation-2b-offline-adapter-owned-compatibility-policy)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
+- [Target-specific request counting and per-invocation preflight](#target-specific-request-counting-and-per-invocation-preflight)
 - [Provider-owned model context capability](#provider-owned-model-context-capability)
 - [ADR index](#adr-index)
 
@@ -268,6 +269,18 @@ Foundation 1B originally proved only process-local atomic history. Foundation 3D
 
 See [0001: single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md), [0002: deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md), [0003: in-memory text history](./decisions/0003-foundation-1a-in-memory-text-history.md), and [0004: bounded read_file tool loop](./decisions/0004-foundation-1b-bounded-read-file-tool-loop.md) for the detailed decisions.
 
+## Target-specific request counting and per-invocation preflight
+
+The runtime now pins the provider client, exact route, context/model-output capability, and redacted status in one immutable turn snapshot. That snapshot is the only provider-invocation entry point, so the initial request, every `read_file` continuation, and the final invocation after the tool limit are all preflighted again.
+
+The decision keeps three concepts distinct: context window, model maximum output, and the current route's requested output reserve. `input + reserve == window` is allowed; a known `>` is rejected locally before sending; if any required fact is unknown, the Host does not guess and lets the provider remain the final authority. A rejected turn commits no conversation history and appends only a safe `TurnFailed` audit record.
+
+For the official Anthropic endpoint, the official SDK's `messages.count_tokens` counts the same model/system/messages/tools projection shared with create. A failure safely degrades to a compact UTF-8 JSON `ceil(bytes / 4)` estimate. OpenAI-compatible Chat Completions always uses the matching local estimate rather than calling a count endpoint belonging to a different protocol.
+
+Provider-profile schema v4 adds a `model_max_output_tokens` override, while private discovery-cache schema v2 can store positive context and model-output limits independently. `route`, `/status`, and `/provider current` show both limits and the requested reserve, but no successful last-request token meter is persisted and no automatic compaction occurs.
+
+See [0014: target-specific request counting and preflight](./decisions/0014-target-specific-request-counting-and-preflight.md). The canonical model system prompt was reviewed: this slice adds Host-side send control without changing model-visible capabilities, so prompt version 1 and its fingerprint remain unchanged.
+
 ## Provider-owned model context capability
 
 The runtime can resolve the current exact endpoint/model context window without fabricating unknown limits. Resolution follows a fixed precedence:
@@ -316,3 +329,4 @@ This slice establishes capacity facts only. It does not count current request to
 11. [0011: decoupled REPL presentation and slash dispatch](./decisions/0011-decoupled-repl-presentation-and-slash-dispatch.md)
 12. [0012: first canonical model system prompt](./decisions/0012-first-canonical-model-system-prompt.md)
 13. [0013: provider-owned model context capability](./decisions/0013-provider-owned-model-context-capabilities.md)
+14. [0014: target-specific request counting and per-invocation preflight](./decisions/0014-target-specific-request-counting-and-preflight.md)
