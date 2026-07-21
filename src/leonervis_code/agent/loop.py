@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
     AssistantText,
     CommittedTurn,
@@ -18,7 +19,9 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.effective_context import (
+    COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+    EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
     EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
     EffectiveContextSnapshot,
     validate_complete_history,
@@ -47,6 +50,9 @@ class AgentLoop:
         read_file: ReadFileTool,
         *,
         initial_history: tuple[ConversationItem, ...] = (),
+        initial_effective_history: tuple[ConversationItem, ...] | None = None,
+        initial_effective_summary: EffectiveContextSummary | None = None,
+        initial_effective_source: str = EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
         commit_turn: TurnCommitter | None = None,
         system_prompt_factory: SystemPromptFactory = build_system_prompt,
     ) -> None:
@@ -54,8 +60,28 @@ class AgentLoop:
         self._provider = provider
         self._read_file = read_file
         restored = validate_complete_history(initial_history)
+        effective_items = (
+            restored.history if initial_effective_history is None else initial_effective_history
+        )
+        validate_complete_history(effective_items)
+        if initial_effective_source == EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY:
+            if initial_effective_summary is not None or effective_items != restored.history:
+                raise ValueError("full-history effective context must equal full history")
+        elif initial_effective_source == EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT:
+            if initial_effective_summary is None:
+                raise ValueError("compacted effective context requires a summary")
+            effective_turns = validate_complete_history(effective_items).complete_turns
+            full_turns = restored.complete_turns
+            if len(effective_turns) > len(full_turns) or (
+                effective_turns and full_turns[-len(effective_turns) :] != effective_turns
+            ):
+                raise ValueError("compacted effective history must be a full-history turn suffix")
+        else:
+            raise ValueError("unsupported effective-context source")
         self._full_history = restored.history
-        self._effective_history = restored.history
+        self._effective_history = effective_items
+        self._effective_summary = initial_effective_summary
+        self._effective_source = initial_effective_source
         self._turns = restored.display_turns
         self._commit_turn = commit_turn
         self._system_prompt_factory = system_prompt_factory
@@ -71,19 +97,35 @@ class AgentLoop:
         return self._effective_history
 
     @property
+    def effective_summary(self) -> EffectiveContextSummary | None:
+        """Return the Host-produced prefix currently visible to providers."""
+        return self._effective_summary
+
+    @property
+    def effective_source(self) -> str:
+        """Return the durable source kind for current effective context."""
+        return self._effective_source
+
+    @property
     def turns(self) -> tuple[ConversationTurn, ...]:
         """Return completed user/final-assistant pairs for user-facing history display."""
         return self._turns
 
     def effective_context_snapshot(self) -> EffectiveContextSnapshot:
         """Freeze the full and provider-visible committed context without mutation."""
+        representation_version = (
+            EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
+            if self._effective_summary is None
+            else COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
+        )
         return EffectiveContextSnapshot(
-            representation_version=EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
-            source=EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
+            representation_version=representation_version,
+            source=self._effective_source,
             system_prompt=self._system_prompt_factory(),
             tool_definitions=(read_file_tool_snapshot(),),
             full_history=self._full_history,
             effective_history=self._effective_history,
+            effective_summary=self._effective_summary,
         )
 
     def committed_context_request(self) -> ConversationRequest:
@@ -131,6 +173,17 @@ class AgentLoop:
             tool_calls += 1
             pending += (self._execute(response),)
 
+    def install_compaction(
+        self,
+        *,
+        summary: EffectiveContextSummary,
+        retained_history: tuple[ConversationItem, ...],
+    ) -> None:
+        """Install a prevalidated durable checkpoint with non-fallible assignments."""
+        self._effective_summary = summary
+        self._effective_history = retained_history
+        self._effective_source = EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT
+
     def _commit(
         self,
         items: tuple[ConversationItem, ...],
@@ -142,6 +195,11 @@ class AgentLoop:
             items=items,
             user=user,
             assistant=assistant,
+        )
+        full_validated = validate_complete_history(self._full_history)
+        validate_complete_history(
+            items,
+            prior_tool_use_ids=full_validated.tool_use_ids,
         )
         if self._commit_turn is not None:
             self._commit_turn(turn)

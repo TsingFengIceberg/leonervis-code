@@ -46,11 +46,12 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 3) == "/quit"
     assert complete_command("/", 4) == "/status"
     assert complete_command("/", 5) == "/context"
-    assert complete_command("/", 6) == "/provider"
-    assert complete_command("/", 7) == "/model"
-    assert complete_command("/", 8) == "/session"
-    assert complete_command("/", 9) == "/resume"
-    assert complete_command("/", 10) is None
+    assert complete_command("/", 6) == "/compact"
+    assert complete_command("/", 7) == "/provider"
+    assert complete_command("/", 8) == "/model"
+    assert complete_command("/", 9) == "/session"
+    assert complete_command("/", 10) == "/resume"
+    assert complete_command("/", 11) is None
     assert complete_command("ordinary prompt", 0) is None
 
 
@@ -127,6 +128,27 @@ def test_repl_routes_each_nonblank_prompt_and_prints_banner(tmp_path) -> None:
     assert rendered.count("LEONERVIS CODE v0.1.0") == 1
     assert "reply: Hello\n" in rendered
     assert "reply: World\n" in rendered
+
+
+def test_repl_catches_keyboard_interrupt_during_slash_operation(tmp_path) -> None:
+    class InterruptingSession(RecordingLoop):
+        turns = ()
+
+        def compact_context(self):
+            raise KeyboardInterrupt
+
+    output = io.StringIO()
+    status = run_repl(
+        InterruptingSession(),
+        stdin=io.StringIO("/compact\n/exit\n"),
+        stdout=output,
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+    )
+
+    assert status == 0
+    assert "Operation cancelled; no uncommitted state was installed." in output.getvalue()
 
 
 def test_repl_displays_only_completed_turns_without_creating_a_turn(tmp_path) -> None:

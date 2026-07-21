@@ -7,6 +7,7 @@ from typing import Protocol
 
 import anthropic
 
+from leonervis_code.core.compaction import CompactSummaryRequest, EffectiveContextSummary
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationItem,
@@ -146,6 +147,36 @@ class AnthropicConversationProvider:
                 "Anthropic token counting failed safely; used serialized estimate",
             )
 
+    def count_compact_summary_input_tokens(
+        self, request_snapshot: CompactSummaryRequest
+    ) -> RequestTokenCount:
+        """Count the exact no-tools compact-summary input projection."""
+        projection = build_compact_summary_input_projection(self._config, request_snapshot)
+        if self._config.base_url.rstrip("/") != OFFICIAL_ANTHROPIC_BASE_URL:
+            return estimate_serialized_input_tokens(projection)
+        try:
+            result = self._client.count_tokens(**projection)
+            input_tokens = getattr(result, "input_tokens", None)
+            if type(input_tokens) is not int or not (0 <= input_tokens <= MAX_REQUEST_INPUT_TOKENS):
+                raise ValueError
+            return RequestTokenCount(input_tokens, RequestTokenCountMethod.EXACT)
+        except Exception:
+            estimated = estimate_serialized_input_tokens(projection)
+            return RequestTokenCount(
+                estimated.input_tokens,
+                RequestTokenCountMethod.ESTIMATED,
+                "Anthropic compact token counting failed safely; used serialized estimate",
+            )
+
+    def summarize_compact(self, request_snapshot: CompactSummaryRequest) -> AssistantText:
+        """Generate one text-only summary without exposing workspace tools."""
+        request = build_compact_summary_request(self._config, request_snapshot)
+        try:
+            response = self._client.create(**request)
+        except anthropic.APIError as error:
+            raise normalize_sdk_error(error, config=self._config) from None
+        return parse_compact_summary_response(response, config=self._config)
+
     def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
         """Make one non-streaming request through the injected SDK seam."""
         request = build_request(self._config, request_snapshot)
@@ -193,11 +224,14 @@ def build_input_projection(
     return {
         "model": config.model_id,
         "system": request_snapshot.system_prompt.text,
-        "messages": serialize_history(
-            request_snapshot.history,
-            config=config,
-            committed_context=committed_context,
-        ),
+        "messages": [
+            *_serialize_effective_summary(request_snapshot.effective_summary),
+            *serialize_history(
+                request_snapshot.history,
+                config=config,
+                committed_context=committed_context,
+            ),
+        ],
         "tools": [read_file_tool_definition()],
     }
 
@@ -210,6 +244,38 @@ def build_request(
     request: dict[str, object] = {
         **build_input_projection(config, request_snapshot),
         "max_tokens": config.max_output_tokens,
+        "stream": False,
+    }
+    if config.temperature is not None:
+        request["temperature"] = config.temperature
+    return request
+
+
+def build_compact_summary_input_projection(
+    config: AnthropicProviderConfig,
+    request_snapshot: CompactSummaryRequest,
+) -> dict[str, object]:
+    """Build the no-tools Anthropic input projection for controlled summary."""
+    return {
+        "model": config.model_id,
+        "system": request_snapshot.prompt.text,
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": request_snapshot.source_text}],
+            }
+        ],
+    }
+
+
+def build_compact_summary_request(
+    config: AnthropicProviderConfig,
+    request_snapshot: CompactSummaryRequest,
+) -> dict[str, object]:
+    """Build one complete no-tools Anthropic summary request."""
+    request: dict[str, object] = {
+        **build_compact_summary_input_projection(config, request_snapshot),
+        "max_tokens": request_snapshot.max_output_tokens,
         "stream": False,
     }
     if config.temperature is not None:
@@ -314,6 +380,55 @@ def serialize_history(
         )
         raise _invalid_history(config, message)
     return messages
+
+
+def _serialize_effective_summary(
+    summary: EffectiveContextSummary | None,
+) -> list[dict[str, object]]:
+    if summary is None:
+        return []
+    return [
+        {"role": "user", "content": [{"type": "text", "text": summary.user_text}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": summary.assistant_acknowledgement}],
+        },
+    ]
+
+
+def parse_compact_summary_response(
+    response: object,
+    *,
+    config: AnthropicProviderConfig,
+) -> AssistantText:
+    """Decode only a normally completed text-only compact summary."""
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason == "refusal":
+        raise _adapter_error(
+            config,
+            kind=ProviderFailureKind.CONTENT_REFUSAL,
+            code="content_refusal",
+            message="Anthropic refused the compact summary request",
+        )
+    if stop_reason == "max_tokens":
+        raise _invalid_response(config, "Anthropic compact summary reached the output-token limit")
+    if stop_reason != "end_turn":
+        raise _invalid_response(config, "Anthropic compact summary used an unsupported stop reason")
+    content = getattr(response, "content", None)
+    if not isinstance(content, list) or not content:
+        raise _invalid_response(config, "Anthropic compact summary contained no content blocks")
+    text_parts: list[str] = []
+    for block in content:
+        if getattr(block, "type", None) != "text":
+            raise _invalid_response(config, "Anthropic compact summary contained a non-text block")
+        text = getattr(block, "text", None)
+        if not isinstance(text, str):
+            raise _invalid_response(config, "Anthropic compact summary text was malformed")
+        text_parts.append(text)
+    text = "".join(text_parts).strip()
+    if not text:
+        raise _invalid_response(config, "Anthropic compact summary was empty")
+    return AssistantText(text)
 
 
 def parse_response(response: object, *, config: AnthropicProviderConfig) -> ProviderResponse:

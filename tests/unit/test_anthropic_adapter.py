@@ -9,6 +9,11 @@ import pytest
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 
 from leonervis_code.agent.loop import AgentLoop
+from leonervis_code.core.compaction import (
+    CompactSummaryRequest,
+    EffectiveContextSummary,
+    build_compact_prompt,
+)
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationRequest,
@@ -22,6 +27,7 @@ from leonervis_code.providers.anthropic import (
     AnthropicProviderConfig,
     create_anthropic_provider,
     normalize_sdk_error,
+    parse_compact_summary_response,
     parse_response,
     read_file_tool_definition,
     serialize_history,
@@ -331,6 +337,65 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
             "stream": False,
         }
     ]
+
+
+def compact_request() -> CompactSummaryRequest:
+    return CompactSummaryRequest(build_compact_prompt(), '{"turns":[]}', 32)
+
+
+def test_compact_summary_count_and_create_omit_tools_and_parse_text_only() -> None:
+    client = RecordingMessagesClient(
+        [message(TextBlock(text=" summary ", type="text"))],
+        counts=[SimpleNamespace(input_tokens=12)],
+    )
+    provider = AnthropicConversationProvider(config(), client)
+
+    counted = provider.count_compact_summary_input_tokens(compact_request())
+    result = provider.summarize_compact(compact_request())
+
+    assert counted.input_tokens == 12
+    assert set(client.count_requests[0]) == {"model", "system", "messages"}
+    assert result == AssistantText("summary")
+    assert "tools" not in client.requests[0]
+    assert client.requests[0]["max_tokens"] == 32
+
+
+def test_compact_summary_parser_rejects_tools_refusal_and_truncation() -> None:
+    with pytest.raises(ProviderAdapterError):
+        parse_compact_summary_response(
+            message(
+                ToolUseBlock(
+                    id="toolu_1",
+                    name="read_file",
+                    input={"path": "README.md"},
+                    type="tool_use",
+                )
+            ),
+            config=config(),
+        )
+    for stop_reason in ("refusal", "max_tokens"):
+        with pytest.raises(ProviderAdapterError):
+            parse_compact_summary_response(
+                message(TextBlock(text="partial", type="text"), stop_reason=stop_reason),
+                config=config(),
+            )
+
+
+def test_effective_summary_is_projected_before_retained_history() -> None:
+    summary = EffectiveContextSummary("old state")
+    snapshot = ConversationRequest(
+        build_system_prompt(),
+        (UserMessage("recent"),),
+        effective_summary=summary,
+    )
+    client = RecordingMessagesClient([message(TextBlock(text="done", type="text"))])
+
+    AnthropicConversationProvider(config(), client).respond(snapshot)
+
+    messages = client.requests[0]["messages"]
+    assert messages[0]["content"][0]["text"] == summary.user_text
+    assert messages[1]["content"][0]["text"] == summary.assistant_acknowledgement
+    assert messages[2]["content"][0]["text"] == "recent"
 
 
 def test_anthropic_models_discovery_is_exact_and_safe() -> None:

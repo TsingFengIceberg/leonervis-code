@@ -8,6 +8,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 
+from leonervis_code.core.compaction import (
+    CompactSummaryRequest,
+    CompactionUnavailableError,
+)
 from leonervis_code.core.contracts import (
     ConversationProvider,
     ConversationRequest,
@@ -114,6 +118,61 @@ class CurrentTargetContextAssessment:
     status: RuntimeStatus
     fit_report: ContextFitReport | None
     unavailable_diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class CompactionRuntimeSnapshot:
+    """One immutable real provider target pinned for controlled compaction."""
+
+    provider: ConversationProvider
+    route: RuntimeProviderRoute
+    capability: ModelContextCapability
+    status: RuntimeStatus
+
+    def assess_summary_request(self, request: CompactSummaryRequest) -> ContextFitReport:
+        counter = getattr(self.provider, "count_compact_summary_input_tokens", None)
+        input_count = RequestTokenCount.unknown("provider does not expose compact input counting")
+        preliminary = evaluate_context_fit(
+            target=self.capability.target,
+            input_count=input_count,
+            requested_output_tokens=request.max_output_tokens,
+            context_window_limit=self.capability.context_window_tokens,
+            model_output_limit=self.capability.model_max_output_tokens,
+        )
+        if preliminary.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+            return preliminary
+        if self.capability.context_window_tokens is not None and callable(counter):
+            try:
+                input_count = counter(request)
+            except Exception:
+                input_count = RequestTokenCount.unknown(
+                    "provider compact input counting failed safely"
+                )
+        return evaluate_context_fit(
+            target=self.capability.target,
+            input_count=input_count,
+            requested_output_tokens=request.max_output_tokens,
+            context_window_limit=self.capability.context_window_tokens,
+            model_output_limit=self.capability.model_max_output_tokens,
+        )
+
+    def summarize(self, request: CompactSummaryRequest):
+        report = self.assess_summary_request(request)
+        raise_for_context_fit(report)
+        operation = getattr(self.provider, "summarize_compact", None)
+        if not callable(operation):
+            raise CompactionUnavailableError(
+                "current provider does not support controlled compaction"
+            )
+        return operation(request)
+
+    def assess_context(self, request: ConversationRequest) -> ContextFitReport:
+        return assess_context_fit(
+            provider=self.provider,
+            route=self.route,
+            capability=self.capability,
+            request=request,
+        )
 
 
 @dataclass(frozen=True)
@@ -390,12 +449,47 @@ class RuntimeProviderManager:
         return self._store
 
     @contextmanager
+    def provider_for_compaction(self) -> Iterator[CompactionRuntimeSnapshot]:
+        """Pin one real runtime for a no-tools compact generation transaction."""
+        with self._lock:
+            self._ensure_open()
+            if self._turn_active:
+                raise RuntimeProviderStateError("a provider operation is already active")
+            if self._route is None:
+                raise CompactionUnavailableError(
+                    "controlled compaction requires a configured real provider"
+                )
+            self._turn_active = True
+            route = self._route
+            capability = self._capability
+            status = _status_for_route(
+                route,
+                profile=self._loaded_profile,
+                source=self._selection_source,
+                environment=self._environment,
+                model_override=self._model_override,
+                capability=capability,
+                generation=self._generation,
+            )
+            snapshot = CompactionRuntimeSnapshot(
+                self._provider,
+                route,
+                capability,
+                status,
+            )
+        try:
+            yield snapshot
+        finally:
+            with self._lock:
+                self._turn_active = False
+
+    @contextmanager
     def provider_for_turn(self) -> Iterator[TurnRuntimeSnapshot]:
         """Pin and yield the complete runtime for one conversation turn."""
         with self._lock:
             self._ensure_open()
             if self._turn_active:
-                raise RuntimeProviderStateError("a conversation turn is already active")
+                raise RuntimeProviderStateError("a provider operation is already active")
             self._turn_active = True
             route = self._route
             capability = self._capability
@@ -709,7 +803,7 @@ class RuntimeProviderManager:
     def _ensure_switchable(self) -> None:
         self._ensure_open()
         if self._turn_active:
-            raise RuntimeProviderStateError("cannot switch provider during a conversation turn")
+            raise RuntimeProviderStateError("cannot switch provider during an active operation")
 
 
 def _prepare_external_candidate(

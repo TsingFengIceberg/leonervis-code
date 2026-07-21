@@ -21,7 +21,7 @@ _SAFE_PROMPT_CHARACTER = re.compile(r"[A-Za-z0-9._:-]")
 MessageKind = Literal["plain", "info", "success", "warning", "error"]
 
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /session, /provider, /status, /context, "
+    "Commands: /help, /history <count>, /session, /provider, /status, /context, /compact, "
     "/model <model>, /resume <latest|id>, /exit, /quit. Ctrl-D or Ctrl-C exits."
 )
 SESSION_HELP = (
@@ -67,7 +67,9 @@ class EffectiveContextInspectionView(Protocol):
     full_turn_count: int
     full_item_count: int
     effective_turn_count: int
-    effective_item_count: int
+    summary_present: bool
+    retained_turn_count: int
+    latest_checkpoint_sequence: int | None
     fit_report: ContextFitReport | None
     fit_decision: ContextFitDecision
     remaining_capacity: int | None
@@ -212,7 +214,14 @@ def render_context_inspection(
         f"{_count_label(inspection.full_item_count, 'item')}",
         f"Effective history: {_count_label(inspection.effective_turn_count, 'turn')}, "
         f"{_count_label(inspection.effective_item_count, 'item')}",
+        f"Compact summary: {'present' if inspection.summary_present else 'absent'}",
     ]
+    if inspection.summary_present:
+        lines.append(
+            f"Retained real history: {_count_label(inspection.retained_turn_count, 'turn')}"
+        )
+        if inspection.latest_checkpoint_sequence is not None:
+            lines.append(f"Checkpoint sequence: {inspection.latest_checkpoint_sequence}")
     diagnostic = None
     if report is None:
         lines.extend(
@@ -260,6 +269,19 @@ def render_context_inspection(
     if diagnostic:
         lines.append(f"Diagnostic: {diagnostic}")
     return "\n".join(lines), kind
+
+
+def render_compact_result(result: object) -> str:
+    """Render one committed checkpoint without exposing summary contents."""
+    return (
+        f"Compacted {result.summarized_turn_count} complete turns; retained "
+        f"{result.retained_turn_count} turns.\n"
+        f"Context ID: {result.source_context_id} -> {result.result_context_id}\n"
+        f"Input: {result.before_input_tokens} -> {result.after_input_tokens} tokens "
+        f"({result.input_method}); fit: {result.fit_decision.value}.\n"
+        f"Checkpoint: sequence {result.checkpoint_sequence} in session "
+        f"{result.session_id}. Full transcript and /history were preserved."
+    )
 
 
 def render_runtime_switch(

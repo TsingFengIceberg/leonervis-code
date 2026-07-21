@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from typing import Callable, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Callable, Protocol, TypeAlias
+
+if TYPE_CHECKING:
+    from leonervis_code.core.compaction import EffectiveContextSummary
 
 _SYSTEM_PROMPT_FINGERPRINT_DOMAIN = b"leonervis-code-system-prompt\0"
 
@@ -94,6 +97,7 @@ class ConversationRequest:
 
     system_prompt: SystemPromptSnapshot
     history: tuple[ConversationItem, ...]
+    effective_summary: EffectiveContextSummary | None = None
 
 
 class ConversationProvider(Protocol):

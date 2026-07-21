@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
     AssistantText,
     SystemPromptSnapshot,
@@ -12,7 +13,9 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.effective_context import (
+    COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+    EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
     EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
     CanonicalToolDefinition,
     EffectiveContextSnapshot,
@@ -41,7 +44,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v1-b1c9472533f3d87a8cbb8558545da88b72f1e27d96e005923d32501fae85b85e"
+        == "ctx-v1-ff7700d72f43eae495183814c8551a5a30a18d7cdc05f724445514753288f4ad"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -141,3 +144,35 @@ def test_full_history_source_requires_transcript_and_effective_equality() -> Non
             full_history=full,
             effective_history=(),
         )
+
+
+def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None:
+    full = (
+        UserMessage("one"),
+        AssistantText("a"),
+        UserMessage("two"),
+        AssistantText("b"),
+        UserMessage("three"),
+        AssistantText("c"),
+    )
+    summary = EffectiveContextSummary("Earlier: one")
+    context = EffectiveContextSnapshot(
+        representation_version=COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+        source=EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
+        system_prompt=build_system_prompt(),
+        tool_definitions=(read_file_tool_snapshot(),),
+        full_history=full,
+        effective_history=full[-4:],
+        effective_summary=summary,
+    )
+
+    assert context.context_id.startswith("ctx-v2-")
+    assert context.full_turn_count == 3
+    assert context.effective_turn_count == 2
+    assert context.to_conversation_request().effective_summary == summary
+    assert (
+        context.context_id
+        != replace(context, effective_summary=EffectiveContextSummary("Different")).context_id
+    )
+    with pytest.raises(ValueError, match="suffix"):
+        replace(context, effective_history=full[:4])

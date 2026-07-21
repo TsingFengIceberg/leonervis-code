@@ -7,6 +7,7 @@ from typing import Protocol
 
 import openai
 
+from leonervis_code.core.compaction import CompactSummaryRequest, EffectiveContextSummary
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationItem,
@@ -68,6 +69,23 @@ class OpenAICompatibleConversationProvider:
             )
         )
 
+    def count_compact_summary_input_tokens(
+        self, request_snapshot: CompactSummaryRequest
+    ) -> RequestTokenCount:
+        """Estimate the exact no-tools compact-summary input projection."""
+        return estimate_serialized_input_tokens(
+            build_compact_summary_input_projection(self._route, request_snapshot)
+        )
+
+    def summarize_compact(self, request_snapshot: CompactSummaryRequest) -> AssistantText:
+        """Generate one text-only summary without exposing compatible tools."""
+        request = build_compact_summary_request(self._route, request_snapshot)
+        try:
+            response = self._client.create(**request)
+        except openai.APIError as error:
+            raise normalize_sdk_error(error, route=self._route) from None
+        return parse_compact_summary_response(response, route=self._route)
+
     def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
         """Make one non-streaming compatible request through the injected seam."""
         request = build_request(self._route, request_snapshot)
@@ -126,6 +144,7 @@ def build_input_projection(
         "model": route.wire_model,
         "messages": [
             {"role": "system", "content": request_snapshot.system_prompt.text},
+            *_serialize_effective_summary(request_snapshot.effective_summary),
             *serialize_history(
                 request_snapshot.history,
                 route=route,
@@ -148,6 +167,36 @@ def build_request(
     }
     token_field = token_limit_field(route.wire_model)
     request[token_field] = route.max_output_tokens
+    if route.temperature is not None and not fixed_sampling_model(route.wire_model):
+        request["temperature"] = route.temperature
+    _validate_request_size(route, request)
+    return request
+
+
+def build_compact_summary_input_projection(
+    route: RuntimeProviderRoute,
+    request_snapshot: CompactSummaryRequest,
+) -> dict[str, object]:
+    """Build the no-tools compatible input projection for controlled summary."""
+    return {
+        "model": route.wire_model,
+        "messages": [
+            {"role": "system", "content": request_snapshot.prompt.text},
+            {"role": "user", "content": request_snapshot.source_text},
+        ],
+    }
+
+
+def build_compact_summary_request(
+    route: RuntimeProviderRoute,
+    request_snapshot: CompactSummaryRequest,
+) -> dict[str, object]:
+    """Build one complete compatible summary request without tool fields."""
+    request: dict[str, object] = {
+        **build_compact_summary_input_projection(route, request_snapshot),
+        "stream": False,
+    }
+    request[token_limit_field(route.wire_model)] = request_snapshot.max_output_tokens
     if route.temperature is not None and not fixed_sampling_model(route.wire_model):
         request["temperature"] = route.temperature
     _validate_request_size(route, request)
@@ -236,6 +285,59 @@ def serialize_history(
         )
         raise _invalid_history(route, message)
     return messages
+
+
+def _serialize_effective_summary(
+    summary: EffectiveContextSummary | None,
+) -> list[dict[str, object]]:
+    if summary is None:
+        return []
+    return [
+        {"role": "user", "content": summary.user_text},
+        {"role": "assistant", "content": summary.assistant_acknowledgement},
+    ]
+
+
+def parse_compact_summary_response(
+    response: object,
+    *,
+    route: RuntimeProviderRoute,
+) -> AssistantText:
+    """Decode only one normally completed text-only compact summary."""
+    choices = getattr(response, "choices", None)
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise _invalid_response(route, "compact summary response must contain exactly one choice")
+    choice = choices[0]
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason in {"length", "max_tokens"}:
+        raise _invalid_response(route, "compact summary reached the output-token limit")
+    if finish_reason in {"content_filter", "refusal"}:
+        raise adapter_error(
+            provider_id=route.definition.provider_id,
+            model_id=route.selected_model,
+            kind=ProviderFailureKind.CONTENT_REFUSAL,
+            code="content_refusal",
+            message="provider refused or filtered the compact summary request",
+        )
+    if finish_reason != "stop":
+        raise _invalid_response(route, "compact summary used an unsupported finish reason")
+    message = getattr(choice, "message", None)
+    if message is None:
+        raise _invalid_response(route, "compact summary choice contained no message")
+    if getattr(message, "refusal", None):
+        raise adapter_error(
+            provider_id=route.definition.provider_id,
+            model_id=route.selected_model,
+            kind=ProviderFailureKind.CONTENT_REFUSAL,
+            code="content_refusal",
+            message="provider refused the compact summary request",
+        )
+    if getattr(message, "tool_calls", None):
+        raise _invalid_response(route, "compact summary unexpectedly contained tool calls")
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        raise _invalid_response(route, "compact summary text was empty or malformed")
+    return AssistantText(content.strip())
 
 
 def parse_response(response: object, *, route: RuntimeProviderRoute) -> ProviderResponse:

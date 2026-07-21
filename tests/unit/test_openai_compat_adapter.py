@@ -12,6 +12,11 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
 )
 
 from leonervis_code.agent.loop import AgentLoop
+from leonervis_code.core.compaction import (
+    CompactSummaryRequest,
+    EffectiveContextSummary,
+    build_compact_prompt,
+)
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationRequest,
@@ -24,8 +29,10 @@ from leonervis_code.providers.definitions import OPENAI
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.openai_compat import (
     OpenAICompatibleConversationProvider,
+    build_compact_summary_request,
     build_request,
     create_openai_compatible_provider,
+    parse_compact_summary_response,
     parse_response,
     read_file_tool_definition,
     serialize_history,
@@ -267,6 +274,59 @@ def test_request_body_limit_fails_before_client_call() -> None:
         provider.respond(request(UserMessage(text="a long enough message to cross the body limit")))
     assert caught.value.failure.kind == ProviderFailureKind.INVALID_REQUEST
     assert client.requests == []
+
+
+def compact_request() -> CompactSummaryRequest:
+    return CompactSummaryRequest(build_compact_prompt(), '{"turns":[]}', 32)
+
+
+def test_compact_summary_request_omits_tools_and_uses_route_token_field() -> None:
+    normal = build_compact_summary_request(route(), compact_request())
+    reasoning = build_compact_summary_request(route("openai/gpt-5"), compact_request())
+
+    assert set(normal) == {"model", "messages", "stream", "max_tokens"}
+    assert normal["max_tokens"] == 32
+    assert "tools" not in normal and "parallel_tool_calls" not in normal
+    assert reasoning["max_completion_tokens"] == 32
+    assert "max_tokens" not in reasoning
+
+
+def test_compact_provider_counts_and_parses_text_only() -> None:
+    client = RecordingChatClient([completion(content=" summary ")])
+    provider = OpenAICompatibleConversationProvider(route(), client)
+
+    counted = provider.count_compact_summary_input_tokens(compact_request())
+    result = provider.summarize_compact(compact_request())
+
+    assert counted.method == RequestTokenCountMethod.ESTIMATED
+    assert result == AssistantText("summary")
+    assert "tools" not in client.requests[0]
+    with pytest.raises(ProviderAdapterError):
+        parse_compact_summary_response(
+            completion(finish_reason="tool_calls", tool_calls=[tool_call()]),
+            route=route(),
+        )
+    with pytest.raises(ProviderAdapterError):
+        parse_compact_summary_response(
+            completion(content="partial", finish_reason="length"), route=route()
+        )
+
+
+def test_effective_summary_is_projected_before_retained_history() -> None:
+    summary = EffectiveContextSummary("old state")
+    snapshot = ConversationRequest(
+        build_system_prompt(),
+        (UserMessage("recent"),),
+        effective_summary=summary,
+    )
+    body = build_request(route(), snapshot)
+
+    assert body["messages"][1] == {"role": "user", "content": summary.user_text}
+    assert body["messages"][2] == {
+        "role": "assistant",
+        "content": summary.assistant_acknowledgement,
+    }
+    assert body["messages"][3] == {"role": "user", "content": "recent"}
 
 
 def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:

@@ -6,9 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from leonervis_code.core.compaction import EffectiveContextSummary, build_compact_prompt
 from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
 from leonervis_code.session_records import (
     BindingSnapshot,
+    ContextCompacted,
     RuntimeChanged,
     SessionHeader,
     SessionRecordError,
@@ -200,6 +202,66 @@ def test_replay_requires_closed_turns_and_strict_tool_causality(tmp_path: Path) 
         )
         with pytest.raises(SessionRecordError):
             replay_records([header, turn])
+
+
+def test_mixed_v1_v2_checkpoint_replay_preserves_full_and_replaces_effective(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path.resolve()
+    binding = BindingSnapshot.fake()
+    header = SessionHeader(
+        0,
+        SESSION_ID,
+        str(workspace),
+        workspace_fingerprint(workspace),
+        NOW,
+        binding,
+    )
+    turns = [
+        TurnCommitted(
+            sequence=index,
+            committed_at=NOW,
+            binding=binding,
+            items=(UserMessage(f"u{index}"), AssistantText(f"a{index}")),
+        )
+        for index in range(1, 5)
+    ]
+    prompt = build_compact_prompt()
+    summary = EffectiveContextSummary("u1 and u2 were resolved")
+    checkpoint = ContextCompacted(
+        sequence=5,
+        occurred_at=NOW,
+        binding=binding,
+        source_context_id="ctx-v1-" + "a" * 64,
+        result_context_id="ctx-v2-" + "b" * 64,
+        source_full_turn_count=4,
+        source_effective_turn_count=4,
+        retained_from_full_turn=2,
+        previous_checkpoint_sequence=None,
+        summary=summary.text,
+        compact_prompt_version=prompt.version,
+        compact_prompt_fingerprint=prompt.fingerprint,
+        continuation_version=summary.continuation_version,
+        continuation_fingerprint=summary.continuation_fingerprint,
+        effective_context_representation_version=2,
+    )
+
+    encoded_v1_prefix = b"".join(encode_record(record) for record in [header, *turns])
+    decoded = [decode_record(encode_record(record)) for record in [header, *turns, checkpoint]]
+    state = replay_records(decoded)
+
+    assert b"".join(encode_record(record) for record in decoded[:5]) == encoded_v1_prefix
+    assert len(state.turns) == 4
+    assert len(state.history) == 8
+    assert state.effective_history == turns[2].items + turns[3].items
+    assert state.effective_summary == summary
+    assert state.latest_checkpoint == checkpoint
+    assert state.effective_source == "compact_checkpoint"
+
+    value = json.loads(encode_record(checkpoint))
+    value["schema_version"] = 1
+    with pytest.raises(SessionRecordError, match="unsupported"):
+        decode_record(json.dumps(value).encode())
 
 
 def test_binding_rejects_credential_bearing_url_and_non_digest_fingerprint() -> None:

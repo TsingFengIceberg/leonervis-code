@@ -11,6 +11,7 @@ from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.manager import RuntimeSwitchAuditError
 from leonervis_code.providers.profile import ProviderProfileSpec
 from leonervis_code.providers.profile_store import ProviderProfileStore
+from leonervis_code.providers.request_context import RequestTokenCount, RequestTokenCountMethod
 from leonervis_code.session import ProjectSession
 from leonervis_code.session_store import SessionStore, SessionStoreError
 from leonervis_code.system_prompt import build_system_prompt
@@ -27,6 +28,16 @@ class RecordingProvider:
 
     def __post_init__(self) -> None:
         self.requests = []
+
+    def count_input_tokens(self, request):
+        value = 100 if request.effective_summary is not None else 1000 + len(request.history)
+        return RequestTokenCount(value, RequestTokenCountMethod.ESTIMATED)
+
+    def count_compact_summary_input_tokens(self, request):
+        return RequestTokenCount(len(request.source_text), RequestTokenCountMethod.ESTIMATED)
+
+    def summarize_compact(self, request):
+        return AssistantText("Earlier turns summarized compactly.")
 
     def respond(self, request):
         self.requests.append(request)
@@ -223,6 +234,72 @@ def test_runtime_switch_records_real_generation_and_reports_audit_failure(tmp_pa
     assert session.status().selected_model == "model-three"
     session._closed = True
     session._manager.close()
+
+
+def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="compact",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="compact-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+    provider = RecordingProvider("runtime")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="compact",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    for index in range(4):
+        session.prompt(f"turn-{index}")
+    before_history = session.history
+    before_turns = session.turns
+    before_bytes = session.transcript_path.read_bytes()
+
+    result = session.compact_context()
+
+    assert result.summarized_turn_count == 2
+    assert result.retained_turn_count == 2
+    assert result.after_input_tokens < result.before_input_tokens
+    assert session.history == before_history
+    assert session.turns == before_turns
+    assert session.effective_history == before_history[-4:]
+    assert session.inspect_context().summary_present
+    assert session.inspect_context().context_id.startswith("ctx-v2-")
+    assert session.transcript_path.read_bytes().startswith(before_bytes)
+    assert session._writer.state.records[-1].record_type == "context_compacted"
+    transcript = session.transcript_path
+    session.close()
+
+    resumed_provider = RecordingProvider("resumed")
+    resumed = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        profile="compact",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: resumed_provider,
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+    assert resumed.transcript_path == transcript
+    assert resumed.history == before_history
+    assert resumed.effective_history == before_history[-4:]
+    assert resumed.inspect_context().summary_present
+    resumed.prompt("continue")
+    assert resumed_provider.requests[-1].effective_summary is not None
+    resumed.close()
 
 
 def test_project_session_durable_append_failure_does_not_commit_memory(tmp_path: Path) -> None:

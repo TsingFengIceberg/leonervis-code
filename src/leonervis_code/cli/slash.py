@@ -10,6 +10,7 @@ from leonervis_code.cli.presentation import (
     PROVIDER_HELP,
     SESSION_HELP,
     MessageKind,
+    render_compact_result,
     render_context_inspection,
     render_recent_history,
     render_runtime_status,
@@ -18,6 +19,7 @@ from leonervis_code.cli.presentation import (
     render_session_summary,
     render_switch_rejection,
 )
+from leonervis_code.core.compaction import CompactionError
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.manager import (
     RuntimeProviderStateError,
@@ -35,6 +37,7 @@ TOP_LEVEL_COMMANDS = (
     "/quit",
     "/status",
     "/context",
+    "/compact",
     "/provider",
     "/model",
     "/session",
@@ -48,6 +51,8 @@ class ReplSession(Protocol):
     def status(self): ...
 
     def inspect_context(self): ...
+
+    def compact_context(self): ...
 
     def session_info(self): ...
 
@@ -108,6 +113,23 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
             return _command_error(error, failure_prefix="Context inspection failed")
     if command.startswith("/context "):
         return _usage("Usage: /context")
+    if command == "/compact":
+        try:
+            return SlashResult(
+                handled=True,
+                message=render_compact_result(session.compact_context()),
+                kind="success",
+            )
+        except Exception as error:
+            result = _command_error(error, failure_prefix="Compaction failed")
+            suffix = " Full history and effective context are unchanged."
+            return SlashResult(
+                handled=True,
+                message=f"{result.message}{suffix}",
+                kind=result.kind,
+            )
+    if command.startswith("/compact "):
+        return _usage("Usage: /compact")
     if command == "/history" or command.startswith("/history "):
         return _history(command, session)
     if command == "/session show" or command.startswith("/session show "):
@@ -278,6 +300,7 @@ def _command_error(error: Exception, *, failure_prefix: str) -> SlashResult:
     elif isinstance(
         error,
         (
+            CompactionError,
             ProviderProfileError,
             RuntimeProviderStateError,
             RuntimeRouteError,

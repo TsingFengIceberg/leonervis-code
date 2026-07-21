@@ -4,6 +4,11 @@ from dataclasses import dataclass, replace
 
 import pytest
 
+from leonervis_code.core.compaction import (
+    CompactSummaryRequest,
+    CompactionUnavailableError,
+    build_compact_prompt,
+)
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationRequest,
@@ -74,6 +79,53 @@ def configured_store(tmp_path) -> ProviderProfileStore:
     return store
 
 
+def test_compaction_runtime_lease_is_real_pinned_and_blocks_switches(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    profile = store.get_profile("one")
+    store.replace_profile(
+        profile.profile_id,
+        replace(
+            profile.to_spec(),
+            context_window_tokens=1000,
+            model_max_output_tokens=100,
+            max_output_tokens=20,
+        ),
+        expected_revision=profile.revision,
+    )
+
+    class CompactProvider(RecordingProvider):
+        def count_compact_summary_input_tokens(self, request):
+            return RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED)
+
+        def summarize_compact(self, request):
+            return AssistantText("summary")
+
+    provider = CompactProvider("one")
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: provider,
+    )
+    request = CompactSummaryRequest(build_compact_prompt(), "source", 20)
+
+    with manager.provider_for_compaction() as runtime:
+        assert runtime.status.generation == manager.status().generation
+        assert runtime.assess_summary_request(request).decision == ContextFitDecision.FITS
+        assert runtime.summarize(request) == AssistantText("summary")
+        with pytest.raises(RuntimeProviderStateError, match="active operation"):
+            manager.use_profile("two")
+    assert manager.use_profile("two").status.profile == "two"
+
+
+def test_fake_runtime_rejects_controlled_compaction(tmp_path) -> None:
+    manager = RuntimeProviderManager(configured_store(tmp_path), environment={})
+
+    with pytest.raises(CompactionUnavailableError, match="real provider"):
+        with manager.provider_for_compaction():
+            raise AssertionError
+
+
 def test_manager_reuses_client_and_atomically_switches_profiles(tmp_path) -> None:
     store = configured_store(tmp_path)
     constructed = []
@@ -86,7 +138,7 @@ def test_manager_reuses_client_and_atomically_switches_profiles(tmp_path) -> Non
     manager = RuntimeProviderManager(store, environment={}, profile="one", provider_factory=factory)
     with manager.provider_for_turn() as first:
         assert first.provider is constructed[0]
-        with pytest.raises(RuntimeProviderStateError, match="during a conversation turn"):
+        with pytest.raises(RuntimeProviderStateError, match="active operation"):
             manager.use_profile("two")
     result = manager.use_profile("two")
     status = result.status

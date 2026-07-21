@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 
+from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationItem,
@@ -19,7 +20,9 @@ from leonervis_code.core.contracts import (
 )
 
 EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 1
+COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 2
 EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY = "full_committed_history"
+EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT = "compact_checkpoint"
 _EFFECTIVE_CONTEXT_ID_DOMAIN = b"leonervis-code-effective-context-id\0"
 
 
@@ -79,11 +82,19 @@ class EffectiveContextSnapshot:
     tool_definitions: tuple[CanonicalToolDefinition, ...]
     full_history: tuple[ConversationItem, ...]
     effective_history: tuple[ConversationItem, ...]
+    effective_summary: EffectiveContextSummary | None = None
 
     def __post_init__(self) -> None:
-        if self.representation_version != EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
+        supported = {
+            EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+        }
+        if self.representation_version not in supported:
             raise ValueError("unsupported effective-context representation version")
-        if self.source != EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY:
+        if self.source not in {
+            EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
+            EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
+        }:
             raise ValueError("unsupported effective-context source")
         _validate_system_prompt_snapshot(self.system_prompt)
         if not isinstance(self.tool_definitions, tuple) or not self.tool_definitions:
@@ -94,10 +105,20 @@ class EffectiveContextSnapshot:
             CanonicalToolDefinition.from_mapping(definition.as_mapping())
         validate_complete_history(self.full_history)
         validate_complete_history(self.effective_history)
-        if self.source == EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY and (
-            self.full_history != self.effective_history
-        ):
-            raise ValueError("full-history effective context must equal full history")
+        if self.source == EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY:
+            if self.representation_version != EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
+                raise ValueError("full-history effective context must use representation version 1")
+            if self.effective_summary is not None:
+                raise ValueError("full-history effective context must not contain a summary")
+            if self.full_history != self.effective_history:
+                raise ValueError("full-history effective context must equal full history")
+        else:
+            if self.representation_version != COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
+                raise ValueError("compacted effective context must use representation version 2")
+            if not isinstance(self.effective_summary, EffectiveContextSummary):
+                raise ValueError("compacted effective context requires a summary")
+            if not _is_complete_turn_suffix(self.full_turns, self.effective_turns):
+                raise ValueError("compacted effective history must be a full-history turn suffix")
 
     @property
     def full_turns(self) -> tuple[CompleteConversationTurn, ...]:
@@ -138,6 +159,13 @@ class EffectiveContextSnapshot:
                 for turn in self.effective_turns
             ],
         }
+        if self.effective_summary is not None:
+            manifest["effective_summary"] = {
+                "assistant_acknowledgement": self.effective_summary.assistant_acknowledgement,
+                "continuation_fingerprint": self.effective_summary.continuation_fingerprint,
+                "continuation_version": self.effective_summary.continuation_version,
+                "user_text": self.effective_summary.user_text,
+            }
         payload = _canonical_json(manifest, label="effective context").encode("utf-8")
         digest = hashlib.sha256(_EFFECTIVE_CONTEXT_ID_DOMAIN + payload).hexdigest()
         return f"ctx-v{self.representation_version}-{digest}"
@@ -153,7 +181,19 @@ class EffectiveContextSnapshot:
         return ConversationRequest(
             system_prompt=self.system_prompt,
             history=self.effective_history + pending_items,
+            effective_summary=self.effective_summary,
         )
+
+
+def _is_complete_turn_suffix(
+    full_turns: tuple[CompleteConversationTurn, ...],
+    effective_turns: tuple[CompleteConversationTurn, ...],
+) -> bool:
+    if len(effective_turns) > len(full_turns):
+        return False
+    if not effective_turns:
+        return True
+    return full_turns[-len(effective_turns) :] == effective_turns
 
 
 def validate_complete_history(

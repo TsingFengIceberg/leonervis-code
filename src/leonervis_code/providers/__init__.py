@@ -5,6 +5,7 @@ from leonervis_code.providers.definitions import (
     route_fingerprint,
 )
 from leonervis_code.providers.manager import (
+    CompactionRuntimeSnapshot,
     CurrentTargetContextAssessment,
     RuntimeProviderManager,
     RuntimeProviderStateError,
@@ -45,6 +46,7 @@ from leonervis_code.providers.request_context import (
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
     "ActiveProfileSelection",
+    "CompactionRuntimeSnapshot",
     "ContextFitDecision",
     "ContextFitReport",
     "ContextPreflightError",

@@ -9,7 +9,8 @@ from leonervis_code.providers.manager import (
     RuntimeStatus,
     RuntimeSwitchResult,
 )
-from leonervis_code.session import EffectiveContextInspection
+from leonervis_code.providers.request_context import ContextFitDecision
+from leonervis_code.session import CompactContextResult, EffectiveContextInspection
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionInfo
 from leonervis_code.tools.read_file import ReadFileTool
@@ -64,6 +65,21 @@ class Session:
             "provider input assessment is unavailable for fake runtime",
         )
         return EffectiveContextInspection(loop.effective_context_snapshot(), assessment)
+
+    def compact_context(self):
+        return CompactContextResult(
+            session_id=self.current,
+            checkpoint_sequence=4,
+            source_context_id="ctx-v1-" + "a" * 64,
+            result_context_id="ctx-v2-" + "b" * 64,
+            summarized_turn_count=2,
+            retained_turn_count=2,
+            full_turn_count=4,
+            before_input_tokens=100,
+            after_input_tokens=40,
+            input_method="estimated",
+            fit_decision=ContextFitDecision.FITS,
+        )
 
     def _info(self, session_id):
         return SessionInfo(
@@ -127,7 +143,27 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert context.kind == "warning"
     assert "Context ID: ctx-v1-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
+    compact = dispatch_slash("/compact", session)
+    assert compact.kind == "success"
+    assert "Full transcript and /history were preserved" in compact.message
+    assert dispatch_slash("/compact extra", session).message == "Usage: /compact"
     assert session.prompts == []
+
+
+def test_compact_failure_reports_unchanged_state(tmp_path) -> None:
+    session = Session(tmp_path)
+
+    def fail():
+        from leonervis_code.core.compaction import CompactionNotEligibleError
+
+        raise CompactionNotEligibleError("too few turns")
+
+    session.compact_context = fail
+    result = dispatch_slash("/compact", session)
+
+    assert result.kind == "error"
+    assert "too few turns" in result.message
+    assert "Full history and effective context are unchanged." in result.message
 
 
 def test_valid_session_commands_do_not_enter_model_history(tmp_path) -> None:

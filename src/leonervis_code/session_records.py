@@ -17,6 +17,15 @@ from typing import TypeAlias
 from urllib.parse import urlparse
 from uuid import UUID
 
+from leonervis_code.core.compaction import (
+    COMPACT_MIN_EFFECTIVE_TURNS,
+    COMPACT_PROMPT_VERSION,
+    COMPACT_RETAINED_TURNS,
+    SUMMARY_CONTINUATION_VERSION,
+    EffectiveContextSummary,
+    build_compact_prompt,
+    summary_continuation_fingerprint,
+)
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationItem,
@@ -25,9 +34,15 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.effective_context import validate_complete_history
+from leonervis_code.core.effective_context import (
+    COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+    EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
+    EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
+    validate_complete_history,
+)
 
 SCHEMA_VERSION = 1
+CONTEXT_COMPACTED_SCHEMA_VERSION = 2
 WORKSPACE_FINGERPRINT_VERSION = "v1"
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_RECORDS = 100_000
@@ -199,6 +214,27 @@ class Recovery:
 
 
 @dataclass(frozen=True)
+class ContextCompacted:
+    sequence: int
+    occurred_at: str
+    binding: BindingSnapshot
+    source_context_id: str
+    result_context_id: str
+    source_full_turn_count: int
+    source_effective_turn_count: int
+    retained_from_full_turn: int
+    previous_checkpoint_sequence: int | None
+    summary: str
+    compact_prompt_version: int
+    compact_prompt_fingerprint: str
+    continuation_version: int
+    continuation_fingerprint: str
+    effective_context_representation_version: int
+    record_type: str = "context_compacted"
+    schema_version: int = CONTEXT_COMPACTED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
 class SessionClosed:
     sequence: int
     occurred_at: str
@@ -214,6 +250,7 @@ SessionRecord: TypeAlias = (
     | TurnFailed
     | SessionResumed
     | Recovery
+    | ContextCompacted
     | SessionClosed
 )
 AuditRecord: TypeAlias = RuntimeChanged | TurnFailed | SessionResumed | Recovery | SessionClosed
@@ -226,6 +263,10 @@ class ReplayState:
     header: SessionHeader
     records: tuple[SessionRecord, ...]
     history: tuple[ConversationItem, ...]
+    effective_history: tuple[ConversationItem, ...]
+    effective_summary: EffectiveContextSummary | None
+    effective_source: str
+    latest_checkpoint: ContextCompacted | None
     turns: tuple[ConversationTurn, ...]
     binding: BindingSnapshot
     next_sequence: int
@@ -322,6 +363,10 @@ def replay_records(
         raise SessionRecordError("session transcript file name does not match its header")
 
     history: list[ConversationItem] = []
+    effective_history: list[ConversationItem] = []
+    effective_summary: EffectiveContextSummary | None = None
+    effective_source = EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY
+    latest_checkpoint: ContextCompacted | None = None
     turns: list[ConversationTurn] = []
     binding = header.binding
     closed = False
@@ -332,8 +377,7 @@ def replay_records(
             raise SessionRecordError(
                 f"session sequence mismatch: expected {expected_sequence}, got {record.sequence}"
             )
-        if record.schema_version != SCHEMA_VERSION:
-            raise SessionRecordError("unsupported session record schema version")
+        _validate_record_version(record)
         if expected_sequence and isinstance(record, SessionHeader):
             raise SessionRecordError("session_header may only be the first record")
         if closed and not isinstance(record, SessionResumed):
@@ -344,6 +388,7 @@ def replay_records(
             _validate_timestamp(record.committed_at, "turn committed_at")
             _validate_turn(record.items, seen_tool_ids)
             history.extend(record.items)
+            effective_history.extend(record.items)
             turns.append(ConversationTurn(user=record.items[0], assistant=record.items[-1]))  # type: ignore[arg-type]
             binding = record.binding
         elif isinstance(record, RuntimeChanged):
@@ -362,6 +407,24 @@ def replay_records(
             _validate_timestamp(record.occurred_at, "recovery occurred_at")
             if type(record.truncated_bytes) is not int or record.truncated_bytes < 1:
                 raise SessionRecordError("recovery truncated_bytes must be a positive integer")
+        elif isinstance(record, ContextCompacted):
+            _validate_context_compacted(
+                record,
+                full_history=tuple(history),
+                effective_history=tuple(effective_history),
+                latest_checkpoint=latest_checkpoint,
+            )
+            full_turns = validate_complete_history(tuple(history)).complete_turns
+            retained_turns = full_turns[record.retained_from_full_turn :]
+            effective_history = [item for turn in retained_turns for item in turn.items]
+            effective_summary = EffectiveContextSummary(
+                record.summary,
+                continuation_version=record.continuation_version,
+                continuation_fingerprint=record.continuation_fingerprint,
+            )
+            effective_source = EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT
+            latest_checkpoint = record
+            binding = record.binding
         elif isinstance(record, SessionClosed):
             _validate_timestamp(record.occurred_at, "session_closed occurred_at")
             _required_text(record.reason, "session_closed reason", allow_empty=True)
@@ -373,6 +436,10 @@ def replay_records(
         header=header,
         records=tuple(validated),
         history=tuple(history),
+        effective_history=tuple(effective_history),
+        effective_summary=effective_summary,
+        effective_source=effective_source,
+        latest_checkpoint=latest_checkpoint,
         turns=tuple(turns),
         binding=binding,
         next_sequence=len(validated),
@@ -381,6 +448,7 @@ def replay_records(
 
 
 def _record_to_dict(record: SessionRecord) -> dict[str, object]:
+    _validate_record_version(record)
     common: dict[str, object] = {
         "record_type": record.record_type,
         "schema_version": record.schema_version,
@@ -429,6 +497,24 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
         if type(record.truncated_bytes) is not int or record.truncated_bytes < 1:
             raise SessionRecordError("recovery truncated_bytes must be a positive integer")
         common.update(occurred_at=record.occurred_at, truncated_bytes=record.truncated_bytes)
+    elif isinstance(record, ContextCompacted):
+        _validate_context_compacted_fields(record)
+        common.update(
+            occurred_at=record.occurred_at,
+            binding=_binding_to_dict(record.binding),
+            source_context_id=record.source_context_id,
+            result_context_id=record.result_context_id,
+            source_full_turn_count=record.source_full_turn_count,
+            source_effective_turn_count=record.source_effective_turn_count,
+            retained_from_full_turn=record.retained_from_full_turn,
+            previous_checkpoint_sequence=record.previous_checkpoint_sequence,
+            summary=record.summary,
+            compact_prompt_version=record.compact_prompt_version,
+            compact_prompt_fingerprint=record.compact_prompt_fingerprint,
+            continuation_version=record.continuation_version,
+            continuation_fingerprint=record.continuation_fingerprint,
+            effective_context_representation_version=record.effective_context_representation_version,
+        )
     elif isinstance(record, SessionClosed):
         _validate_timestamp(record.occurred_at, "session_closed occurred_at")
         _required_text(record.reason, "session_closed reason", allow_empty=True)
@@ -441,7 +527,10 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
 def _record_from_dict(value: dict[str, object]) -> SessionRecord:
     record_type = _required_field_text(value, "record_type", "session record")
     version = value.get("schema_version")
-    if type(version) is not int or version != SCHEMA_VERSION:
+    allowed_version = (
+        CONTEXT_COMPACTED_SCHEMA_VERSION if record_type == "context_compacted" else SCHEMA_VERSION
+    )
+    if type(version) is not int or version != allowed_version:
         raise SessionRecordError("unsupported session record schema version")
     sequence = value.get("sequence")
     if type(sequence) is not int or sequence < 0:
@@ -532,6 +621,65 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             failure_kind=_required_field_text(value, "failure_kind", record_type),
             message=_required_field_text(value, "message", record_type, allow_empty=True),
         )
+    if record_type == "context_compacted":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "binding",
+            "source_context_id",
+            "result_context_id",
+            "source_full_turn_count",
+            "source_effective_turn_count",
+            "retained_from_full_turn",
+            "previous_checkpoint_sequence",
+            "summary",
+            "compact_prompt_version",
+            "compact_prompt_fingerprint",
+            "continuation_version",
+            "continuation_fingerprint",
+            "effective_context_representation_version",
+        }
+        _closed_fields(value, fields, record_type)
+        previous = value.get("previous_checkpoint_sequence")
+        if previous is not None and (type(previous) is not int or previous < 0):
+            raise SessionRecordError(
+                "context_compacted previous_checkpoint_sequence must be non-negative or null"
+            )
+        record = ContextCompacted(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            binding=_binding_from_value(value.get("binding")),
+            source_context_id=_required_field_text(value, "source_context_id", record_type),
+            result_context_id=_required_field_text(value, "result_context_id", record_type),
+            source_full_turn_count=_required_field_int(
+                value, "source_full_turn_count", record_type
+            ),
+            source_effective_turn_count=_required_field_int(
+                value, "source_effective_turn_count", record_type
+            ),
+            retained_from_full_turn=_required_field_int(
+                value, "retained_from_full_turn", record_type
+            ),
+            previous_checkpoint_sequence=previous,
+            summary=_required_field_text(value, "summary", record_type),
+            compact_prompt_version=_required_field_int(
+                value, "compact_prompt_version", record_type
+            ),
+            compact_prompt_fingerprint=_required_field_text(
+                value, "compact_prompt_fingerprint", record_type
+            ),
+            continuation_version=_required_field_int(value, "continuation_version", record_type),
+            continuation_fingerprint=_required_field_text(
+                value, "continuation_fingerprint", record_type
+            ),
+            effective_context_representation_version=_required_field_int(
+                value, "effective_context_representation_version", record_type
+            ),
+        )
+        _validate_context_compacted_fields(record)
+        return record
     simple_fields = {"record_type", "schema_version", "sequence", "occurred_at"}
     if record_type == "session_resumed":
         _closed_fields(value, simple_fields, record_type)
@@ -721,6 +869,95 @@ def _validate_turn(items: tuple[ConversationItem, ...], seen_tool_ids: set[str])
     if len(validated.complete_turns) != 1:
         raise SessionRecordError("turn_committed must contain exactly one complete turn")
     seen_tool_ids.update(validated.tool_use_ids)
+
+
+def _validate_record_version(record: SessionRecord) -> None:
+    expected = (
+        CONTEXT_COMPACTED_SCHEMA_VERSION if isinstance(record, ContextCompacted) else SCHEMA_VERSION
+    )
+    if record.schema_version != expected:
+        raise SessionRecordError("unsupported session record schema version")
+
+
+def _validate_context_compacted_fields(record: ContextCompacted) -> None:
+    _validate_record_version(record)
+    _validate_timestamp(record.occurred_at, "context_compacted occurred_at")
+    record.binding.__post_init__()
+    _context_id(record.source_context_id, "context_compacted source_context_id")
+    _context_id(record.result_context_id, "context_compacted result_context_id")
+    for value, label in (
+        (record.source_full_turn_count, "source_full_turn_count"),
+        (record.source_effective_turn_count, "source_effective_turn_count"),
+        (record.retained_from_full_turn, "retained_from_full_turn"),
+    ):
+        if type(value) is not int or value < 0:
+            raise SessionRecordError(f"context_compacted {label} must be non-negative")
+    if record.previous_checkpoint_sequence is not None and (
+        type(record.previous_checkpoint_sequence) is not int
+        or record.previous_checkpoint_sequence < 0
+    ):
+        raise SessionRecordError(
+            "context_compacted previous_checkpoint_sequence must be non-negative or null"
+        )
+    _text_payload(record.summary, "context_compacted summary")
+    if not record.summary.strip():
+        raise SessionRecordError("context_compacted summary must not be blank")
+    prompt = build_compact_prompt()
+    if (
+        record.compact_prompt_version != COMPACT_PROMPT_VERSION
+        or record.compact_prompt_fingerprint != prompt.fingerprint
+    ):
+        raise SessionRecordError("context_compacted compact prompt provenance is unsupported")
+    if (
+        record.continuation_version != SUMMARY_CONTINUATION_VERSION
+        or record.continuation_fingerprint
+        != summary_continuation_fingerprint(SUMMARY_CONTINUATION_VERSION)
+    ):
+        raise SessionRecordError("context_compacted continuation provenance is unsupported")
+    if (
+        record.effective_context_representation_version
+        != COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
+    ):
+        raise SessionRecordError(
+            "context_compacted effective-context representation is unsupported"
+        )
+
+
+def _validate_context_compacted(
+    record: ContextCompacted,
+    *,
+    full_history: tuple[ConversationItem, ...],
+    effective_history: tuple[ConversationItem, ...],
+    latest_checkpoint: ContextCompacted | None,
+) -> None:
+    _validate_context_compacted_fields(record)
+    full_turns = validate_complete_history(full_history).complete_turns
+    effective_turns = validate_complete_history(effective_history).complete_turns
+    if record.source_full_turn_count != len(full_turns):
+        raise SessionRecordError("context_compacted full turn count does not match replay state")
+    if record.source_effective_turn_count != len(effective_turns):
+        raise SessionRecordError(
+            "context_compacted effective turn count does not match replay state"
+        )
+    if len(effective_turns) < COMPACT_MIN_EFFECTIVE_TURNS:
+        raise SessionRecordError("context_compacted source has too few effective turns")
+    expected_boundary = len(full_turns) - COMPACT_RETAINED_TURNS
+    if record.retained_from_full_turn != expected_boundary:
+        raise SessionRecordError("context_compacted retained boundary is invalid")
+    expected_previous = latest_checkpoint.sequence if latest_checkpoint is not None else None
+    if record.previous_checkpoint_sequence != expected_previous:
+        raise SessionRecordError(
+            "context_compacted previous checkpoint does not match replay state"
+        )
+    if latest_checkpoint is not None and (
+        record.retained_from_full_turn < latest_checkpoint.retained_from_full_turn
+    ):
+        raise SessionRecordError("context_compacted retained boundary moved backwards")
+
+
+def _context_id(value: object, label: str) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"ctx-v[12]-[0-9a-f]{64}", value) is None:
+        raise SessionRecordError(f"{label} is invalid")
 
 
 def _closed_fields(value: dict[str, object], expected: set[str], label: str) -> None:

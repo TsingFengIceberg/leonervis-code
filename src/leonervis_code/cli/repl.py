@@ -107,7 +107,14 @@ def run_repl(
         if not prompt.strip():
             continue
 
-        result = dispatch_slash(prompt, session)
+        try:
+            result = dispatch_slash(prompt, session)
+        except KeyboardInterrupt:
+            stdout.write(
+                f"{render_message('Operation cancelled; no uncommitted state was installed.', 'warning', color=color)}\n"
+            )
+            stdout.flush()
+            continue
         if result.handled:
             if result.message is not None:
                 stdout.write(f"{render_message(result.message, result.kind, color=color)}\n")

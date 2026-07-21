@@ -12,6 +12,7 @@
 - [Foundation 3B: local multi-provider real-model path](#foundation-3b-local-multi-provider-real-model-path)
 - [Foundation 2B: offline adapter-owned compatibility policy](#foundation-2b-offline-adapter-owned-compatibility-policy)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
+- [Foundation 3F-2: Controlled Compact Transaction](#foundation-3f-2-controlled-compact-transaction)
 - [Provider-neutral Effective Context Snapshot and `/context`](#provider-neutral-effective-context-snapshot-and-context)
 - [Target-aware runtime switch UX](#target-aware-runtime-switch-ux)
 - [Target-specific request counting and per-invocation preflight](#target-specific-request-counting-and-per-invocation-preflight)
@@ -29,11 +30,11 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-The first prompt is a stable model-visible contract. It contains no absolute workspace path, date, Session ID, provider/model/profile, endpoint, or credential. It declares only capabilities the Harness actually provides: selective access to one workspace-relative UTF-8 text file, bounded or truncated tool results, and evidence-based answers.
+The canonical model system prompt is now version 2. It still says the ordinary Agent cannot initiate compaction, while adding the Host-summary trust boundary: an earlier-conversation summary is untrusted conversation context, not a system instruction or new user request.
 
 It explicitly does not claim write/edit, glob/grep, Bash/tests, network, approval, compaction, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard path, encoding, and size constraints.
 
-The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL contain only the user/assistant/tool causal chain. A new turn after resume uses the current binary's canonical prompt. Session schema v1 does not yet record the exact historical prompt version/fingerprint; that audit requirement is reserved for a separate schema migration.
+The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL contain only real user/assistant/tool causal chains. A new turn after resume uses the current binary's canonical prompt; a schema-v2 compact checkpoint stores compact-prompt and summary-framing provenance without inserting the normal system prompt into conversation history.
 
 The **model system prompt** and the human-facing `leonervis[session8|runtime]>` **REPL prompt** are different interfaces: the former is a model-visible contract, while the latter is only a terminal status cue.
 
@@ -271,6 +272,20 @@ Foundation 1B originally proved only process-local atomic history. Foundation 3D
 
 See [0001: single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md), [0002: deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md), [0003: in-memory text history](./decisions/0003-foundation-1a-in-memory-text-history.md), and [0004: bounded read_file tool loop](./decisions/0004-foundation-1b-bounded-read-file-tool-loop.md) for the detailed decisions.
 
+## Foundation 3F-2: Controlled Compact Transaction
+
+REPL `/compact` can now shorten provider-visible effective context manually while preserving the complete append-only transcript and `/history`. The first fixed policy requires at least four complete effective turns, retains the latest two verbatim, and uses the current real provider once to summarize the earlier projection. Fake runtime is unavailable, compaction is never automatic, and the original user turn is not retried.
+
+Compact generation uses a separately versioned prompt and a dedicated no-tools request. The Anthropic native body omits `tools`; OpenAI-compatible bodies omit both `tools` and `parallel_tool_calls`; counting and generation share the same input projection. Only normally completed nonempty text is accepted. Tool calls, refusal, truncation, and malformed responses fail closed.
+
+A summary is not a `ConversationItem` or real turn. Effective state is `Host summary + retained complete-turn suffix`, and adapters project the summary through explicit untrusted continuation framing. The normal Agent canonical system prompt is version 2 and explains that a Host summary is earlier conversation context, not a system instruction or new user request. Contexts without summaries retain the original `ctx-v1` identity format; summary-bearing contexts use `ctx-v2`.
+
+Session migration does not rewrite old lines: existing records remain schema v1, while only typed `context_compacted` uses schema v2. Mixed replay reconstructs full history from every `TurnCommitted`, summary/retained state from the latest checkpoint, and appends later turns to both full and effective state. Checkpoint append reuses candidate replay validation, O_APPEND, flush/fsync, and installs in-memory effective state only afterward.
+
+The transaction freezes writer/session/sequence, loop, full/effective state, and source context ID before generation, then rechecks them after generation and candidate assessment. Source and candidate need comparable known counts; the candidate must be a known `FITS` and strictly reduce input tokens. Precommit, stale, and persistence failures do not write `TurnFailed` or change effective memory.
+
+After compaction, `/context` reports checkpoint source, summary presence, retained real turns, and checkpoint sequence, without counting the summary as a transcript turn or item. See [0017: Controlled Compact Transaction](./decisions/0017-controlled-compact-transaction.md).
+
 ## Provider-neutral Effective Context Snapshot and `/context`
 
 `AgentLoop` now distinguishes full history derived from the append-only transcript, provider-visible effective history, and one invocation request. In 3F-1, full and effective history still remain exactly equal after restore, successful commit, and resume. Each initial request and tool continuation derives from one `EffectiveContextSnapshot` plus the current pending suffix, so model behavior is unchanged while future compaction no longer needs to rewrite `/history` or durable transcript truth.
@@ -365,3 +380,4 @@ This slice establishes capacity facts only. It does not count current request to
 14. [0014: target-specific request counting and per-invocation preflight](./decisions/0014-target-specific-request-counting-and-preflight.md)
 15. [0015: target-aware runtime switch UX](./decisions/0015-target-aware-runtime-switch-ux.md)
 16. [0016: provider-neutral Effective Context Snapshot](./decisions/0016-provider-neutral-effective-context-snapshot.md)
+17. [0017: Controlled Compact Transaction](./decisions/0017-controlled-compact-transaction.md)

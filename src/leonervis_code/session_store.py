@@ -24,6 +24,7 @@ from leonervis_code.core.contracts import ConversationItem
 from leonervis_code.session_records import (
     AuditRecord,
     BindingSnapshot,
+    ContextCompacted,
     MAX_RECORD_BYTES,
     MAX_RECORDS,
     Recovery,
@@ -370,6 +371,10 @@ class SessionWriter:
     def state(self) -> ReplayState:
         return self._state
 
+    def now(self) -> str:
+        """Return the store-owned canonical time for a new durable record."""
+        return self._store._clock()
+
     @property
     def info(self) -> SessionInfo:
         return _info(self.path, self._state)
@@ -389,6 +394,16 @@ class SessionWriter:
             binding=binding,
             items=tuple(items),
         )
+        self._append(record)
+        return record
+
+    def append_context_compacted(self, record: ContextCompacted) -> ContextCompacted:
+        """Durably append one prevalidated effective-context checkpoint."""
+        self._ensure_writable()
+        if record.sequence != self._state.next_sequence:
+            raise SessionStoreError(
+                f"checkpoint sequence must be {self._state.next_sequence}, got {record.sequence}"
+            )
         self._append(record)
         return record
 
