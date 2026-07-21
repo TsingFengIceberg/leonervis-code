@@ -74,6 +74,7 @@ def test_loop_does_not_commit_candidate_when_provider_fails_after_a_tool(tmp_pat
         loop.run("failed prompt")
 
     assert loop.history == ()
+    assert loop.effective_history == ()
     assert loop.turns == ()
     assert loop.run("retry prompt") == "retry reply"
     assert provider.received_requests[-1].history == (UserMessage(text="retry prompt"),)
@@ -114,6 +115,7 @@ def test_loop_rejects_another_tool_after_the_limit_without_committing(tmp_path) 
         loop.run("Read repeatedly")
 
     assert loop.history == ()
+    assert loop.effective_history == ()
     assert loop.turns == ()
 
 
@@ -149,6 +151,7 @@ def test_loop_does_not_commit_memory_when_durable_commit_fails(tmp_path) -> None
         loop.run("persist")
 
     assert loop.history == ()
+    assert loop.effective_history == ()
     assert loop.turns == ()
 
 
@@ -162,6 +165,7 @@ def test_loop_restores_validated_history_and_rejects_broken_causality(tmp_path) 
     loop = AgentLoop(None, ReadFileTool(tmp_path), initial_history=restored)
 
     assert loop.history == restored
+    assert loop.effective_history == restored
     assert loop.turns == (ConversationTurn(UserMessage("read"), AssistantText("done")),)
 
     with pytest.raises(ValueError, match="does not match"):
@@ -231,6 +235,7 @@ def test_empty_committed_context_has_no_synthetic_user_message(tmp_path) -> None
 
     assert request.history == ()
     assert loop.history == ()
+    assert loop.effective_history == ()
     assert loop.turns == ()
 
 

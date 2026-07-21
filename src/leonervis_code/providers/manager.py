@@ -13,6 +13,7 @@ from leonervis_code.core.contracts import (
     ConversationRequest,
     ProviderResponse,
 )
+from leonervis_code.core.effective_context import EffectiveContextSnapshot
 from leonervis_code.providers.definitions import ADAPTER_CONTRACT_VERSION, RuntimeProviderRoute
 from leonervis_code.providers.factory import create_provider
 from leonervis_code.providers.fake import ScriptedFakeProvider
@@ -104,6 +105,15 @@ class RuntimeStatus:
     def profile_name(self) -> str | None:
         """Expose an explicit name while retaining the existing ``profile`` field."""
         return self.profile
+
+
+@dataclass(frozen=True)
+class CurrentTargetContextAssessment:
+    """One read-only fit assessment for the coherent current runtime target."""
+
+    status: RuntimeStatus
+    fit_report: ContextFitReport | None
+    unavailable_diagnostic: str | None = None
 
 
 @dataclass(frozen=True)
@@ -414,7 +424,7 @@ class RuntimeProviderManager:
         name: str,
         *,
         scope: str = "project",
-        committed_context: ConversationRequest | None = None,
+        committed_context: EffectiveContextSnapshot | ConversationRequest | None = None,
     ) -> RuntimeSwitchResult:
         """Prepare, screen, and atomically commit one effective profile switch."""
         with self._lock:
@@ -466,7 +476,7 @@ class RuntimeProviderManager:
         self,
         *,
         scope: str = "project",
-        committed_context: ConversationRequest | None = None,
+        committed_context: EffectiveContextSnapshot | ConversationRequest | None = None,
     ) -> RuntimeSwitchResult:
         """Prepare, screen, and atomically commit one active-selection clear."""
         with self._lock:
@@ -534,7 +544,7 @@ class RuntimeProviderManager:
         self,
         model: str,
         *,
-        committed_context: ConversationRequest | None = None,
+        committed_context: EffectiveContextSnapshot | ConversationRequest | None = None,
     ) -> RuntimeSwitchResult:
         """Prepare, screen, and atomically commit a process-local model override."""
         with self._lock:
@@ -578,6 +588,40 @@ class RuntimeProviderManager:
             raise
         _close_provider(old)
         return RuntimeSwitchResult(self.status(), fit_report)
+
+    def assess_current_context(
+        self,
+        request: ConversationRequest,
+    ) -> CurrentTargetContextAssessment:
+        """Inspect current target capacity without generation or runtime mutation."""
+        with self._lock:
+            self._ensure_open()
+            route = self._route
+            if route is None:
+                return CurrentTargetContextAssessment(
+                    status=_fake_status(
+                        source=self._selection_source,
+                        generation=self._generation,
+                    ),
+                    fit_report=None,
+                    unavailable_diagnostic="provider input assessment is unavailable for fake runtime",
+                )
+            status = _status_for_route(
+                route,
+                profile=self._loaded_profile,
+                source=self._selection_source,
+                environment=self._environment,
+                model_override=self._model_override,
+                capability=self._capability,
+                generation=self._generation,
+            )
+            report = assess_context_fit(
+                provider=self._provider,
+                route=route,
+                capability=self._capability,
+                request=request,
+            )
+            return CurrentTargetContextAssessment(status=status, fit_report=report)
 
     def status(self) -> RuntimeStatus:
         with self._lock:
@@ -627,15 +671,20 @@ class RuntimeProviderManager:
     @staticmethod
     def _screen_candidate(
         candidate: _Candidate,
-        committed_context: ConversationRequest | None,
+        committed_context: EffectiveContextSnapshot | ConversationRequest | None,
     ) -> ContextFitReport | None:
         if committed_context is None:
             return None
+        request = (
+            committed_context.to_conversation_request()
+            if isinstance(committed_context, EffectiveContextSnapshot)
+            else committed_context
+        )
         report = assess_context_fit(
             provider=candidate.provider,
             route=candidate.route,
             capability=candidate.capability,
-            request=committed_context,
+            request=request,
         )
         if report.decision in {
             ContextFitDecision.CONTEXT_EXCEEDED,

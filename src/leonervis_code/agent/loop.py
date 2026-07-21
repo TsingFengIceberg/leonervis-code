@@ -17,11 +17,18 @@ from leonervis_code.core.contracts import (
     TurnCommitter,
     UserMessage,
 )
+from leonervis_code.core.effective_context import (
+    EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+    EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
+    EffectiveContextSnapshot,
+    validate_complete_history,
+)
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.read_file import (
     MAX_READ_FILE_EXECUTIONS_PER_TURN,
     READ_FILE_TOOL_NAME,
     ReadFileTool,
+    read_file_tool_snapshot,
 )
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
@@ -46,26 +53,42 @@ class AgentLoop:
         """Store a provider, confined tool, validated history, and durable commit hook."""
         self._provider = provider
         self._read_file = read_file
-        self._history, self._turns = restore_history(initial_history)
+        restored = validate_complete_history(initial_history)
+        self._full_history = restored.history
+        self._effective_history = restored.history
+        self._turns = restored.display_turns
         self._commit_turn = commit_turn
         self._system_prompt_factory = system_prompt_factory
 
     @property
     def history(self) -> tuple[ConversationItem, ...]:
         """Return the complete ordered causal context of completed turns."""
-        return self._history
+        return self._full_history
+
+    @property
+    def effective_history(self) -> tuple[ConversationItem, ...]:
+        """Return the committed causal context currently visible to providers."""
+        return self._effective_history
 
     @property
     def turns(self) -> tuple[ConversationTurn, ...]:
         """Return completed user/final-assistant pairs for user-facing history display."""
         return self._turns
 
-    def committed_context_request(self) -> ConversationRequest:
-        """Snapshot the exact committed context for target compatibility counting."""
-        return ConversationRequest(
+    def effective_context_snapshot(self) -> EffectiveContextSnapshot:
+        """Freeze the full and provider-visible committed context without mutation."""
+        return EffectiveContextSnapshot(
+            representation_version=EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            source=EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
             system_prompt=self._system_prompt_factory(),
-            history=self._history,
+            tool_definitions=(read_file_tool_snapshot(),),
+            full_history=self._full_history,
+            effective_history=self._effective_history,
         )
+
+    def committed_context_request(self) -> ConversationRequest:
+        """Retain the committed-count compatibility seam through effective context."""
+        return self.effective_context_snapshot().to_conversation_request()
 
     def run(
         self,
@@ -78,21 +101,19 @@ class AgentLoop:
         if turn_provider is None:
             raise RuntimeError("conversation provider is required for this turn")
         user = UserMessage(text=prompt)
-        candidate: tuple[ConversationItem, ...] = self._history + (user,)
-        system_prompt = self._system_prompt_factory()
+        context = self.effective_context_snapshot()
+        pending: tuple[ConversationItem, ...] = (user,)
         tool_calls = 0
 
         while True:
-            response = turn_provider.respond(
-                ConversationRequest(system_prompt=system_prompt, history=candidate)
-            )
+            response = turn_provider.respond(context.to_conversation_request(pending_items=pending))
             if isinstance(response, AssistantText):
-                self._commit(candidate + (response,), user, response)
+                self._commit(pending + (response,), user, response)
                 return response.text
 
-            candidate += (response,)
+            pending += (response,)
             if tool_calls == MAX_READ_FILE_EXECUTIONS_PER_TURN:
-                candidate += (
+                pending += (
                     ToolResult(
                         tool_use_id=response.tool_use_id,
                         content="tool call limit reached for this conversation turn",
@@ -100,31 +121,32 @@ class AgentLoop:
                     ),
                 )
                 final_response = turn_provider.respond(
-                    ConversationRequest(system_prompt=system_prompt, history=candidate)
+                    context.to_conversation_request(pending_items=pending)
                 )
                 if isinstance(final_response, AssistantText):
-                    self._commit(candidate + (final_response,), user, final_response)
+                    self._commit(pending + (final_response,), user, final_response)
                     return final_response.text
                 raise ToolLoopLimitError("provider requested a tool after the tool call limit")
 
             tool_calls += 1
-            candidate += (self._execute(response),)
+            pending += (self._execute(response),)
 
     def _commit(
         self,
-        history: tuple[ConversationItem, ...],
+        items: tuple[ConversationItem, ...],
         user: UserMessage,
         assistant: AssistantText,
     ) -> None:
         """Persist one complete turn before exposing it through in-memory state."""
         turn = CommittedTurn(
-            items=history[len(self._history) :],
+            items=items,
             user=user,
             assistant=assistant,
         )
         if self._commit_turn is not None:
             self._commit_turn(turn)
-        self._history = history
+        self._full_history += items
+        self._effective_history += items
         self._turns += (ConversationTurn(user=user, assistant=assistant),)
 
     def _execute(self, request: ToolUse) -> ToolResult:
@@ -141,33 +163,6 @@ class AgentLoop:
 def restore_history(
     history: tuple[ConversationItem, ...],
 ) -> tuple[tuple[ConversationItem, ...], tuple[ConversationTurn, ...]]:
-    """Validate complete causal turns and derive the user-facing turn view."""
-    if not isinstance(history, tuple):
-        raise ValueError("conversation history must be a tuple")
-    turns: list[ConversationTurn] = []
-    index = 0
-    seen_tool_ids: set[str] = set()
-    while index < len(history):
-        user = history[index]
-        if not isinstance(user, UserMessage):
-            raise ValueError("conversation turn must start with a user message")
-        index += 1
-        while index < len(history) and isinstance(history[index], ToolUse):
-            request = history[index]
-            assert isinstance(request, ToolUse)
-            if request.tool_use_id in seen_tool_ids:
-                raise ValueError(f"duplicate tool use ID: {request.tool_use_id}")
-            if index + 1 >= len(history):
-                raise ValueError("conversation history has an unmatched tool use")
-            result = history[index + 1]
-            if not isinstance(result, ToolResult) or result.tool_use_id != request.tool_use_id:
-                raise ValueError("conversation tool result does not match its tool use")
-            seen_tool_ids.add(request.tool_use_id)
-            index += 2
-        if index >= len(history) or not isinstance(history[index], AssistantText):
-            raise ValueError("conversation turn must end with assistant text")
-        assistant = history[index]
-        assert isinstance(assistant, AssistantText)
-        turns.append(ConversationTurn(user=user, assistant=assistant))
-        index += 1
-    return tuple(history), tuple(turns)
+    """Retain the public restoration seam through the canonical validator."""
+    validated = validate_complete_history(history)
+    return validated.history, validated.display_turns

@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded `read_file` tool loop, provider-owned model limits, target-specific request counting/preflight before every provider invocation, and target-aware screening of committed history before provider/model switches are implemented. Compaction, write tools, Bash, and approval flows are not yet implemented.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded `read_file` tool loop, provider-owned model limits, target-specific invocation preflight, switch-time screening, and a provider-neutral Effective Context Snapshot with read-only `/context` inspection are implemented. Compaction, write tools, Bash, and approval flows are not yet implemented.
 
 ## Contents
 
@@ -164,6 +164,7 @@ A Session is workspace-bound and stores complete successful turns in append-only
 | `/help` | Show control commands |
 | `/history <count>` | Show recent complete turns in the current Session |
 | `/status` | Show redacted runtime, model, and context-window status |
+| `/context` | Read-only inspection of Effective Context, content ID, count, and target fit |
 | `/provider list` | List named profiles |
 | `/provider current` | Show the current profile/provider/model |
 | `/provider use <name>` | Atomically switch the workspace's active profile |
@@ -174,7 +175,7 @@ A Session is workspace-bound and stores complete successful turns in append-only
 | `/resume <latest\|id>` | Switch Sessions while preserving the runtime |
 | `/exit`, `/quit` | Exit normally |
 
-Ctrl-D, EOF, or Ctrl-C while waiting for input also exits normally. Terminal colors are enabled only on a TTY; set `NO_COLOR=1` to disable them.
+Ctrl-D, EOF, or Ctrl-C while waiting for input also exits normally. `/context` does not invoke model generation, mutate the Session, or write the transcript; its current source is full committed history, so full and effective history have not diverged yet. Exact inspection on an official Anthropic route may issue one count-only `messages.count_tokens` request, while OpenAI-compatible routes use a local estimate. Terminal colors are enabled only on a TTY; set `NO_COLOR=1` to disable them.
 
 For a deterministic view of the bounded tool loop:
 
@@ -212,6 +213,7 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 - [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, and context capability.
 - [Architecture decision records](./docs/decisions/): complete problem statements, trade-offs, boundaries, and verification records for each learning slice.
+- [Provider-neutral Effective Context Snapshot](./docs/decisions/0016-provider-neutral-effective-context-snapshot.md): full/effective context boundaries, stable `ctx-v1` identity, and read-only `/context`.
 - [Target-aware runtime switch UX](./docs/decisions/0015-target-aware-runtime-switch-ux.md): committed-context screening before switches, known-reject/unknown-allow behavior, and atomic audit semantics.
 - [Target-specific request counting and preflight](./docs/decisions/0014-target-specific-request-counting-and-preflight.md): native-input counting, two distinct limits, and typed local rejection before every provider invocation.
 - [Provider-owned model context capability](./docs/decisions/0013-provider-owned-model-context-capabilities.md): context/model-output limit resolution and cache design.
@@ -224,4 +226,4 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 The only workspace tool today is bounded `read_file`. There are no write/edit, glob/grep, Bash/test, network, approval, streaming, automatic retry/fallback, parallel-tool, compaction, multi-agent, or remote-service capabilities yet.
 
-The next planned slice is durable effective context and controlled compaction: first define an auditable effective-context representation and an explicit compaction transaction. Target-aware resume prepare/commit remains a separate atomicity slice. [CLAUDE.md](./CLAUDE.md) and the ADRs record the complete scope, development principles, and roadmap.
+The next planned slice is a controlled compaction transaction: add a typed durable checkpoint, stale-source conflict checks, and failure atomicity for effective history while preserving the full append-only transcript. Target-aware resume prepare/commit remains a separate slice. [CLAUDE.md](./CLAUDE.md) and the ADRs record the complete scope, development principles, and roadmap.

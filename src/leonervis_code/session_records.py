@@ -25,6 +25,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
+from leonervis_code.core.effective_context import validate_complete_history
 
 SCHEMA_VERSION = 1
 WORKSPACE_FINGERPRINT_VERSION = "v1"
@@ -708,32 +709,18 @@ def _validate_header(header: SessionHeader) -> None:
 
 
 def _validate_turn(items: tuple[ConversationItem, ...], seen_tool_ids: set[str]) -> None:
-    if len(items) < 2:
-        raise SessionRecordError("turn_committed must contain a user message and assistant text")
-    if not isinstance(items[0], UserMessage) or not isinstance(items[-1], AssistantText):
-        raise SessionRecordError(
-            "turn_committed must start with user_message and end with assistant_text"
-        )
-    pending: set[str] = set()
-    for index, item in enumerate(items):
+    for item in items:
         _item_to_dict(item)
-        if index == 0 or index == len(items) - 1:
-            continue
-        if isinstance(item, (UserMessage, AssistantText)):
-            raise SessionRecordError("turn_committed contains an unclosed user or assistant item")
-        if isinstance(item, ToolUse):
-            if item.tool_use_id in seen_tool_ids or item.tool_use_id in pending:
-                raise SessionRecordError(f"duplicate tool_use ID: {item.tool_use_id}")
-            pending.add(item.tool_use_id)
-        elif isinstance(item, ToolResult):
-            if item.tool_use_id not in pending:
-                raise SessionRecordError(
-                    f"tool_result has no preceding unmatched tool_use: {item.tool_use_id}"
-                )
-            pending.remove(item.tool_use_id)
-            seen_tool_ids.add(item.tool_use_id)
-    if pending:
-        raise SessionRecordError(f"turn_committed has unmatched tool_use: {sorted(pending)[0]}")
+    try:
+        validated = validate_complete_history(
+            items,
+            prior_tool_use_ids=frozenset(seen_tool_ids),
+        )
+    except ValueError as error:
+        raise SessionRecordError(f"invalid committed turn: {error}") from None
+    if len(validated.complete_turns) != 1:
+        raise SessionRecordError("turn_committed must contain exactly one complete turn")
+    seen_tool_ids.update(validated.tool_use_ids)
 
 
 def _closed_fields(value: dict[str, object], expected: set[str], label: str) -> None:

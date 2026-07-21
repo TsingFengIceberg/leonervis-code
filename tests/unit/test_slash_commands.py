@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.slash import dispatch_slash
-from leonervis_code.providers.manager import RuntimeStatus, RuntimeSwitchResult
+from leonervis_code.providers.manager import (
+    CurrentTargetContextAssessment,
+    RuntimeStatus,
+    RuntimeSwitchResult,
+)
+from leonervis_code.session import EffectiveContextInspection
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionInfo
+from leonervis_code.tools.read_file import ReadFileTool
 
 
 @dataclass
@@ -48,6 +55,15 @@ class Session:
             credential_required=False,
             credential_present=False,
         )
+
+    def inspect_context(self):
+        loop = AgentLoop(None, ReadFileTool(self.tmp_path))
+        assessment = CurrentTargetContextAssessment(
+            self.status(),
+            None,
+            "provider input assessment is unavailable for fake runtime",
+        )
+        return EffectiveContextInspection(loop.effective_context_snapshot(), assessment)
 
     def _info(self, session_id):
         return SessionInfo(
@@ -107,6 +123,11 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/session show extra", session).message == "Usage: /session show"
     assert dispatch_slash("/provider use", session).message == "Usage: /provider use <name>"
     assert dispatch_slash("/status extra", session).message == "Usage: /status"
+    context = dispatch_slash("/context", session)
+    assert context.kind == "warning"
+    assert "Context ID: ctx-v1-" in context.message
+    assert dispatch_slash("/context extra", session).message == "Usage: /context"
+    assert session.prompts == []
 
 
 def test_valid_session_commands_do_not_enter_model_history(tmp_path) -> None:

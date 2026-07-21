@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 import os
 from pathlib import Path
 from threading import RLock
@@ -14,7 +15,9 @@ from leonervis_code.core.contracts import (
     ConversationProvider,
     ConversationTurn,
 )
+from leonervis_code.core.effective_context import EffectiveContextSnapshot
 from leonervis_code.providers.manager import (
+    CurrentTargetContextAssessment,
     RuntimeProviderManager,
     RuntimeStatus,
     RuntimeSwitchAuditError,
@@ -23,10 +26,66 @@ from leonervis_code.providers.manager import (
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
-from leonervis_code.providers.request_context import ContextPreflightError
+from leonervis_code.providers.request_context import ContextFitDecision, ContextPreflightError
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionInfo, SessionStore, SessionStoreError, SessionWriter
 from leonervis_code.tools.read_file import ReadFileTool
+
+
+@dataclass(frozen=True)
+class EffectiveContextInspection:
+    """One frozen provider-neutral context and coherent current-target assessment."""
+
+    snapshot: EffectiveContextSnapshot
+    target_assessment: CurrentTargetContextAssessment
+
+    @property
+    def source(self) -> str:
+        return self.snapshot.source
+
+    @property
+    def context_id(self) -> str:
+        return self.snapshot.context_id
+
+    @property
+    def full_turn_count(self) -> int:
+        return self.snapshot.full_turn_count
+
+    @property
+    def full_item_count(self) -> int:
+        return self.snapshot.full_item_count
+
+    @property
+    def effective_turn_count(self) -> int:
+        return self.snapshot.effective_turn_count
+
+    @property
+    def effective_item_count(self) -> int:
+        return self.snapshot.effective_item_count
+
+    @property
+    def fit_report(self):
+        return self.target_assessment.fit_report
+
+    @property
+    def fit_decision(self) -> ContextFitDecision:
+        report = self.fit_report
+        return report.decision if report is not None else ContextFitDecision.UNKNOWN
+
+    @property
+    def remaining_capacity(self) -> int | None:
+        report = self.fit_report
+        if (
+            report is None
+            or report.input_count.input_tokens is None
+            or report.context_window_limit is None
+        ):
+            return None
+        return (
+            report.context_window_limit
+            - report.input_count.input_tokens
+            - report.requested_output_tokens
+        )
 
 
 class ProjectSession:
@@ -123,6 +182,10 @@ class ProjectSession:
         return self._loop.history
 
     @property
+    def effective_history(self) -> tuple[ConversationItem, ...]:
+        return self._loop.effective_history
+
+    @property
     def turns(self) -> tuple[ConversationTurn, ...]:
         return self._loop.turns
 
@@ -190,7 +253,7 @@ class ProjectSession:
             result = self._manager.use_profile(
                 name,
                 scope=scope,
-                committed_context=self._loop.committed_context_request(),
+                committed_context=self._loop.effective_context_snapshot(),
             )
             self._record_runtime_switch(result, "provider_profile")
             return result
@@ -204,7 +267,7 @@ class ProjectSession:
             self._ensure_open()
             result = self._manager.clear_active(
                 scope=scope,
-                committed_context=self._loop.committed_context_request(),
+                committed_context=self._loop.effective_context_snapshot(),
             )
             self._record_runtime_switch(result, "provider_clear")
             return result
@@ -214,10 +277,18 @@ class ProjectSession:
             self._ensure_open()
             result = self._manager.set_model(
                 model,
-                committed_context=self._loop.committed_context_request(),
+                committed_context=self._loop.effective_context_snapshot(),
             )
             self._record_runtime_switch(result, "model_override")
             return result
+
+    def inspect_context(self) -> EffectiveContextInspection:
+        """Inspect current effective context without generation or durable mutation."""
+        with self._lock:
+            self._ensure_open()
+            snapshot = self._loop.effective_context_snapshot()
+            assessment = self._manager.assess_current_context(snapshot.to_conversation_request())
+            return EffectiveContextInspection(snapshot, assessment)
 
     def status(self) -> RuntimeStatus:
         self._ensure_open()

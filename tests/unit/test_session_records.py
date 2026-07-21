@@ -181,6 +181,14 @@ def test_replay_requires_closed_turns_and_strict_tool_causality(tmp_path: Path) 
             ToolResult("one", "y"),
             AssistantText("a"),
         ),
+        (
+            UserMessage("u"),
+            ToolUse("one", "read_file", "x"),
+            ToolUse("two", "read_file", "y"),
+            ToolResult("two", "y"),
+            ToolResult("one", "x"),
+            AssistantText("a"),
+        ),
         (UserMessage("u"), AssistantText("middle"), AssistantText("a")),
     ]
     for items in cases:

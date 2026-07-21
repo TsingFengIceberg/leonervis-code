@@ -5,6 +5,7 @@ from leonervis_code.providers.definitions import (
     route_fingerprint,
 )
 from leonervis_code.providers.manager import (
+    CurrentTargetContextAssessment,
     RuntimeProviderManager,
     RuntimeProviderStateError,
     RuntimeStatus,
@@ -48,6 +49,7 @@ __all__ = [
     "ContextFitReport",
     "ContextPreflightError",
     "ContextPreflightErrorKind",
+    "CurrentTargetContextAssessment",
     "LEGACY_PROFILE_NAMESPACE",
     "ModelContextCapability",
     "ModelContextCapabilityResolver",

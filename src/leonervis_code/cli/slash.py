@@ -10,6 +10,7 @@ from leonervis_code.cli.presentation import (
     PROVIDER_HELP,
     SESSION_HELP,
     MessageKind,
+    render_context_inspection,
     render_recent_history,
     render_runtime_status,
     render_runtime_switch,
@@ -33,6 +34,7 @@ TOP_LEVEL_COMMANDS = (
     "/exit",
     "/quit",
     "/status",
+    "/context",
     "/provider",
     "/model",
     "/session",
@@ -44,6 +46,8 @@ class ReplSession(Protocol):
     turns: tuple
 
     def status(self): ...
+
+    def inspect_context(self): ...
 
     def session_info(self): ...
 
@@ -96,6 +100,14 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         return _call(lambda: render_runtime_status(session.status()), kind="info")
     if command.startswith("/status "):
         return _usage("Usage: /status")
+    if command == "/context":
+        try:
+            message, kind = render_context_inspection(session.inspect_context())
+            return SlashResult(handled=True, message=message, kind=kind)
+        except Exception as error:
+            return _command_error(error, failure_prefix="Context inspection failed")
+    if command.startswith("/context "):
+        return _usage("Usage: /context")
     if command == "/history" or command.startswith("/history "):
         return _history(command, session)
     if command == "/session show" or command.startswith("/session show "):

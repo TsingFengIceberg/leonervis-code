@@ -3,7 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Callable, Protocol, TypeAlias
+
+_SYSTEM_PROMPT_FINGERPRINT_DOMAIN = b"leonervis-code-system-prompt\0"
+
+
+def system_prompt_fingerprint(version: int, text: str) -> str:
+    """Return the stable domain-separated identity for exact prompt text."""
+    if type(version) is not int or version < 1:
+        raise ValueError("system prompt version must be positive")
+    if not isinstance(text, str):
+        raise ValueError("system prompt text must be text")
+    encoded = (
+        _SYSTEM_PROMPT_FINGERPRINT_DOMAIN
+        + str(version).encode("ascii")
+        + b"\0"
+        + text.encode("utf-8")
+    )
+    return f"v{version}-{hashlib.sha256(encoded).hexdigest()}"
 
 
 @dataclass(frozen=True)

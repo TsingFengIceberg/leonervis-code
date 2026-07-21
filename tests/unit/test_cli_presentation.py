@@ -8,19 +8,24 @@ from leonervis_code.cli.presentation import (
     RED,
     RESET,
     YELLOW,
+    render_context_inspection,
     render_message,
     render_prompt,
     render_runtime_status,
     render_runtime_switch,
     render_switch_rejection,
 )
-from leonervis_code.providers.manager import RuntimeStatus
+from leonervis_code.providers.manager import CurrentTargetContextAssessment, RuntimeStatus
 from leonervis_code.providers.request_context import (
     ContextFitDecision,
     ContextFitReport,
     RequestTokenCount,
     RequestTokenCountMethod,
 )
+from leonervis_code.agent.loop import AgentLoop
+from leonervis_code.core.contracts import AssistantText, UserMessage
+from leonervis_code.session import EffectiveContextInspection
+from leonervis_code.tools.read_file import ReadFileTool
 
 
 @dataclass
@@ -102,6 +107,44 @@ def test_runtime_status_renders_context_capability_without_changing_prompt() -> 
 
     assert "Context window: 1000000 tokens (builtin_catalog)" in rendered
     assert "1000000" not in render_prompt(resolved, Info(), color=False)
+
+
+def inspection(tmp_path, report=None, diagnostic=None, *history):
+    loop = AgentLoop(None, ReadFileTool(tmp_path), initial_history=tuple(history))
+    target = CurrentTargetContextAssessment(status(), report, diagnostic)
+    return EffectiveContextInspection(loop.effective_context_snapshot(), target)
+
+
+def test_context_inspection_renders_fit_unknown_and_capacity(tmp_path) -> None:
+    fits = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount(80, RequestTokenCountMethod.ESTIMATED),
+        requested_output_tokens=20,
+        context_window_limit=100,
+        model_output_limit=40,
+        decision=ContextFitDecision.FITS,
+    )
+    rendered, kind = render_context_inspection(
+        inspection(tmp_path, fits, None, UserMessage("x"), AssistantText("y"))
+    )
+
+    assert kind == "info"
+    assert "Source: full committed history" in rendered
+    assert "Context ID: ctx-v1-" in rendered
+    assert "Full history: 1 turn, 2 items" in rendered
+    assert "Effective history: 1 turn, 2 items" in rendered
+    assert "Input: 80 tokens (estimated)" in rendered
+    assert "Fit: fits" in rendered
+    assert "Remaining capacity: 0 tokens" in rendered
+
+    unavailable, kind = render_context_inspection(
+        inspection(tmp_path, None, "provider input assessment is unavailable for fake runtime")
+    )
+    assert kind == "warning"
+    assert "Input: unavailable" in unavailable
+    assert "Output reserve: unavailable" in unavailable
+    assert "Fit: unknown" in unavailable
+    assert "Diagnostic: provider input assessment is unavailable for fake runtime" in unavailable
 
 
 def test_runtime_switch_rendering_distinguishes_fits_unknown_and_rejection() -> None:

@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
-
-from leonervis_code.core.contracts import SystemPromptSnapshot
+from leonervis_code.core.contracts import (
+    SystemPromptSnapshot,
+    system_prompt_fingerprint,
+)
 from leonervis_code.tools.read_file import MAX_READ_FILE_EXECUTIONS_PER_TURN
 
 SYSTEM_PROMPT_VERSION = 1
-_FINGERPRINT_DOMAIN = b"leonervis-code-system-prompt\0"
-
 _STABLE_SYSTEM_PROMPT_SECTIONS = (
     """# Role and responsibility
 You are Leonervis Code, a local coding assistant operating through a Host harness. Help the user understand code and files in the current workspace. You choose responses and may request only tools supplied by the Host; the Host validates and executes tool requests.""",
@@ -28,8 +27,17 @@ def build_system_prompt() -> SystemPromptSnapshot:
     return SystemPromptSnapshot(
         version=SYSTEM_PROMPT_VERSION,
         text=text,
-        fingerprint=_fingerprint_prompt(SYSTEM_PROMPT_VERSION, text),
+        fingerprint=system_prompt_fingerprint(SYSTEM_PROMPT_VERSION, text),
     )
+
+
+def validate_system_prompt_snapshot(snapshot: SystemPromptSnapshot) -> None:
+    """Reject prompt metadata that does not identify its exact text bytes."""
+    if not isinstance(snapshot, SystemPromptSnapshot):
+        raise ValueError("system prompt snapshot is invalid")
+    expected = system_prompt_fingerprint(snapshot.version, snapshot.text)
+    if snapshot.fingerprint != expected:
+        raise ValueError("system prompt fingerprint does not match its version and text")
 
 
 def _render_sections(sections: tuple[str, ...]) -> str:
@@ -48,8 +56,5 @@ def _render_sections(sections: tuple[str, ...]) -> str:
 
 
 def _fingerprint_prompt(version: int, text: str) -> str:
-    """Return a domain-separated digest for exact versioned prompt bytes."""
-    if version < 1:
-        raise ValueError("system prompt version must be positive")
-    encoded = _FINGERPRINT_DOMAIN + str(version).encode("ascii") + b"\0" + text.encode("utf-8")
-    return f"v{version}-{hashlib.sha256(encoded).hexdigest()}"
+    """Retain the tested private compatibility seam for prompt identity."""
+    return system_prompt_fingerprint(version, text)

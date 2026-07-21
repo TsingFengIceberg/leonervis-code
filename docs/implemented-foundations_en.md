@@ -12,6 +12,7 @@
 - [Foundation 3B: local multi-provider real-model path](#foundation-3b-local-multi-provider-real-model-path)
 - [Foundation 2B: offline adapter-owned compatibility policy](#foundation-2b-offline-adapter-owned-compatibility-policy)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
+- [Provider-neutral Effective Context Snapshot and `/context`](#provider-neutral-effective-context-snapshot-and-context)
 - [Target-aware runtime switch UX](#target-aware-runtime-switch-ux)
 - [Target-specific request counting and per-invocation preflight](#target-specific-request-counting-and-per-invocation-preflight)
 - [Provider-owned model context capability](#provider-owned-model-context-capability)
@@ -270,6 +271,18 @@ Foundation 1B originally proved only process-local atomic history. Foundation 3D
 
 See [0001: single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md), [0002: deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md), [0003: in-memory text history](./decisions/0003-foundation-1a-in-memory-text-history.md), and [0004: bounded read_file tool loop](./decisions/0004-foundation-1b-bounded-read-file-tool-loop.md) for the detailed decisions.
 
+## Provider-neutral Effective Context Snapshot and `/context`
+
+`AgentLoop` now distinguishes full history derived from the append-only transcript, provider-visible effective history, and one invocation request. In 3F-1, full and effective history still remain exactly equal after restore, successful commit, and resume. Each initial request and tool continuation derives from one `EffectiveContextSnapshot` plus the current pending suffix, so model behavior is unchanged while future compaction no longer needs to rewrite `/history` or durable transcript truth.
+
+Complete committed history uses one strict validator that accepts only `UserMessage, (ToolUse, matching ToolResult)*, AssistantText`; tool pairs must be adjacent, IDs must match, and IDs are globally unique. Session replay, loop restoration, and effective-context construction share this causal rule while retaining their own schema, size, and provider-invocation terminal validation.
+
+The snapshot applies canonical JSON and domain-separated SHA-256 to the current system prompt, neutral `read_file` contract, and complete effective turns, producing a stable `ctx-v1-...` content identity. The identity excludes Session/runtime/provider/audit/token metadata, is not persisted in JSONL, and is not presented as proof of transcript tamper resistance.
+
+REPL `/context` freezes context and target under the `ProjectSession` facade lock and shows source, context ID, full/effective turn and item counts, exact/estimated/unknown input, reserve, both model limits, fit, and known remaining capacity. It invokes no generation or tool, writes no transcript or audit record, and changes no history or runtime. Fake mode is explicitly unavailable; OpenAI-compatible routes use a local estimate; exact inspection on the official Anthropic route may call count-only `messages.count_tokens` but never `messages.create`.
+
+Session schema remains v1 and persists no effective context, checkpoint, or count. See [0016: provider-neutral Effective Context Snapshot](./decisions/0016-provider-neutral-effective-context-snapshot.md). The canonical model system prompt was reviewed: Host-only inspection and full-history passthrough add no model-visible capability, so version 1 and its fingerprint remain unchanged.
+
 ## Target-aware runtime switch UX
 
 The long-lived runtime now screens the current committed conversation context against a destination before `/provider use`, `/model`, or the matching `ProjectSession` API commits its candidate. `AgentLoop` builds a read-only snapshot from the current canonical system prompt and exact committed causal history. An empty Session remains `history=()`; no synthetic user message is invented for counting.
@@ -351,3 +364,4 @@ This slice establishes capacity facts only. It does not count current request to
 13. [0013: provider-owned model context capability](./decisions/0013-provider-owned-model-context-capabilities.md)
 14. [0014: target-specific request counting and per-invocation preflight](./decisions/0014-target-specific-request-counting-and-preflight.md)
 15. [0015: target-aware runtime switch UX](./decisions/0015-target-aware-runtime-switch-ux.md)
+16. [0016: provider-neutral Effective Context Snapshot](./decisions/0016-provider-neutral-effective-context-snapshot.md)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from leonervis_code.core.contracts import ToolResult, ToolUse
+from leonervis_code.core.effective_context import CanonicalToolDefinition
 
 MAX_CONTENT_BYTES = 32 * 1024
 TRUNCATION_MARKER = "\n[truncated]\n"
@@ -32,6 +33,11 @@ def read_file_model_definition() -> dict[str, object]:
             "additionalProperties": False,
         },
     }
+
+
+def read_file_tool_snapshot() -> CanonicalToolDefinition:
+    """Freeze the canonical neutral read tool for effective-context identity."""
+    return CanonicalToolDefinition.from_mapping(read_file_model_definition())
 
 
 class ReadFileTool:

@@ -439,6 +439,61 @@ def test_switch_model_output_limit_precedes_counting(tmp_path) -> None:
     assert count_calls == []
 
 
+def test_current_context_assessment_is_read_only_and_never_generates(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    original = store.get_profile("one")
+    store.replace_profile(
+        original.profile_id,
+        replace(
+            original.to_spec(),
+            context_window_tokens=100,
+            model_max_output_tokens=80,
+            max_output_tokens=20,
+        ),
+        expected_revision=original.revision,
+    )
+
+    class CountingProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            return RequestTokenCount(70, RequestTokenCountMethod.EXACT)
+
+    provider = CountingProvider("model-one")
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: provider,
+    )
+    before = manager.status()
+
+    assessment = manager.assess_current_context(
+        ConversationRequest(
+            build_system_prompt(),
+            (UserMessage("hello"), AssistantText("reply")),
+        )
+    )
+
+    assert assessment.status == before
+    assert assessment.fit_report is not None
+    assert assessment.fit_report.decision == ContextFitDecision.FITS
+    assert assessment.fit_report.input_count.input_tokens == 70
+    assert provider.requests == []
+    assert manager.status() == before
+    with manager.provider_for_turn():
+        pass
+
+
+def test_fake_current_context_assessment_is_explicitly_unavailable(tmp_path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    manager = RuntimeProviderManager(store, environment={})
+
+    assessment = manager.assess_current_context(ConversationRequest(build_system_prompt(), ()))
+
+    assert assessment.status.mode == "fake"
+    assert assessment.fit_report is None
+    assert "unavailable" in assessment.unavailable_diagnostic
+
+
 def test_fake_runtime_has_explicit_empty_provenance(tmp_path) -> None:
     store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
     manager = RuntimeProviderManager(store, environment={})

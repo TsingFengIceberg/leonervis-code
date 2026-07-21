@@ -21,8 +21,8 @@ _SAFE_PROMPT_CHARACTER = re.compile(r"[A-Za-z0-9._:-]")
 MessageKind = Literal["plain", "info", "success", "warning", "error"]
 
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /session, /provider, /status, /model <model>, "
-    "/resume <latest|id>, /exit, /quit. Ctrl-D or Ctrl-C exits."
+    "Commands: /help, /history <count>, /session, /provider, /status, /context, "
+    "/model <model>, /resume <latest|id>, /exit, /quit. Ctrl-D or Ctrl-C exits."
 )
 SESSION_HELP = (
     "Session commands:\n"
@@ -59,6 +59,19 @@ class RuntimeStatusView(Protocol):
     model_max_output_source: str
     model_max_output_diagnostic: str | None
     max_output_tokens: int | None
+
+
+class EffectiveContextInspectionView(Protocol):
+    source: str
+    context_id: str
+    full_turn_count: int
+    full_item_count: int
+    effective_turn_count: int
+    effective_item_count: int
+    fit_report: ContextFitReport | None
+    fit_decision: ContextFitDecision
+    remaining_capacity: int | None
+    target_assessment: object
 
 
 class SessionInfoView(Protocol):
@@ -186,6 +199,69 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
     )
 
 
+def render_context_inspection(
+    inspection: EffectiveContextInspectionView,
+) -> tuple[str, MessageKind]:
+    """Render approved context metadata without exposing model-visible content."""
+    report = inspection.fit_report
+    source = inspection.source.replace("_", " ")
+    lines = [
+        f"Source: {source}",
+        f"Context ID: {inspection.context_id}",
+        f"Full history: {_count_label(inspection.full_turn_count, 'turn')}, "
+        f"{_count_label(inspection.full_item_count, 'item')}",
+        f"Effective history: {_count_label(inspection.effective_turn_count, 'turn')}, "
+        f"{_count_label(inspection.effective_item_count, 'item')}",
+    ]
+    diagnostic = None
+    if report is None:
+        lines.extend(
+            (
+                "Input: unavailable",
+                "Output reserve: unavailable",
+                "Context window: unknown",
+                "Model max output: unknown",
+                "Fit: unknown",
+            )
+        )
+        diagnostic = getattr(
+            inspection.target_assessment,
+            "unavailable_diagnostic",
+            None,
+        )
+        kind: MessageKind = "warning"
+    else:
+        count = report.input_count
+        if count.input_tokens is None:
+            lines.append("Input: unknown")
+        else:
+            lines.append(f"Input: {count.input_tokens} tokens ({count.method.value})")
+        lines.append(f"Output reserve: {report.requested_output_tokens} tokens")
+        lines.append(
+            f"Context window: {report.context_window_limit} tokens"
+            if report.context_window_limit is not None
+            else "Context window: unknown"
+        )
+        lines.append(
+            f"Model max output: {report.model_output_limit} tokens"
+            if report.model_output_limit is not None
+            else "Model max output: unknown"
+        )
+        lines.append(f"Fit: {report.decision.value}")
+        if inspection.remaining_capacity is not None:
+            lines.append(f"Remaining capacity: {inspection.remaining_capacity} tokens")
+        diagnostic = count.diagnostic
+        if report.decision == ContextFitDecision.FITS:
+            kind = "info"
+        elif report.decision == ContextFitDecision.UNKNOWN:
+            kind = "warning"
+        else:
+            kind = "error"
+    if diagnostic:
+        lines.append(f"Diagnostic: {diagnostic}")
+    return "\n".join(lines), kind
+
+
 def render_runtime_switch(
     destination: str,
     report: ContextFitReport | None,
@@ -240,6 +316,11 @@ def render_session_info(info: SessionInfoView) -> str:
         f"Turns: {info.turn_count}\n"
         f"Created: {info.created_at}"
     )
+
+
+def _count_label(value: int, label: str) -> str:
+    suffix = label if value == 1 else f"{label}s"
+    return f"{value} {suffix}"
 
 
 def _session_label(info: SessionInfoView | None) -> str | None:
