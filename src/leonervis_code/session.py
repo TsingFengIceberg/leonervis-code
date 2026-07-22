@@ -9,18 +9,21 @@ import os
 from pathlib import Path
 from threading import RLock
 
-from leonervis_code.agent.loop import AgentLoop
+from leonervis_code.agent.loop import AgentLoop, PreparedAgentTurn
 from leonervis_code.core.compaction import (
+    AUTO_COMPACT_HIGH_WATER_PERCENT,
     COMPACT_MAX_OUTPUT_TOKENS,
-    COMPACT_MIN_EFFECTIVE_TURNS,
-    COMPACT_RETAINED_TURNS,
+    CompactSummaryPlan,
     CompactSummaryRequest,
     CompactionCandidateError,
     CompactionConflictError,
     CompactionNotEligibleError,
+    CompactionTrigger,
     EffectiveContextSummary,
     build_compact_prompt,
     build_compact_source_text,
+    decide_auto_compaction,
+    plan_compaction,
 )
 from leonervis_code.core.contracts import (
     CommittedTurn,
@@ -34,11 +37,13 @@ from leonervis_code.core.effective_context import (
     EffectiveContextSnapshot,
 )
 from leonervis_code.providers.manager import (
+    CompactionRuntimeSnapshot,
     CurrentTargetContextAssessment,
     RuntimeProviderManager,
     RuntimeStatus,
     RuntimeSwitchAuditError,
     RuntimeSwitchResult,
+    TurnRuntimeSnapshot,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.profile import NamedProviderProfile
@@ -48,6 +53,7 @@ from leonervis_code.providers.request_context import (
     ContextFitReport,
     ContextPreflightError,
     rejects_context_transition,
+    raise_for_context_fit,
 )
 from leonervis_code.session_records import BindingSnapshot, ContextCompacted
 from leonervis_code.session_store import (
@@ -117,6 +123,55 @@ class CompactContextResult:
     after_input_tokens: int
     input_method: str
     fit_decision: ContextFitDecision
+    trigger: CompactionTrigger = CompactionTrigger.MANUAL
+
+
+@dataclass(frozen=True)
+class AutoCompactionStarted:
+    trigger: CompactionTrigger
+    source_context_id: str
+    input_tokens: int
+    input_method: str
+    requested_output_tokens: int
+    context_window_tokens: int
+    high_water_percent: int | None
+
+
+@dataclass(frozen=True)
+class AutoCompactionCommitted:
+    trigger: CompactionTrigger
+    result: CompactContextResult
+
+
+@dataclass(frozen=True)
+class AutoCompactionNotApplied:
+    trigger: CompactionTrigger
+    reason: str
+    prompt_continues: bool
+
+
+PromptEvent = AutoCompactionStarted | AutoCompactionCommitted | AutoCompactionNotApplied
+PromptEventSink = Callable[[PromptEvent], None]
+
+
+@dataclass(frozen=True)
+class _PreparedCompaction:
+    writer: SessionWriter
+    loop: AgentLoop
+    source: EffectiveContextSnapshot
+    plan: CompactSummaryPlan
+    captured_sequence: int
+    captured_checkpoint: ContextCompacted | None
+    captured_full: tuple[ConversationItem, ...]
+    captured_effective: tuple[ConversationItem, ...]
+    captured_summary: EffectiveContextSummary | None
+    captured_source: str
+    retained_from_full_turn: int
+    trigger: CompactionTrigger
+
+
+class AutoCompactionRequiredError(ContextPreflightError):
+    """Raised when one mandatory automatic compaction cannot make the turn fit."""
 
 
 @dataclass(frozen=True)
@@ -162,6 +217,12 @@ class EffectiveContextInspection:
     @property
     def latest_checkpoint_sequence(self) -> int | None:
         return self.checkpoint.sequence if self.checkpoint is not None else None
+
+    @property
+    def latest_checkpoint_trigger(self) -> CompactionTrigger | None:
+        if self.checkpoint is None:
+            return None
+        return self.checkpoint.trigger
 
     @property
     def fit_report(self):
@@ -211,7 +272,7 @@ class ProjectSession:
         self._read_file = read_file
         self._lock = RLock()
         self._closed = False
-        self._compaction_active = False
+        self._active_compaction: _PreparedCompaction | None = None
         self._loop = loop or self._new_loop(writer)
         self._startup_resume_result = startup_resume_result
 
@@ -430,19 +491,40 @@ class ProjectSession:
             finally:
                 prepared.abort()
 
-    def prompt(self, text: str) -> str:
-        """Run one complete turn; transcript fsync succeeds before memory commit."""
+    def prompt(self, text: str, *, event_sink: PromptEventSink | None = None) -> str:
+        """Run one preflighted turn with at most one automatic compaction attempt."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
+            prepared = self._loop.prepare_turn(text)
+            loop = self._loop
             binding: BindingSnapshot | None = None
-            try:
-                with self._manager.provider_for_turn() as runtime:
-                    binding = binding_from_status(runtime.status)
-                    return self._loop.run(text, provider=runtime)
-            except Exception as error:
+        try:
+            with self._manager.provider_for_turn() as runtime:
+                binding = binding_from_status(runtime.status)
+                assessment = runtime.assess_context(prepared.initial_request)
+                report = assessment.fit_report
+                if (
+                    report is not None
+                    and report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED
+                ):
+                    raise_for_context_fit(report)
+                decision = decide_auto_compaction(report)
+                if decision.trigger is not None:
+                    prepared = self._auto_compact_turn(
+                        prepared,
+                        loop=loop,
+                        runtime=runtime,
+                        trigger=decision.trigger,
+                        mandatory=decision.mandatory,
+                        source_report=report,
+                        event_sink=event_sink,
+                    )
+                return loop.run_prepared(prepared, provider=runtime)
+        except Exception as error:
+            with self._lock:
                 self._record_failure(binding or binding_from_status(self._manager.status()), error)
-                raise
+            raise
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
         self._ensure_open()
@@ -487,146 +569,261 @@ class ProjectSession:
             return result
 
     def compact_context(self) -> CompactContextResult:
-        """Prepare, generate, validate, persist, then install one manual checkpoint."""
+        """Run the shared controlled-compaction transaction manually."""
+        prepared = self._prepare_compaction(CompactionTrigger.MANUAL)
+        try:
+            with self._manager.provider_for_compaction() as runtime:
+                return self._execute_compaction(prepared, runtime, pending_items=())
+        finally:
+            self._finish_compaction(prepared)
+
+    def _prepare_compaction(self, trigger: CompactionTrigger) -> _PreparedCompaction:
         with self._lock:
             self._ensure_open()
-            if self._compaction_active:
-                raise CompactionConflictError("a compaction transaction is already active")
+            self._ensure_not_compacting()
             writer = self._writer
             loop = self._loop
             source = loop.effective_context_snapshot()
-            effective_turns = source.effective_turns
-            if len(effective_turns) < COMPACT_MIN_EFFECTIVE_TURNS:
-                raise CompactionNotEligibleError(
-                    f"controlled compaction requires at least "
-                    f"{COMPACT_MIN_EFFECTIVE_TURNS} complete effective turns"
-                )
-            full_turns = source.full_turns
-            summarized_turns = effective_turns[:-COMPACT_RETAINED_TURNS]
-            retained_turns = effective_turns[-COMPACT_RETAINED_TURNS:]
-            summarized_history = tuple(item for turn in summarized_turns for item in turn.items)
-            retained_history = tuple(item for turn in retained_turns for item in turn.items)
-            retained_from_full_turn = len(full_turns) - COMPACT_RETAINED_TURNS
-            captured_sequence = writer.state.next_sequence
-            captured_checkpoint = writer.state.latest_checkpoint
-            captured_full = loop.history
-            captured_effective = loop.effective_history
-            captured_summary = loop.effective_summary
-            captured_source = loop.effective_source
-            self._compaction_active = True
+            compact_plan = plan_compaction(
+                source_summary=loop.effective_summary,
+                effective_turns=source.effective_turns,
+            )
+            prepared = _PreparedCompaction(
+                writer=writer,
+                loop=loop,
+                source=source,
+                plan=compact_plan,
+                captured_sequence=writer.state.next_sequence,
+                captured_checkpoint=writer.state.latest_checkpoint,
+                captured_full=loop.history,
+                captured_effective=loop.effective_history,
+                captured_summary=loop.effective_summary,
+                captured_source=loop.effective_source,
+                retained_from_full_turn=(len(source.full_turns) - compact_plan.retained_turn_count),
+                trigger=trigger,
+            )
+            self._active_compaction = prepared
+            return prepared
 
+    def _execute_compaction(
+        self,
+        prepared: _PreparedCompaction,
+        runtime: CompactionRuntimeSnapshot | TurnRuntimeSnapshot,
+        *,
+        pending_items: tuple[ConversationItem, ...],
+    ) -> CompactContextResult:
+        source = prepared.source
+        status = runtime.status
+        output_limit = min(
+            COMPACT_MAX_OUTPUT_TOKENS,
+            status.max_output_tokens or COMPACT_MAX_OUTPUT_TOKENS,
+            status.model_max_output_tokens or COMPACT_MAX_OUTPUT_TOKENS,
+        )
+        source_report = runtime.assess_context(
+            source.to_conversation_request(pending_items=pending_items)
+        )
+        if isinstance(source_report, CurrentTargetContextAssessment):
+            if source_report.fit_report is None:
+                raise CompactionCandidateError(
+                    "source context input count is unavailable; compaction was not committed"
+                )
+            source_report = source_report.fit_report
+        if source_report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+            raise CompactionCandidateError("source context output reserve exceeds the model limit")
+        before = source_report.input_count.input_tokens
+        if source_report.decision == ContextFitDecision.UNKNOWN or before is None:
+            raise CompactionCandidateError(
+                "source context input count is unknown; compaction was not committed"
+            )
+        summary_request = CompactSummaryRequest(
+            prompt=build_compact_prompt(),
+            source_text=build_compact_source_text(
+                previous_summary=prepared.plan.source_summary,
+                summarized_history=prepared.plan.summarized_history,
+            ),
+            max_output_tokens=output_limit,
+        )
+        summary_response = runtime.summarize(summary_request)
+        summary = EffectiveContextSummary(summary_response.text.strip())
+        candidate = EffectiveContextSnapshot(
+            representation_version=COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            source=EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
+            system_prompt=source.system_prompt,
+            tool_definitions=source.tool_definitions,
+            full_history=source.full_history,
+            effective_history=prepared.plan.retained_history,
+            effective_summary=summary,
+        )
+        candidate_report = runtime.assess_context(
+            candidate.to_conversation_request(pending_items=pending_items)
+        )
+        if isinstance(candidate_report, CurrentTargetContextAssessment):
+            if candidate_report.fit_report is None:
+                raise CompactionCandidateError(
+                    "candidate context compatibility is unavailable; compaction was not committed"
+                )
+            candidate_report = candidate_report.fit_report
+        after = candidate_report.input_count.input_tokens
+        if candidate_report.decision != ContextFitDecision.FITS or after is None:
+            raise CompactionCandidateError(
+                "candidate context compatibility is not a known fit; compaction was not committed"
+            )
+        if source_report.input_count.method != candidate_report.input_count.method:
+            raise CompactionCandidateError("source and candidate input counts are not comparable")
+        if after >= before:
+            raise CompactionCandidateError("candidate context did not reduce provider input tokens")
+
+        with self._lock:
+            self._ensure_open()
+            current = prepared.loop.effective_context_snapshot()
+            if (
+                self._writer is not prepared.writer
+                or self._loop is not prepared.loop
+                or prepared.writer.state.next_sequence != prepared.captured_sequence
+                or prepared.loop.history != prepared.captured_full
+                or prepared.loop.effective_history != prepared.captured_effective
+                or prepared.loop.effective_summary != prepared.captured_summary
+                or prepared.loop.effective_source != prepared.captured_source
+                or current.context_id != source.context_id
+                or self._active_compaction is not prepared
+            ):
+                raise CompactionConflictError("compaction source changed; rerun /compact")
+            prompt = summary_request.prompt
+            checkpoint = ContextCompacted(
+                sequence=prepared.captured_sequence,
+                occurred_at=prepared.writer.now(),
+                binding=binding_from_status(status),
+                source_context_id=source.context_id,
+                result_context_id=candidate.context_id,
+                source_full_turn_count=len(source.full_turns),
+                source_effective_turn_count=len(source.effective_turns),
+                retained_from_full_turn=prepared.retained_from_full_turn,
+                previous_checkpoint_sequence=(
+                    prepared.captured_checkpoint.sequence
+                    if prepared.captured_checkpoint is not None
+                    else None
+                ),
+                summary=summary.text,
+                compact_prompt_version=prompt.version,
+                compact_prompt_fingerprint=prompt.fingerprint,
+                continuation_version=summary.continuation_version,
+                continuation_fingerprint=summary.continuation_fingerprint,
+                effective_context_representation_version=candidate.representation_version,
+                trigger=prepared.trigger,
+                high_water_percent=(
+                    AUTO_COMPACT_HIGH_WATER_PERCENT
+                    if prepared.trigger == CompactionTrigger.HIGH_WATER
+                    else None
+                ),
+            )
+            prepared.writer.append_context_compacted(checkpoint)
+            prepared.loop.install_compaction(
+                summary=summary,
+                retained_history=prepared.plan.retained_history,
+            )
+        return CompactContextResult(
+            session_id=prepared.writer.session_id,
+            checkpoint_sequence=checkpoint.sequence,
+            source_context_id=source.context_id,
+            result_context_id=candidate.context_id,
+            summarized_turn_count=prepared.plan.summarized_turn_count,
+            retained_turn_count=prepared.plan.retained_turn_count,
+            full_turn_count=len(source.full_turns),
+            before_input_tokens=before,
+            after_input_tokens=after,
+            input_method=candidate_report.input_count.method.value,
+            fit_decision=candidate_report.decision,
+            trigger=prepared.trigger,
+        )
+
+    def _finish_compaction(self, prepared: _PreparedCompaction) -> None:
+        with self._lock:
+            if self._active_compaction is prepared:
+                self._active_compaction = None
+
+    def _auto_compact_turn(
+        self,
+        turn: PreparedAgentTurn,
+        *,
+        loop: AgentLoop,
+        runtime: TurnRuntimeSnapshot,
+        trigger: CompactionTrigger,
+        mandatory: bool,
+        source_report: ContextFitReport,
+        event_sink: PromptEventSink | None,
+    ) -> PreparedAgentTurn:
+        self._emit_prompt_event(
+            event_sink,
+            AutoCompactionStarted(
+                trigger=trigger,
+                source_context_id=turn.context.context_id,
+                input_tokens=source_report.input_count.input_tokens or 0,
+                input_method=source_report.input_count.method.value,
+                requested_output_tokens=source_report.requested_output_tokens,
+                context_window_tokens=source_report.context_window_limit or 0,
+                high_water_percent=(
+                    AUTO_COMPACT_HIGH_WATER_PERCENT
+                    if trigger == CompactionTrigger.HIGH_WATER
+                    else None
+                ),
+            ),
+        )
         try:
-            with self._manager.provider_for_compaction() as runtime:
-                status = runtime.status
-                output_limit = min(
-                    COMPACT_MAX_OUTPUT_TOKENS,
-                    status.max_output_tokens or COMPACT_MAX_OUTPUT_TOKENS,
-                    status.model_max_output_tokens or COMPACT_MAX_OUTPUT_TOKENS,
+            prepared = self._prepare_compaction(trigger)
+        except CompactionNotEligibleError as error:
+            self._emit_prompt_event(
+                event_sink,
+                AutoCompactionNotApplied(trigger, str(error), not mandatory),
+            )
+            if mandatory:
+                raise_for_context_fit(source_report)
+            return turn
+        try:
+            try:
+                result = self._execute_compaction(
+                    prepared,
+                    runtime,
+                    pending_items=turn.pending_items,
                 )
-                source_report = runtime.assess_context(source.to_conversation_request())
-                if source_report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
-                    raise CompactionCandidateError(
-                        "source context output reserve exceeds the model limit"
-                    )
-                before = source_report.input_count.input_tokens
-                if source_report.decision == ContextFitDecision.UNKNOWN or before is None:
-                    raise CompactionCandidateError(
-                        "source context input count is unknown; compaction was not committed"
-                    )
-                summary_request = CompactSummaryRequest(
-                    prompt=build_compact_prompt(),
-                    source_text=build_compact_source_text(
-                        previous_summary=captured_summary,
-                        summarized_history=summarized_history,
-                    ),
-                    max_output_tokens=output_limit,
+            except (
+                CompactionCandidateError,
+                ContextPreflightError,
+                ProviderAdapterError,
+            ) as error:
+                self._emit_prompt_event(
+                    event_sink,
+                    AutoCompactionNotApplied(trigger, _safe_failure_message(error), not mandatory),
                 )
-                summary_response = runtime.summarize(summary_request)
-                summary = EffectiveContextSummary(summary_response.text.strip())
-                candidate = EffectiveContextSnapshot(
-                    representation_version=COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
-                    source=EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
-                    system_prompt=source.system_prompt,
-                    tool_definitions=source.tool_definitions,
-                    full_history=source.full_history,
-                    effective_history=retained_history,
-                    effective_summary=summary,
-                )
-                candidate_report = runtime.assess_context(candidate.to_conversation_request())
-                after = candidate_report.input_count.input_tokens
-                if candidate_report.decision != ContextFitDecision.FITS or after is None:
-                    raise CompactionCandidateError(
-                        "candidate context compatibility is not a known fit; compaction was not committed"
-                    )
-                if source_report.input_count.method != candidate_report.input_count.method:
-                    raise CompactionCandidateError(
-                        "source and candidate input counts are not comparable"
-                    )
-                if after >= before:
-                    raise CompactionCandidateError(
-                        "candidate context did not reduce provider input tokens"
-                    )
-
-                with self._lock:
-                    self._ensure_open()
-                    current = loop.effective_context_snapshot()
-                    if (
-                        self._writer is not writer
-                        or self._loop is not loop
-                        or writer.state.next_sequence != captured_sequence
-                        or loop.history != captured_full
-                        or loop.effective_history != captured_effective
-                        or loop.effective_summary != captured_summary
-                        or loop.effective_source != captured_source
-                        or current.context_id != source.context_id
-                        or not self._compaction_active
-                    ):
-                        raise CompactionConflictError("compaction source changed; rerun /compact")
-                    prompt = summary_request.prompt
-                    checkpoint = ContextCompacted(
-                        sequence=captured_sequence,
-                        occurred_at=writer.now(),
-                        binding=binding_from_status(status),
-                        source_context_id=source.context_id,
-                        result_context_id=candidate.context_id,
-                        source_full_turn_count=len(full_turns),
-                        source_effective_turn_count=len(effective_turns),
-                        retained_from_full_turn=retained_from_full_turn,
-                        previous_checkpoint_sequence=(
-                            captured_checkpoint.sequence
-                            if captured_checkpoint is not None
-                            else None
-                        ),
-                        summary=summary.text,
-                        compact_prompt_version=prompt.version,
-                        compact_prompt_fingerprint=prompt.fingerprint,
-                        continuation_version=summary.continuation_version,
-                        continuation_fingerprint=summary.continuation_fingerprint,
-                        effective_context_representation_version=(candidate.representation_version),
-                    )
-                    writer.append_context_compacted(checkpoint)
-                    loop.install_compaction(summary=summary, retained_history=retained_history)
-                return CompactContextResult(
-                    session_id=writer.session_id,
-                    checkpoint_sequence=checkpoint.sequence,
-                    source_context_id=source.context_id,
-                    result_context_id=candidate.context_id,
-                    summarized_turn_count=len(summarized_turns),
-                    retained_turn_count=len(retained_turns),
-                    full_turn_count=len(full_turns),
-                    before_input_tokens=before,
-                    after_input_tokens=after,
-                    input_method=candidate_report.input_count.method.value,
-                    fit_decision=candidate_report.decision,
-                )
+                if mandatory:
+                    raise_for_context_fit(source_report)
+                return turn
+            self._emit_prompt_event(
+                event_sink,
+                AutoCompactionCommitted(trigger, result),
+            )
+            if loop is not self._loop:
+                raise CompactionConflictError("conversation session changed after compaction")
+            return turn.rebase(loop.effective_context_snapshot())
         finally:
-            with self._lock:
-                self._compaction_active = False
+            self._finish_compaction(prepared)
+
+    @staticmethod
+    def _emit_prompt_event(
+        sink: PromptEventSink | None,
+        event: PromptEvent,
+    ) -> None:
+        if sink is None:
+            return
+        try:
+            sink(event)
+        except Exception:
+            pass
 
     def inspect_context(self) -> EffectiveContextInspection:
         """Inspect current effective context without generation or durable mutation."""
         with self._lock:
             self._ensure_open()
+            self._ensure_not_compacting()
             snapshot = self._loop.effective_context_snapshot()
             assessment = self._manager.assess_current_context(snapshot.to_conversation_request())
             return EffectiveContextInspection(
@@ -698,7 +895,7 @@ class ProjectSession:
             pass
 
     def _ensure_not_compacting(self) -> None:
-        if self._compaction_active:
+        if self._active_compaction is not None:
             raise CompactionConflictError("a controlled compaction transaction is active")
 
     def _ensure_open(self) -> None:

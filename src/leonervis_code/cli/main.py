@@ -14,6 +14,7 @@ from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.brand import color_enabled
 from leonervis_code.cli.presentation import (
     render_resume_rejection,
+    render_prompt_event,
     render_session_resume,
     render_session_summary,
 )
@@ -669,7 +670,15 @@ def main(
                 message, _ = render_session_resume(resume_result)
                 print(message, file=errors)
             if arguments.command == "prompt":
-                print(session.prompt(arguments.prompt), file=output)
+
+                def prompt_event_sink(event) -> None:
+                    message, _ = render_prompt_event(event)
+                    print(message, file=errors, flush=True)
+
+                print(
+                    session.prompt(arguments.prompt, event_sink=prompt_event_sink),
+                    file=output,
+                )
                 return 0
             return run_repl(
                 session,

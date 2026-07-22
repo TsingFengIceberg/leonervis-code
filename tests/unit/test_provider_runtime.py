@@ -118,6 +118,54 @@ def test_compaction_runtime_lease_is_real_pinned_and_blocks_switches(tmp_path) -
     assert manager.use_profile("two").status.profile == "two"
 
 
+def test_turn_runtime_combines_assessment_summary_and_response_under_one_lease(
+    tmp_path,
+) -> None:
+    store = configured_store(tmp_path)
+    profile = store.get_profile("one")
+    store.replace_profile(
+        profile.profile_id,
+        replace(
+            profile.to_spec(),
+            context_window_tokens=1000,
+            model_max_output_tokens=100,
+            max_output_tokens=20,
+        ),
+        expected_revision=profile.revision,
+    )
+
+    class PromptProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            return RequestTokenCount(20, RequestTokenCountMethod.ESTIMATED)
+
+        def count_compact_summary_input_tokens(self, request):
+            return RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED)
+
+        def summarize_compact(self, request):
+            return AssistantText("summary")
+
+    provider = PromptProvider("one")
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: provider,
+    )
+    conversation = ConversationRequest(build_system_prompt(), (UserMessage("hello"),))
+    summary = CompactSummaryRequest(build_compact_prompt(), "source", 20)
+
+    with manager.provider_for_turn() as runtime:
+        assessment = runtime.assess_context(conversation)
+        assert assessment.fit_report.decision == ContextFitDecision.FITS
+        assert runtime.assess_summary_request(summary).decision == ContextFitDecision.FITS
+        assert runtime.summarize(summary) == AssistantText("summary")
+        assert runtime.respond(conversation) == AssistantText("one: hello")
+        with pytest.raises(RuntimeProviderStateError, match="active operation"):
+            manager.use_profile("two")
+
+    assert manager.use_profile("two").status.profile == "two"
+
+
 def test_context_transition_lease_is_pinned_read_only_and_releases_after_base_exception(
     tmp_path,
 ) -> None:

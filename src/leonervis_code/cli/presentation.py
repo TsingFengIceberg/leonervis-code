@@ -70,6 +70,7 @@ class EffectiveContextInspectionView(Protocol):
     summary_present: bool
     retained_turn_count: int
     latest_checkpoint_sequence: int | None
+    latest_checkpoint_trigger: object | None
     fit_report: ContextFitReport | None
     fit_decision: ContextFitDecision
     remaining_capacity: int | None
@@ -222,6 +223,10 @@ def render_context_inspection(
         )
         if inspection.latest_checkpoint_sequence is not None:
             lines.append(f"Checkpoint sequence: {inspection.latest_checkpoint_sequence}")
+        if inspection.latest_checkpoint_trigger is not None:
+            lines.append(
+                f"Checkpoint trigger: {inspection.latest_checkpoint_trigger.value.replace('_', ' ')}"
+            )
     diagnostic = None
     if report is None:
         lines.extend(
@@ -331,6 +336,43 @@ def render_resume_rejection(report: ContextFitReport, *, startup: bool = False) 
         else "Current Session, latest pointer, target transcript, and runtime are unchanged."
     )
     return f"Session resume rejected: {detail}. {state}"
+
+
+def render_prompt_event(event: object) -> tuple[str, MessageKind]:
+    """Render one safe automatic-compaction lifecycle event."""
+    name = type(event).__name__
+    trigger = event.trigger.value.replace("_", " ")
+    if name == "AutoCompactionStarted":
+        threshold = (
+            f" at the {event.high_water_percent}% high-water mark"
+            if event.high_water_percent is not None
+            else " after known context overflow"
+        )
+        return (
+            f"Automatic compact started{threshold}: input={event.input_tokens} "
+            f"({event.input_method}) + reserve={event.requested_output_tokens}, "
+            f"window={event.context_window_tokens}; trigger={trigger}.",
+            "info",
+        )
+    if name == "AutoCompactionCommitted":
+        result = event.result
+        return (
+            f"Automatic compact committed ({trigger}): summarized "
+            f"{result.summarized_turn_count} complete turns, retained "
+            f"{result.retained_turn_count}; input {result.before_input_tokens} -> "
+            f"{result.after_input_tokens} ({result.input_method}); checkpoint "
+            f"{result.checkpoint_sequence}. Full transcript and /history were preserved.",
+            "success",
+        )
+    continuation = (
+        "the original prompt will continue"
+        if event.prompt_continues
+        else ("the original prompt will not be sent")
+    )
+    return (
+        f"Automatic compact was not applied ({trigger}): {event.reason}; {continuation}.",
+        "warning" if event.prompt_continues else "error",
+    )
 
 
 def render_compact_result(result: object) -> str:

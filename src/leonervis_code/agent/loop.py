@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
@@ -39,6 +40,26 @@ SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 
 class ToolLoopLimitError(RuntimeError):
     """Raised when a provider does not finish after its tool-call budget is exhausted."""
+
+
+@dataclass(frozen=True)
+class PreparedAgentTurn:
+    """One pending user item pinned to one committed Effective Context."""
+
+    user: UserMessage
+    context: EffectiveContextSnapshot
+    pending_items: tuple[ConversationItem, ...]
+
+    def __post_init__(self) -> None:
+        if self.pending_items != (self.user,):
+            raise ValueError("prepared turn must contain exactly its pending user message")
+
+    @property
+    def initial_request(self) -> ConversationRequest:
+        return self.context.to_conversation_request(pending_items=self.pending_items)
+
+    def rebase(self, context: EffectiveContextSnapshot) -> PreparedAgentTurn:
+        return replace(self, context=context)
 
 
 class AgentLoop:
@@ -132,19 +153,37 @@ class AgentLoop:
         """Retain the committed-count compatibility seam through effective context."""
         return self.effective_context_snapshot().to_conversation_request()
 
+    def prepare_turn(self, prompt: str) -> PreparedAgentTurn:
+        """Freeze one pending user message without mutating conversation state."""
+        user = UserMessage(text=prompt)
+        return PreparedAgentTurn(
+            user=user,
+            context=self.effective_context_snapshot(),
+            pending_items=(user,),
+        )
+
     def run(
         self,
         prompt: str,
         *,
         provider: ConversationProvider | None = None,
     ) -> str:
-        """Run one bounded tool loop with one provider pinned for the full turn."""
+        """Prepare then run one bounded tool loop for compatibility callers."""
+        return self.run_prepared(self.prepare_turn(prompt), provider=provider)
+
+    def run_prepared(
+        self,
+        prepared: PreparedAgentTurn,
+        *,
+        provider: ConversationProvider | None = None,
+    ) -> str:
+        """Run one prebuilt pending turn against its pinned committed context."""
         turn_provider = provider or self._provider
         if turn_provider is None:
             raise RuntimeError("conversation provider is required for this turn")
-        user = UserMessage(text=prompt)
-        context = self.effective_context_snapshot()
-        pending: tuple[ConversationItem, ...] = (user,)
+        user = prepared.user
+        context = prepared.context
+        pending = prepared.pending_items
         tool_calls = 0
 
         while True:

@@ -131,41 +131,18 @@ class CompactionRuntimeSnapshot:
     status: RuntimeStatus
 
     def assess_summary_request(self, request: CompactSummaryRequest) -> ContextFitReport:
-        counter = getattr(self.provider, "count_compact_summary_input_tokens", None)
-        input_count = RequestTokenCount.unknown("provider does not expose compact input counting")
-        preliminary = evaluate_context_fit(
-            target=self.capability.target,
-            input_count=input_count,
-            requested_output_tokens=request.max_output_tokens,
-            context_window_limit=self.capability.context_window_tokens,
-            model_output_limit=self.capability.model_max_output_tokens,
-        )
-        if preliminary.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
-            return preliminary
-        if self.capability.context_window_tokens is not None and callable(counter):
-            try:
-                input_count = counter(request)
-            except Exception:
-                input_count = RequestTokenCount.unknown(
-                    "provider compact input counting failed safely"
-                )
-        return evaluate_context_fit(
-            target=self.capability.target,
-            input_count=input_count,
-            requested_output_tokens=request.max_output_tokens,
-            context_window_limit=self.capability.context_window_tokens,
-            model_output_limit=self.capability.model_max_output_tokens,
+        return _assess_summary_request(
+            provider=self.provider,
+            capability=self.capability,
+            request=request,
         )
 
     def summarize(self, request: CompactSummaryRequest):
-        report = self.assess_summary_request(request)
-        raise_for_context_fit(report)
-        operation = getattr(self.provider, "summarize_compact", None)
-        if not callable(operation):
-            raise CompactionUnavailableError(
-                "current provider does not support controlled compaction"
-            )
-        return operation(request)
+        return _summarize_compact(
+            provider=self.provider,
+            capability=self.capability,
+            request=request,
+        )
 
     def assess_context(self, request: ConversationRequest) -> ContextFitReport:
         return assess_context_fit(
@@ -205,12 +182,57 @@ class ContextTransitionRuntimeSnapshot:
 
 @dataclass(frozen=True)
 class TurnRuntimeSnapshot:
-    """One immutable provider target pinned for a complete conversation turn."""
+    """One immutable provider target pinned for pre-turn maintenance and a full turn."""
 
     provider: ConversationProvider
     route: RuntimeProviderRoute | None
     capability: ModelContextCapability
     status: RuntimeStatus
+
+    def assess_context(self, request: ConversationRequest) -> CurrentTargetContextAssessment:
+        if self.route is None:
+            return CurrentTargetContextAssessment(
+                self.status,
+                None,
+                "provider input assessment is unavailable for fake runtime",
+            )
+        return CurrentTargetContextAssessment(
+            self.status,
+            assess_context_fit(
+                provider=self.provider,
+                route=self.route,
+                capability=self.capability,
+                request=request,
+            ),
+        )
+
+    def assess_summary_request(self, request: CompactSummaryRequest) -> ContextFitReport:
+        if self.route is None:
+            return evaluate_context_fit(
+                target=None,
+                input_count=RequestTokenCount.unknown(
+                    "compact input assessment is unavailable for fake runtime"
+                ),
+                requested_output_tokens=request.max_output_tokens,
+                context_window_limit=None,
+                model_output_limit=None,
+            )
+        return _assess_summary_request(
+            provider=self.provider,
+            capability=self.capability,
+            request=request,
+        )
+
+    def summarize(self, request: CompactSummaryRequest):
+        if self.route is None:
+            raise CompactionUnavailableError(
+                "controlled compaction requires a configured real provider"
+            )
+        return _summarize_compact(
+            provider=self.provider,
+            capability=self.capability,
+            request=request,
+        )
 
     def respond(self, request: ConversationRequest) -> ProviderResponse:
         if self.route is None:
@@ -230,6 +252,55 @@ class _Candidate:
     route: RuntimeProviderRoute
     provider: ConversationProvider
     capability: ModelContextCapability
+
+
+def _assess_summary_request(
+    *,
+    provider: ConversationProvider,
+    capability: ModelContextCapability,
+    request: CompactSummaryRequest,
+) -> ContextFitReport:
+    counter = getattr(provider, "count_compact_summary_input_tokens", None)
+    input_count = RequestTokenCount.unknown("provider does not expose compact input counting")
+    preliminary = evaluate_context_fit(
+        target=capability.target,
+        input_count=input_count,
+        requested_output_tokens=request.max_output_tokens,
+        context_window_limit=capability.context_window_tokens,
+        model_output_limit=capability.model_max_output_tokens,
+    )
+    if preliminary.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+        return preliminary
+    if capability.context_window_tokens is not None and callable(counter):
+        try:
+            input_count = counter(request)
+        except Exception:
+            input_count = RequestTokenCount.unknown("provider compact input counting failed safely")
+    return evaluate_context_fit(
+        target=capability.target,
+        input_count=input_count,
+        requested_output_tokens=request.max_output_tokens,
+        context_window_limit=capability.context_window_tokens,
+        model_output_limit=capability.model_max_output_tokens,
+    )
+
+
+def _summarize_compact(
+    *,
+    provider: ConversationProvider,
+    capability: ModelContextCapability,
+    request: CompactSummaryRequest,
+):
+    report = _assess_summary_request(
+        provider=provider,
+        capability=capability,
+        request=request,
+    )
+    raise_for_context_fit(report)
+    operation = getattr(provider, "summarize_compact", None)
+    if not callable(operation):
+        raise CompactionUnavailableError("current provider does not support controlled compaction")
+    return operation(request)
 
 
 def assess_context_fit(

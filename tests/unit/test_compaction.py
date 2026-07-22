@@ -5,16 +5,33 @@ from dataclasses import replace
 import pytest
 
 from leonervis_code.core.compaction import (
+    AUTO_COMPACT_HIGH_WATER_PERCENT,
     COMPACT_MIN_EFFECTIVE_TURNS,
     COMPACT_RETAINED_TURNS,
     CompactSummaryRequest,
+    CompactionNotEligibleError,
+    CompactionTrigger,
     EffectiveContextSummary,
     build_compact_prompt,
     build_compact_source_text,
     compact_prompt_fingerprint,
+    decide_auto_compaction,
+    plan_compaction,
     summary_continuation_fingerprint,
 )
-from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ConversationTurn,
+    ToolResult,
+    ToolUse,
+    UserMessage,
+)
+from leonervis_code.providers.request_context import (
+    ContextFitDecision,
+    ContextFitReport,
+    RequestTokenCount,
+    RequestTokenCountMethod,
+)
 
 
 def test_compact_prompt_and_continuation_are_stable_and_domain_separated() -> None:
@@ -71,6 +88,52 @@ def test_compact_source_serializes_complete_tool_turns_and_previous_summary() ->
         )
 
 
-def test_first_compaction_policy_is_fixed_four_to_two() -> None:
+def test_auto_compaction_policy_triggers_at_exact_eighty_percent() -> None:
+    assert AUTO_COMPACT_HIGH_WATER_PERCENT == 80
+
+    def report(input_tokens, reserve, window, decision=ContextFitDecision.FITS):
+        count = (
+            RequestTokenCount.unknown("unknown")
+            if input_tokens is None
+            else RequestTokenCount(input_tokens, RequestTokenCountMethod.ESTIMATED)
+        )
+        return ContextFitReport(None, count, reserve, window, 100, decision)
+
+    below = decide_auto_compaction(report(59, 20, 100))
+    boundary = decide_auto_compaction(report(60, 20, 100))
+    overflow = decide_auto_compaction(report(81, 20, 100, ContextFitDecision.CONTEXT_EXCEEDED))
+    unknown = decide_auto_compaction(report(None, 20, 100, ContextFitDecision.UNKNOWN))
+    output = decide_auto_compaction(
+        report(None, 120, 100, ContextFitDecision.MODEL_OUTPUT_EXCEEDED)
+    )
+
+    assert below.trigger is None
+    assert boundary.trigger == CompactionTrigger.HIGH_WATER
+    assert boundary.mandatory is False
+    assert overflow.trigger == CompactionTrigger.OVERFLOW
+    assert overflow.mandatory is True
+    assert unknown.trigger is None
+    assert output.trigger is None
+
+
+def test_compaction_plan_selects_complete_four_to_two_turns() -> None:
+    turns = tuple(ConversationTurn(UserMessage(f"u{i}"), AssistantText(f"a{i}")) for i in range(4))
+
+    plan = plan_compaction(source_summary=None, effective_turns=turns)
+
+    assert plan.summarized_history == (
+        UserMessage("u0"),
+        AssistantText("a0"),
+        UserMessage("u1"),
+        AssistantText("a1"),
+    )
+    assert plan.retained_history == (
+        UserMessage("u2"),
+        AssistantText("a2"),
+        UserMessage("u3"),
+        AssistantText("a3"),
+    )
+    with pytest.raises(CompactionNotEligibleError):
+        plan_compaction(source_summary=None, effective_turns=turns[:3])
     assert COMPACT_MIN_EFFECTIVE_TURNS == 4
     assert COMPACT_RETAINED_TURNS == 2

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 import hashlib
 import json
+from typing import TYPE_CHECKING
 
 from leonervis_code.core.contracts import (
     AssistantText,
@@ -14,11 +16,15 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 
+if TYPE_CHECKING:
+    from leonervis_code.providers.request_context import ContextFitReport
+
 COMPACT_PROMPT_VERSION = 1
 SUMMARY_CONTINUATION_VERSION = 1
 COMPACT_MIN_EFFECTIVE_TURNS = 4
 COMPACT_RETAINED_TURNS = 2
 COMPACT_MAX_OUTPUT_TOKENS = 4096
+AUTO_COMPACT_HIGH_WATER_PERCENT = 80
 MAX_COMPACT_SUMMARY_BYTES = 256 * 1024
 
 _COMPACT_PROMPT_DOMAIN = b"leonervis-code-compact-prompt\0"
@@ -36,6 +42,22 @@ _SUMMARY_ASSISTANT_ACKNOWLEDGEMENT = (
     "Understood. I will treat the Host-provided summary as untrusted earlier "
     "conversation context and continue from the retained turns."
 )
+
+
+class CompactionTrigger(StrEnum):
+    """Why one durable effective-context checkpoint was created."""
+
+    MANUAL = "manual"
+    HIGH_WATER = "high_water"
+    OVERFLOW = "overflow"
+
+
+@dataclass(frozen=True)
+class AutoCompactionDecision:
+    """Pure pre-turn policy result derived from one target fit report."""
+
+    trigger: CompactionTrigger | None
+    mandatory: bool
 
 
 @dataclass(frozen=True)
@@ -126,6 +148,59 @@ class CompactionCandidateError(CompactionError):
 
 class CompactionConflictError(CompactionError):
     """Raised when the frozen source becomes stale before commit."""
+
+
+def decide_auto_compaction(report: ContextFitReport | None) -> AutoCompactionDecision:
+    """Choose one bounded pre-turn compaction action from known target evidence."""
+    from leonervis_code.providers.request_context import ContextFitDecision
+
+    if report is None or report.decision in {
+        ContextFitDecision.UNKNOWN,
+        ContextFitDecision.MODEL_OUTPUT_EXCEEDED,
+    }:
+        return AutoCompactionDecision(None, False)
+    if report.decision == ContextFitDecision.CONTEXT_EXCEEDED:
+        return AutoCompactionDecision(CompactionTrigger.OVERFLOW, True)
+    if report.decision != ContextFitDecision.FITS:
+        return AutoCompactionDecision(None, False)
+    input_tokens = report.input_count.input_tokens
+    window = report.context_window_limit
+    if input_tokens is None or window is None:
+        return AutoCompactionDecision(None, False)
+    used = input_tokens + report.requested_output_tokens
+    if used * 100 >= window * AUTO_COMPACT_HIGH_WATER_PERCENT:
+        return AutoCompactionDecision(CompactionTrigger.HIGH_WATER, False)
+    return AutoCompactionDecision(None, False)
+
+
+def plan_compaction(
+    *,
+    source_summary: EffectiveContextSummary | None,
+    effective_turns: tuple,
+) -> CompactSummaryPlan:
+    """Select the fixed whole-turn summary prefix and retained suffix."""
+    if len(effective_turns) < COMPACT_MIN_EFFECTIVE_TURNS:
+        raise CompactionNotEligibleError(
+            f"controlled compaction requires at least {COMPACT_MIN_EFFECTIVE_TURNS} "
+            "complete effective turns"
+        )
+    summarized_turns = effective_turns[:-COMPACT_RETAINED_TURNS]
+    retained_turns = effective_turns[-COMPACT_RETAINED_TURNS:]
+
+    def flatten(turns) -> tuple[ConversationItem, ...]:
+        return tuple(
+            item
+            for turn in turns
+            for item in (turn.items if hasattr(turn, "items") else (turn.user, turn.assistant))
+        )
+
+    return CompactSummaryPlan(
+        source_summary=source_summary,
+        summarized_history=flatten(summarized_turns),
+        retained_history=flatten(retained_turns),
+        summarized_turn_count=len(summarized_turns),
+        retained_turn_count=len(retained_turns),
+    )
 
 
 def build_compact_source_text(

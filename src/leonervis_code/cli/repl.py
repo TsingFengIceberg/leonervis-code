@@ -11,6 +11,7 @@ from leonervis_code.cli.brand import render_banner
 from leonervis_code.cli.presentation import (
     render_message,
     render_prompt,
+    render_prompt_event,
     render_runtime_status,
     render_session_info,
 )
@@ -126,7 +127,13 @@ def run_repl(
         try:
             prompt_method = getattr(session, "prompt", None)
             if callable(prompt_method):
-                response = prompt_method(prompt)
+
+                def prompt_event_sink(event) -> None:
+                    message, kind = render_prompt_event(event)
+                    stdout.write(f"{render_message(message, kind, color=color)}\n")
+                    stdout.flush()
+
+                response = prompt_method(prompt, event_sink=prompt_event_sink)
             else:
                 response = getattr(session, "run")(prompt)
             stdout.write(f"{response}\n")

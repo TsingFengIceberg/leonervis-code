@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from leonervis_code.agent.loop import AgentLoop, ToolLoopLimitError
+from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
     AssistantText,
     CommittedTurn,
@@ -44,7 +45,26 @@ def test_loop_commits_structured_tool_causality_after_final_text(tmp_path) -> No
     assert provider.received_requests[-1].history == loop.history[:-1]
 
 
-def test_loop_returns_unknown_tools_as_model_visible_errors(tmp_path) -> None:
+def test_prepared_turn_is_read_only_and_rebases_the_same_pending_user(tmp_path) -> None:
+    provider = ScriptedFakeProvider([AssistantText("done")])
+    loop = AgentLoop(provider, ReadFileTool(tmp_path))
+
+    prepared = loop.prepare_turn("pending")
+
+    assert loop.history == ()
+    assert prepared.initial_request.history == (prepared.user,)
+    summary = EffectiveContextSummary("earlier")
+    loop.install_compaction(summary=summary, retained_history=())
+    rebased = prepared.rebase(loop.effective_context_snapshot())
+    assert rebased.user is prepared.user
+    assert rebased.pending_items is prepared.pending_items
+    assert rebased.initial_request.history == (prepared.user,)
+    assert rebased.initial_request.effective_summary == summary
+
+    assert loop.run_prepared(rebased) == "done"
+    assert provider.received_requests[0].history == (prepared.user,)
+    assert loop.history == (prepared.user, AssistantText("done"))
+
     provider = ScriptedFakeProvider(
         [
             ToolUse(tool_use_id="unknown-1", name="search", path="README.md"),

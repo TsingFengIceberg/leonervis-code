@@ -16,7 +16,14 @@ from leonervis_code.providers.request_context import (
     RequestTokenCount,
     RequestTokenCountMethod,
 )
-from leonervis_code.session import ProjectSession, ResumeEffect, SessionResumeContextError
+from leonervis_code.session import (
+    AutoCompactionCommitted,
+    AutoCompactionNotApplied,
+    AutoCompactionStarted,
+    ProjectSession,
+    ResumeEffect,
+    SessionResumeContextError,
+)
 from leonervis_code.session_store import SessionStore, SessionStoreError
 from leonervis_code.system_prompt import build_system_prompt
 
@@ -462,6 +469,221 @@ def test_unknown_target_compatibility_applies_resume_without_generation(tmp_path
     assert provider.requests == []
     assert resumed.history[-1] == AssistantText("Fake response: hello")
     resumed.close()
+
+
+def test_pre_turn_high_water_auto_compacts_once_and_preserves_pending_prompt(
+    tmp_path: Path,
+) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="auto",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="auto-model",
+            base_url="http://127.0.0.1:11434/v1",
+            max_output_tokens=20,
+            context_window_tokens=100,
+            model_max_output_tokens=100,
+        )
+    )
+
+    class AutoProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.summary_requests = []
+
+        def count_input_tokens(self, request):
+            if request.effective_summary is not None:
+                return RequestTokenCount(30, RequestTokenCountMethod.ESTIMATED)
+            if request.history and request.history[-1] == UserMessage("trigger"):
+                return RequestTokenCount(60, RequestTokenCountMethod.ESTIMATED)
+            return RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED)
+
+        def count_compact_summary_input_tokens(self, request):
+            return RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED)
+
+        def summarize_compact(self, request):
+            self.summary_requests.append(request)
+            assert "trigger" not in request.source_text
+            return AssistantText("summary")
+
+    provider = AutoProvider("runtime")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="auto",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    for index in range(4):
+        session.prompt(f"turn-{index}")
+    events = []
+
+    response = session.prompt("trigger", event_sink=events.append)
+
+    assert response == "runtime: trigger"
+    assert len(provider.summary_requests) == 1
+    assert [type(event) for event in events] == [
+        AutoCompactionStarted,
+        AutoCompactionCommitted,
+    ]
+    assert events[-1].result.trigger.value == "high_water"
+    assert session._writer.state.records[-2].record_type == "context_compacted"
+    assert session._writer.state.records[-2].trigger.value == "high_water"
+    assert session._writer.state.records[-2].high_water_percent == 80
+    assert session._writer.state.records[-1].record_type == "turn_committed"
+    assert provider.requests[-1].history[-1] == UserMessage("trigger")
+    assert provider.requests[-1].history.count(UserMessage("trigger")) == 1
+    assert session.history[-2:] == (
+        UserMessage("trigger"),
+        AssistantText("runtime: trigger"),
+    )
+    session.close()
+
+
+def test_known_overflow_auto_compacts_before_sending_prompt(tmp_path: Path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="auto",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="auto-model",
+            base_url="http://127.0.0.1:11434/v1",
+            max_output_tokens=20,
+            context_window_tokens=100,
+            model_max_output_tokens=100,
+        )
+    )
+
+    class OverflowProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            if request.effective_summary is not None:
+                return RequestTokenCount(30, RequestTokenCountMethod.ESTIMATED)
+            if request.history and request.history[-1] == UserMessage("overflow"):
+                return RequestTokenCount(90, RequestTokenCountMethod.ESTIMATED)
+            return RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED)
+
+        def count_compact_summary_input_tokens(self, request):
+            return RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED)
+
+    provider = OverflowProvider("runtime")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="auto",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    for index in range(4):
+        session.prompt(f"turn-{index}")
+    events = []
+
+    assert session.prompt("overflow", event_sink=events.append) == "runtime: overflow"
+
+    assert events[0].trigger.value == "overflow"
+    assert events[1].result.trigger.value == "overflow"
+    assert session._writer.state.records[-2].trigger.value == "overflow"
+    assert provider.requests[-1].history[-1] == UserMessage("overflow")
+    session.close()
+
+
+def test_known_overflow_without_compaction_eligibility_sends_no_generation(
+    tmp_path: Path,
+) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="auto",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="auto-model",
+            base_url="http://127.0.0.1:11434/v1",
+            max_output_tokens=20,
+            context_window_tokens=100,
+            model_max_output_tokens=100,
+        )
+    )
+
+    class OverflowProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            return RequestTokenCount(90, RequestTokenCountMethod.ESTIMATED)
+
+    provider = OverflowProvider("runtime")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="auto",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    events = []
+
+    with pytest.raises(Exception, match="context preflight rejected"):
+        session.prompt("overflow", event_sink=events.append)
+
+    assert provider.requests == []
+    assert isinstance(events[-1], AutoCompactionNotApplied)
+    assert events[-1].prompt_continues is False
+    assert session.history == ()
+    session.close()
+
+
+def test_proactive_auto_compact_failure_continues_known_fitting_turn(tmp_path: Path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="auto",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="auto-model",
+            base_url="http://127.0.0.1:11434/v1",
+            max_output_tokens=20,
+            context_window_tokens=100,
+            model_max_output_tokens=100,
+        )
+    )
+
+    class NonReducingProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            return RequestTokenCount(60, RequestTokenCountMethod.ESTIMATED)
+
+        def count_compact_summary_input_tokens(self, request):
+            return RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED)
+
+        def summarize_compact(self, request):
+            return AssistantText("summary")
+
+    provider = NonReducingProvider("runtime")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="auto",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    for index in range(4):
+        session.prompt(f"turn-{index}")
+    events = []
+
+    assert session.prompt("continue", event_sink=events.append) == "runtime: continue"
+
+    assert isinstance(events[0], AutoCompactionStarted)
+    assert isinstance(events[1], AutoCompactionNotApplied)
+    assert events[1].prompt_continues is True
+    assert all(
+        record.record_type != "context_compacted" for record in session._writer.state.records
+    )
+    session.close()
 
 
 def test_project_session_durable_append_failure_does_not_commit_memory(tmp_path: Path) -> None:

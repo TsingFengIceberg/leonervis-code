@@ -279,7 +279,7 @@ def test_repl_provider_commands_switch_without_entering_model_history(tmp_path) 
             switched = RuntimeStatus(**{**status.__dict__, "selected_model": model})
             return RuntimeSwitchResult(switched, None)
 
-        def prompt(self, prompt):
+        def prompt(self, prompt, *, event_sink=None):
             self.prompts.append(prompt)
             return f"reply: {prompt}"
 
@@ -360,7 +360,7 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
             self.latest = self.current
             return self.session_info()
 
-        def prompt(self, prompt):
+        def prompt(self, prompt, *, event_sink=None):
             self.prompts.append(prompt)
             return f"reply: {prompt}"
 

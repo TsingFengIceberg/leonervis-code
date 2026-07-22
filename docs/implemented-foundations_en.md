@@ -12,6 +12,7 @@
 - [Foundation 3B: local multi-provider real-model path](#foundation-3b-local-multi-provider-real-model-path)
 - [Foundation 2B: offline adapter-owned compatibility policy](#foundation-2b-offline-adapter-owned-compatibility-policy)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
+- [Foundation 3H: Pre-turn Automatic Context Compaction](#foundation-3h-pre-turn-automatic-context-compaction)
 - [Foundation 3G: Target-aware Resume Prepare/Commit](#foundation-3g-target-aware-resume-preparecommit)
 - [Foundation 3F-2: Controlled Compact Transaction](#foundation-3f-2-controlled-compact-transaction)
 - [Provider-neutral Effective Context Snapshot and `/context`](#provider-neutral-effective-context-snapshot-and-context)
@@ -35,7 +36,7 @@ The canonical model system prompt is now version 2. It still says the ordinary A
 
 It explicitly does not claim write/edit, glob/grep, Bash/tests, network, approval, compaction, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard path, encoding, and size constraints.
 
-The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL contain only real user/assistant/tool causal chains. A new turn after resume uses the current binary's canonical prompt; a schema-v2 compact checkpoint stores compact-prompt and summary-framing provenance without inserting the normal system prompt into conversation history.
+The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL contain only real user/assistant/tool causal chains. A new turn after resume uses the current binary's canonical prompt; schema-v2/v3 compact checkpoints store only compact-prompt, summary-framing, and trigger provenance without inserting the normal system prompt into conversation history.
 
 The **model system prompt** and the human-facing `leonervis[session8|runtime]>` **REPL prompt** are different interfaces: the former is a model-visible contract, while the latter is only a terminal status cue.
 
@@ -273,6 +274,20 @@ Foundation 1B originally proved only process-local atomic history. Foundation 3D
 
 See [0001: single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md), [0002: deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md), [0003: in-memory text history](./decisions/0003-foundation-1a-in-memory-text-history.md), and [0004: bounded read_file tool loop](./decisions/0004-foundation-1b-bounded-read-file-tool-loop.md) for the detailed decisions.
 
+## Foundation 3H: Pre-turn Automatic Context Compaction
+
+Ordinary one-shot and REPL prompts now assess the exact initial request before sending a new turn: current Effective Context plus the pending user message and requested output reserve. A known `FITS` at `(input + reserve) * 100 >= window * 80` gets at most one proactive `high_water` compaction attempt; known `CONTEXT_EXCEEDED` gets at most one mandatory `overflow` attempt. `UNKNOWN` is not guessed and generates no summary, fake mode remains request-free and quiet, and `MODEL_OUTPUT_EXCEEDED` is rejected directly because compaction cannot repair the reserve.
+
+`PreparedAgentTurn` pins exactly one pending `UserMessage` and the committed context snapshot before any history mutation. The pending item participates in source and candidate assessment so the decision covers the request that would really be sent; it never enters the summary source, checkpoint, context identity, or durable history. After a successful checkpoint the prepared turn rebases only its committed snapshot, sends the same pending tuple once, and persists it only if the complete ordinary turn succeeds.
+
+Automatic and manual `/compact` share the 3F-2 prepare → runtime work → revalidate/commit/install transaction: at least four complete effective turns, retain the latest two, summarize earlier complete turns, require comparable known counts and a known-`FITS` candidate that strictly reduces pending-inclusive input, and install memory only after checkpoint append and fsync. One `provider_for_turn()` lease pins provider, route, capability, status, and generation across initial assessment, summary, candidate assessment, and the complete tool loop while blocking switches, another turn, manual compaction, resume transition, and close.
+
+Each prompt gets only one automatic attempt: no recursive compaction and no retry after a tool continuation or provider error. If a proactive failure remains a safe precommit failure and the original request is a known `FITS`, a warning is emitted and the original turn continues. A mandatory failure preserves the original overflow rejection and sends no ordinary generation. A stale source or uncertain checkpoint durability cannot continue the old request; if the checkpoint committed durably before later generation failed, the checkpoint remains while the pending turn does not commit.
+
+New `context_compacted` records use closed schema v3 with `trigger = manual | high_water | overflow`; only `high_water` carries the fixed `high_water_percent = 80`. Schema-v2 checkpoints continue to replay as legacy manual provenance. Trigger data is audit-only and appears in `/context`; it does not enter `ctx-v2` identity, and token counts, fit reports, and pending prompts are not persisted. Typed prompt events contain only safe count evidence, context IDs, turn counts, checkpoint sequence, and reason codes. One-shot events go to stderr so stdout remains the model response alone.
+
+The canonical model system prompt was reviewed: automatic timing remains entirely Host-controlled, the model still cannot request compaction, and the existing untrusted Host-summary framing already covers post-compaction input. Version 2, exact text, and fingerprint therefore remain unchanged. See [0019: Pre-turn Automatic Context Compaction](./decisions/0019-pre-turn-automatic-context-compaction.md).
+
 ## Foundation 3G: Target-aware Resume Prepare/Commit
 
 Startup `--resume` and REPL `/resume` now prepare the target, build its candidate Effective Context, and screen it against the current runtime before durable commit. Known context/model-output overflow is rejected before any resume audit, tail recovery, or latest-pointer write. `UNKNOWN` fails open with a warning; fake mode explicitly reports screening unavailable and sends no provider request. Resume still restores Session state only and never reconstructs the runtime from historical bindings.
@@ -287,13 +302,13 @@ The Manager's context-transition lease pins the current provider, route, capabil
 
 ## Foundation 3F-2: Controlled Compact Transaction
 
-REPL `/compact` can now shorten provider-visible effective context manually while preserving the complete append-only transcript and `/history`. The first fixed policy requires at least four complete effective turns, retains the latest two verbatim, and uses the current real provider once to summarize the earlier projection. Fake runtime is unavailable, compaction is never automatic, and the original user turn is not retried.
+REPL `/compact` can shorten provider-visible effective context manually while preserving the complete append-only transcript and `/history`. Foundation 3F-2's fixed policy requires at least four complete effective turns, retains the latest two verbatim, and uses the current real provider once to summarize the earlier projection. Fake runtime is unavailable; that original slice did not trigger automatically and did not retry the original user turn. Foundation 3H later invokes the same transaction before a new turn from known evidence, while still providing no failed-turn retry.
 
 Compact generation uses a separately versioned prompt and a dedicated no-tools request. The Anthropic native body omits `tools`; OpenAI-compatible bodies omit both `tools` and `parallel_tool_calls`; counting and generation share the same input projection. Only normally completed nonempty text is accepted. Tool calls, refusal, truncation, and malformed responses fail closed.
 
 A summary is not a `ConversationItem` or real turn. Effective state is `Host summary + retained complete-turn suffix`, and adapters project the summary through explicit untrusted continuation framing. The normal Agent canonical system prompt is version 2 and explains that a Host summary is earlier conversation context, not a system instruction or new user request. Contexts without summaries retain the original `ctx-v1` identity format; summary-bearing contexts use `ctx-v2`.
 
-Session migration does not rewrite old lines: existing records remain schema v1, while only typed `context_compacted` uses schema v2. Mixed replay reconstructs full history from every `TurnCommitted`, summary/retained state from the latest checkpoint, and appends later turns to both full and effective state. Checkpoint append reuses candidate replay validation, O_APPEND, flush/fsync, and installs in-memory effective state only afterward.
+Session migration does not rewrite old lines: ordinary records remain schema v1, legacy Foundation 3F-2 `context_compacted` records use schema v2, and current manual and automatic checkpoints use schema v3. V3 adds trigger provenance and an optional high-water percentage. Mixed replay accepts v2/v3, interprets v2 as manual, reconstructs full history from every `TurnCommitted`, restores summary/retained state from the latest checkpoint, and appends later turns to both full and effective state. Checkpoint append reuses candidate replay validation, O_APPEND, flush/fsync, and installs in-memory effective state only afterward.
 
 The transaction freezes writer/session/sequence, loop, full/effective state, and source context ID before generation, then rechecks them after generation and candidate assessment. Source and candidate need comparable known counts; the candidate must be a known `FITS` and strictly reduce input tokens. Precommit, stale, and persistence failures do not write `TurnFailed` or change effective memory.
 
@@ -338,7 +353,7 @@ The decision keeps three concepts distinct: context window, model maximum output
 
 For the official Anthropic endpoint, the official SDK's `messages.count_tokens` counts the same model/system/messages/tools projection shared with create. A failure safely degrades to a compact UTF-8 JSON `ceil(bytes / 4)` estimate. OpenAI-compatible Chat Completions always uses the matching local estimate rather than calling a count endpoint belonging to a different protocol.
 
-Provider-profile schema v4 adds a `model_max_output_tokens` override, while private discovery-cache schema v2 can store positive context and model-output limits independently. `route`, `/status`, and `/provider current` show both limits and the requested reserve, but no successful last-request token meter is persisted and no automatic compaction occurs.
+Provider-profile schema v4 adds a `model_max_output_tokens` override, while private discovery-cache schema v2 can store positive context and model-output limits independently. `route`, `/status`, and `/provider current` show both limits and the requested reserve, but no successful last-request token meter is persisted. Foundation 3H now consumes the fit report before a new turn to decide whether to compact; per-invocation preflight remains the final gate for every real request.
 
 See [0014: target-specific request counting and preflight](./decisions/0014-target-specific-request-counting-and-preflight.md). The canonical model system prompt was reviewed: this slice adds Host-side send control without changing model-visible capabilities, so prompt version 1 and its fingerprint remain unchanged.
 
@@ -395,3 +410,4 @@ This slice establishes capacity facts only. It does not count current request to
 16. [0016: provider-neutral Effective Context Snapshot](./decisions/0016-provider-neutral-effective-context-snapshot.md)
 17. [0017: Controlled Compact Transaction](./decisions/0017-controlled-compact-transaction.md)
 18. [0018: Target-aware Resume Prepare/Commit](./decisions/0018-target-aware-resume-prepare-commit.md)
+19. [0019: Pre-turn Automatic Context Compaction](./decisions/0019-pre-turn-automatic-context-compaction.md)

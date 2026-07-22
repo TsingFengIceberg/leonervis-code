@@ -22,6 +22,7 @@ from leonervis_code.core.compaction import (
     COMPACT_PROMPT_VERSION,
     COMPACT_RETAINED_TURNS,
     SUMMARY_CONTINUATION_VERSION,
+    CompactionTrigger,
     EffectiveContextSummary,
     build_compact_prompt,
     summary_continuation_fingerprint,
@@ -42,7 +43,8 @@ from leonervis_code.core.effective_context import (
 )
 
 SCHEMA_VERSION = 1
-CONTEXT_COMPACTED_SCHEMA_VERSION = 2
+CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
+CONTEXT_COMPACTED_SCHEMA_VERSION = 3
 WORKSPACE_FINGERPRINT_VERSION = "v1"
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_RECORDS = 100_000
@@ -230,6 +232,8 @@ class ContextCompacted:
     continuation_version: int
     continuation_fingerprint: str
     effective_context_representation_version: int
+    trigger: CompactionTrigger = CompactionTrigger.MANUAL
+    high_water_percent: int | None = None
     record_type: str = "context_compacted"
     schema_version: int = CONTEXT_COMPACTED_SCHEMA_VERSION
 
@@ -515,6 +519,11 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             continuation_fingerprint=record.continuation_fingerprint,
             effective_context_representation_version=record.effective_context_representation_version,
         )
+        if record.schema_version == CONTEXT_COMPACTED_SCHEMA_VERSION:
+            common.update(
+                trigger=record.trigger.value,
+                high_water_percent=record.high_water_percent,
+            )
     elif isinstance(record, SessionClosed):
         _validate_timestamp(record.occurred_at, "session_closed occurred_at")
         _required_text(record.reason, "session_closed reason", allow_empty=True)
@@ -527,10 +536,14 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
 def _record_from_dict(value: dict[str, object]) -> SessionRecord:
     record_type = _required_field_text(value, "record_type", "session record")
     version = value.get("schema_version")
-    allowed_version = (
-        CONTEXT_COMPACTED_SCHEMA_VERSION if record_type == "context_compacted" else SCHEMA_VERSION
-    )
-    if type(version) is not int or version != allowed_version:
+    if record_type == "context_compacted":
+        allowed_versions = {
+            CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION,
+            CONTEXT_COMPACTED_SCHEMA_VERSION,
+        }
+    else:
+        allowed_versions = {SCHEMA_VERSION}
+    if type(version) is not int or version not in allowed_versions:
         raise SessionRecordError("unsupported session record schema version")
     sequence = value.get("sequence")
     if type(sequence) is not int or sequence < 0:
@@ -641,12 +654,23 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             "continuation_fingerprint",
             "effective_context_representation_version",
         }
+        if version == CONTEXT_COMPACTED_SCHEMA_VERSION:
+            fields |= {"trigger", "high_water_percent"}
         _closed_fields(value, fields, record_type)
         previous = value.get("previous_checkpoint_sequence")
         if previous is not None and (type(previous) is not int or previous < 0):
             raise SessionRecordError(
                 "context_compacted previous_checkpoint_sequence must be non-negative or null"
             )
+        if version == CONTEXT_COMPACTED_SCHEMA_VERSION:
+            try:
+                trigger = CompactionTrigger(_required_field_text(value, "trigger", record_type))
+            except ValueError:
+                raise SessionRecordError("context_compacted trigger is invalid") from None
+            high_water_percent = _nullable_field_int(value, "high_water_percent", record_type)
+        else:
+            trigger = CompactionTrigger.MANUAL
+            high_water_percent = None
         record = ContextCompacted(
             sequence=sequence,
             occurred_at=_required_field_text(value, "occurred_at", record_type),
@@ -677,6 +701,9 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             effective_context_representation_version=_required_field_int(
                 value, "effective_context_representation_version", record_type
             ),
+            trigger=trigger,
+            high_water_percent=high_water_percent,
+            schema_version=version,
         )
         _validate_context_compacted_fields(record)
         return record
@@ -870,15 +897,35 @@ def _validate_turn(items: tuple[ConversationItem, ...], seen_tool_ids: set[str])
 
 
 def _validate_record_version(record: SessionRecord) -> None:
-    expected = (
-        CONTEXT_COMPACTED_SCHEMA_VERSION if isinstance(record, ContextCompacted) else SCHEMA_VERSION
-    )
-    if record.schema_version != expected:
+    if isinstance(record, ContextCompacted):
+        expected = {
+            CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION,
+            CONTEXT_COMPACTED_SCHEMA_VERSION,
+        }
+        if record.schema_version not in expected:
+            raise SessionRecordError("unsupported session record schema version")
+        return
+    if record.schema_version != SCHEMA_VERSION:
         raise SessionRecordError("unsupported session record schema version")
 
 
 def _validate_context_compacted_fields(record: ContextCompacted) -> None:
     _validate_record_version(record)
+    if record.schema_version == CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION:
+        if record.trigger != CompactionTrigger.MANUAL or record.high_water_percent is not None:
+            raise SessionRecordError(
+                "legacy context_compacted provenance must be manual without a threshold"
+            )
+    elif record.trigger == CompactionTrigger.HIGH_WATER:
+        if record.high_water_percent != 80:
+            raise SessionRecordError("high-water context_compacted threshold must be 80")
+    elif record.trigger in {CompactionTrigger.MANUAL, CompactionTrigger.OVERFLOW}:
+        if record.high_water_percent is not None:
+            raise SessionRecordError(
+                "manual and overflow context_compacted thresholds must be null"
+            )
+    else:
+        raise SessionRecordError("context_compacted trigger is invalid")
     _validate_timestamp(record.occurred_at, "context_compacted occurred_at")
     record.binding.__post_init__()
     _context_id(record.source_context_id, "context_compacted source_context_id")

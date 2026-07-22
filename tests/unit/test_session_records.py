@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.compaction import EffectiveContextSummary, build_compact_prompt
+from leonervis_code.core.compaction import (
+    CompactionTrigger,
+    EffectiveContextSummary,
+    build_compact_prompt,
+)
 from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
 from leonervis_code.session_records import (
     BindingSnapshot,
@@ -308,6 +312,7 @@ def test_mixed_v1_v2_checkpoint_replay_preserves_full_and_replaces_effective(
         continuation_version=summary.continuation_version,
         continuation_fingerprint=summary.continuation_fingerprint,
         effective_context_representation_version=2,
+        schema_version=2,
     )
 
     encoded_v1_prefix = b"".join(encode_record(record) for record in [header, *turns])
@@ -328,7 +333,65 @@ def test_mixed_v1_v2_checkpoint_replay_preserves_full_and_replaces_effective(
         decode_record(json.dumps(value).encode())
 
 
-def test_binding_rejects_credential_bearing_url_and_non_digest_fingerprint() -> None:
+def test_context_compacted_v3_persists_trigger_and_validates_combinations(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path.resolve()
+    binding = BindingSnapshot.fake()
+    header = SessionHeader(
+        0,
+        SESSION_ID,
+        str(workspace),
+        workspace_fingerprint(workspace),
+        NOW,
+        binding,
+    )
+    turns = [
+        TurnCommitted(
+            sequence=index,
+            committed_at=NOW,
+            binding=binding,
+            items=(UserMessage(f"u{index}"), AssistantText(f"a{index}")),
+        )
+        for index in range(1, 5)
+    ]
+    prompt = build_compact_prompt()
+    checkpoint = ContextCompacted(
+        sequence=5,
+        occurred_at=NOW,
+        binding=binding,
+        source_context_id="ctx-v1-" + "a" * 64,
+        result_context_id="ctx-v2-" + "b" * 64,
+        source_full_turn_count=4,
+        source_effective_turn_count=4,
+        retained_from_full_turn=2,
+        previous_checkpoint_sequence=None,
+        summary="summary",
+        compact_prompt_version=prompt.version,
+        compact_prompt_fingerprint=prompt.fingerprint,
+        continuation_version=EffectiveContextSummary("summary").continuation_version,
+        continuation_fingerprint=EffectiveContextSummary("summary").continuation_fingerprint,
+        effective_context_representation_version=2,
+        trigger=CompactionTrigger.HIGH_WATER,
+        high_water_percent=80,
+    )
+
+    decoded = decode_record(encode_record(checkpoint))
+    assert decoded == checkpoint
+    state = replay_records([header, *turns, decoded])
+    assert state.latest_checkpoint.trigger == CompactionTrigger.HIGH_WATER
+
+    with pytest.raises(SessionRecordError, match="threshold"):
+        encode_record(replace(checkpoint, high_water_percent=70))
+    with pytest.raises(SessionRecordError, match="threshold"):
+        encode_record(
+            replace(
+                checkpoint,
+                trigger=CompactionTrigger.OVERFLOW,
+                high_water_percent=80,
+            )
+        )
+
     binding = BindingSnapshot.fake()
     with pytest.raises(SessionRecordError, match="credential-free"):
         replace(binding, base_url="https://user:secret@example.test/v1")

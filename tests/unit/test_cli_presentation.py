@@ -11,6 +11,7 @@ from leonervis_code.cli.presentation import (
     render_context_inspection,
     render_message,
     render_prompt,
+    render_prompt_event,
     render_resume_rejection,
     render_runtime_status,
     render_runtime_switch,
@@ -25,8 +26,13 @@ from leonervis_code.providers.request_context import (
     RequestTokenCountMethod,
 )
 from leonervis_code.agent.loop import AgentLoop
+from leonervis_code.core.compaction import CompactionTrigger
 from leonervis_code.core.contracts import AssistantText, UserMessage
 from leonervis_code.session import (
+    AutoCompactionCommitted,
+    AutoCompactionNotApplied,
+    AutoCompactionStarted,
+    CompactContextResult,
     EffectiveContextInspection,
     ResumeEffect,
     SessionResumeResult,
@@ -314,6 +320,51 @@ def test_resume_rendering_reports_same_current_and_latest_partial_outcomes(tmp_p
     assert "resume audit is durable" in message
     assert "latest pointer update failed" in message
     assert "crash tail was recovered" in message
+
+
+def test_auto_compaction_events_render_without_content_leakage() -> None:
+    started = AutoCompactionStarted(
+        CompactionTrigger.HIGH_WATER,
+        "ctx-v1-" + "a" * 64,
+        60,
+        "estimated",
+        20,
+        100,
+        80,
+    )
+    result = CompactContextResult(
+        "session",
+        5,
+        "ctx-v1-" + "a" * 64,
+        "ctx-v2-" + "b" * 64,
+        2,
+        2,
+        4,
+        60,
+        30,
+        "estimated",
+        ContextFitDecision.FITS,
+        CompactionTrigger.HIGH_WATER,
+    )
+
+    message, kind = render_prompt_event(started)
+    assert kind == "info"
+    assert "80% high-water" in message
+    message, kind = render_prompt_event(
+        AutoCompactionCommitted(CompactionTrigger.HIGH_WATER, result)
+    )
+    assert kind == "success"
+    assert "input 60 -> 30" in message
+    assert "Full transcript and /history were preserved" in message
+    message, kind = render_prompt_event(
+        AutoCompactionNotApplied(
+            CompactionTrigger.OVERFLOW,
+            "candidate did not fit",
+            False,
+        )
+    )
+    assert kind == "error"
+    assert "original prompt will not be sent" in message
 
 
 def test_semantic_colors_are_traditional_and_optional() -> None:

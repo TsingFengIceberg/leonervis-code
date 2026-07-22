@@ -14,6 +14,7 @@ from leonervis_code.providers.manager import (
     RuntimeSwitchAuditError,
     RuntimeSwitchContextError,
     RuntimeSwitchResult,
+    TurnRuntimeSnapshot,
 )
 from leonervis_code.providers.model_context import (
     ModelContextCapability,
@@ -71,6 +72,7 @@ __all__ = [
     "RuntimeSwitchAuditError",
     "RuntimeSwitchContextError",
     "RuntimeSwitchResult",
+    "TurnRuntimeSnapshot",
     "estimate_serialized_input_tokens",
     "evaluate_context_fit",
     "legacy_profile_id",
