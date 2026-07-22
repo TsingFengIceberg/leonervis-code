@@ -12,7 +12,13 @@ import pytest
 
 from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
 from leonervis_code.session_records import BindingSnapshot
-from leonervis_code.session_store import SessionLockedError, SessionStore, SessionStoreError
+from leonervis_code.session_store import (
+    AtomicJsonWriteError,
+    SessionLockedError,
+    SessionResumeStaleError,
+    SessionStore,
+    SessionStoreError,
+)
 
 SESSION_ONE = "12345678-1234-4234-9234-123456789abc"
 SESSION_TWO = "22345678-1234-4234-9234-123456789abc"
@@ -66,6 +72,137 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
     assert resumed_after_clean_close.state.closed is False
     assert resumed_after_clean_close.state.history == committed_items()
     resumed_after_clean_close.release()
+
+
+def test_prepare_resume_is_read_only_and_abort_releases_target_lock(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    writer.append_turn(committed_items(), binding=BindingSnapshot.fake())
+    writer.release()
+    transcript_before = writer.path.read_bytes()
+    latest = session_store.root / "latest.json"
+    latest_before = latest.read_bytes()
+
+    prepared = session_store.prepare_resume("latest")
+
+    assert prepared.state.history == committed_items()
+    assert writer.path.read_bytes() == transcript_before
+    assert latest.read_bytes() == latest_before
+    with pytest.raises(SessionLockedError):
+        session_store.prepare_resume(SESSION_ONE)
+
+    prepared.abort()
+    reopened = session_store.prepare_resume(SESSION_ONE)
+    reopened.abort()
+
+
+def test_prepare_resume_defers_tail_recovery_until_commit(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    writer.append_turn(committed_items(), binding=BindingSnapshot.fake())
+    writer.release()
+    partial = b'{"record_type":"turn_comm'
+    writer.path.write_bytes(writer.path.read_bytes() + partial)
+    before = writer.path.read_bytes()
+
+    prepared = session_store.prepare_resume(SESSION_ONE)
+
+    assert prepared.pending_recovery is not None
+    assert writer.path.read_bytes() == before
+    committed = prepared.commit()
+    assert [record.record_type for record in committed.writer.state.records[-2:]] == [
+        "recovery",
+        "session_resumed",
+    ]
+    committed.writer.release()
+
+
+def test_prepare_resume_detects_exact_transcript_staleness(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    writer.release()
+    prepared = session_store.prepare_resume(SESSION_ONE)
+    original = writer.path.read_bytes()
+    changed = bytearray(original)
+    changed[-2] = ord(" ") if changed[-2] != ord(" ") else ord("x")
+    writer.path.write_bytes(changed)
+
+    with pytest.raises(SessionResumeStaleError):
+        prepared.commit()
+    prepared.abort()
+
+
+def test_latest_resume_uses_exact_pointer_cas_but_explicit_id_does_not(
+    tmp_path: Path,
+) -> None:
+    session_store = store(tmp_path)
+    first = session_store.create(BindingSnapshot.fake())
+    first.release()
+    prepared_latest = session_store.prepare_resume("latest")
+    latest = session_store.root / "latest.json"
+    latest_before = latest.read_bytes()
+    latest.write_bytes(latest_before.replace(SESSION_ONE.encode(), SESSION_TWO.encode()))
+
+    with pytest.raises(SessionResumeStaleError, match="latest Session changed"):
+        prepared_latest.commit()
+    prepared_latest.abort()
+
+    latest.write_bytes(latest_before)
+    prepared_explicit = session_store.prepare_resume(SESSION_ONE)
+    latest.write_bytes(latest_before.replace(SESSION_ONE.encode(), SESSION_TWO.encode()))
+    committed = prepared_explicit.commit()
+
+    assert committed.writer.session_id == SESSION_ONE
+    assert session_store.show("latest").session_id == SESSION_ONE
+    committed.writer.release()
+
+
+def test_prepare_resume_detects_lock_path_replacement(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    writer.release()
+    prepared = session_store.prepare_resume(SESSION_ONE)
+    replacement = prepared.lock_path.with_suffix(".replacement")
+    replacement.write_bytes(b"")
+    os.replace(replacement, prepared.lock_path)
+
+    with pytest.raises(SessionResumeStaleError, match="lock changed"):
+        prepared.commit()
+    prepared.abort()
+
+
+def test_create_keeps_transcript_if_latest_was_replaced_before_fsync_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    session_store = store(tmp_path)
+
+    def fail_after_replace(path, data):
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "session_id": SESSION_ONE,
+                    "transcript": f"{SESSION_ONE}.jsonl",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        raise AtomicJsonWriteError("directory fsync failed", replaced=True)
+
+    monkeypatch.setattr(
+        session_store,
+        "_write_latest",
+        lambda session_id: fail_after_replace(session_store.root / "latest.json", session_id),
+    )
+
+    with pytest.raises(AtomicJsonWriteError) as caught:
+        session_store.create(BindingSnapshot.fake())
+
+    assert caught.value.replaced is True
+    assert (session_store.root / f"{SESSION_ONE}.jsonl").is_file()
+    assert (session_store.root / f"{SESSION_ONE}.lock").is_file()
+    assert session_store.show("latest").session_id == SESSION_ONE
 
 
 def test_create_is_collision_safe_and_latest_does_not_fallback(tmp_path: Path) -> None:

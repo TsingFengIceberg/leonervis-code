@@ -10,9 +10,14 @@ from leonervis_code.providers.manager import (
     RuntimeSwitchResult,
 )
 from leonervis_code.providers.request_context import ContextFitDecision
-from leonervis_code.session import CompactContextResult, EffectiveContextInspection
+from leonervis_code.session import (
+    CompactContextResult,
+    EffectiveContextInspection,
+    ResumeEffect,
+    SessionResumeResult,
+)
 from leonervis_code.session_records import BindingSnapshot
-from leonervis_code.session_store import SessionInfo
+from leonervis_code.session_store import LatestUpdateStatus, SessionInfo
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -111,7 +116,19 @@ class Session:
     def switch_session(self, selector):
         self.current = selector
         self.latest = selector
-        return self.session_info()
+        assessment = CurrentTargetContextAssessment(
+            self.status(),
+            None,
+            "provider input assessment is unavailable for fake runtime",
+        )
+        return SessionResumeResult(
+            self.session_info(),
+            ResumeEffect.APPLIED,
+            assessment,
+            "ctx-v1-" + "a" * 64,
+            False,
+            LatestUpdateStatus.UPDATED,
+        )
 
     def list_profiles(self):
         return (Profile(),)
@@ -174,7 +191,8 @@ def test_valid_session_commands_do_not_enter_model_history(tmp_path) -> None:
 
     assert created.kind == "success"
     assert "runtime provider unchanged" in created.message
-    assert resumed.kind == "success"
+    assert resumed.kind == "warning"
+    assert "fake runtime" in resumed.message
     assert session.current == "32345678-1234-4234-9234-123456789abc"
     assert session.prompts == []
 

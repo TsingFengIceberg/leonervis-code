@@ -15,7 +15,9 @@ from leonervis_code.cli.presentation import (
     render_recent_history,
     render_runtime_status,
     render_runtime_switch,
+    render_resume_rejection,
     render_session_info,
+    render_session_resume,
     render_session_summary,
     render_switch_rejection,
 )
@@ -28,7 +30,8 @@ from leonervis_code.providers.manager import (
 )
 from leonervis_code.providers.profile import ProviderProfileError
 from leonervis_code.providers.resolver import RuntimeRouteError
-from leonervis_code.session_store import SessionStoreError
+from leonervis_code.session import SessionResumeConflictError, SessionResumeContextError
+from leonervis_code.session_store import SessionResumeCommitError, SessionStoreError
 
 TOP_LEVEL_COMMANDS = (
     "/help",
@@ -209,14 +212,35 @@ def _resume(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     if len(parts) != 2:
         return _usage("Usage: /resume <latest|session-id>")
-    return _call(
-        lambda: (
-            f"Resumed session {session.switch_session(parts[1]).session_id}; "
-            "runtime provider unchanged."
-        ),
-        kind="success",
-        failure_prefix="Session resume failed",
-    )
+    try:
+        message, kind = render_session_resume(session.switch_session(parts[1]))
+        return SlashResult(handled=True, message=message, kind=kind)
+    except SessionResumeContextError as error:
+        return SlashResult(
+            handled=True,
+            message=render_resume_rejection(error.report),
+            kind="error",
+        )
+    except SessionResumeConflictError as error:
+        return SlashResult(
+            handled=True,
+            message=(
+                f"Session resume was not committed: {error}. Current Session and runtime "
+                f"are unchanged. Retry /resume {parts[1]}."
+            ),
+            kind="warning",
+        )
+    except SessionResumeCommitError as error:
+        return SlashResult(
+            handled=True,
+            message=(
+                f"Session resume commit failed at {error.stage.value}: {error}. "
+                "Inspect the target transcript before retrying."
+            ),
+            kind="error",
+        )
+    except Exception as error:
+        return _command_error(error, failure_prefix="Session resume failed")
 
 
 def _provider_list(session: ReplSession) -> SlashResult:

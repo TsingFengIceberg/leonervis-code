@@ -126,6 +126,14 @@ def estimate_serialized_input_tokens(value: object) -> RequestTokenCount:
     return RequestTokenCount(estimate, RequestTokenCountMethod.ESTIMATED)
 
 
+def rejects_context_transition(decision: ContextFitDecision) -> bool:
+    """Return whether a destination transition is known to be incompatible."""
+    return decision in {
+        ContextFitDecision.CONTEXT_EXCEEDED,
+        ContextFitDecision.MODEL_OUTPUT_EXCEEDED,
+    }
+
+
 def raise_for_context_fit(report: ContextFitReport) -> None:
     if report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
         raise ContextPreflightError(ContextPreflightErrorKind.MODEL_OUTPUT_EXCEEDED, report)

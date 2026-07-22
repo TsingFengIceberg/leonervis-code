@@ -12,7 +12,11 @@ from typing import TextIO
 from leonervis_code import ProjectSession, __version__
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.brand import color_enabled
-from leonervis_code.cli.presentation import render_session_summary
+from leonervis_code.cli.presentation import (
+    render_resume_rejection,
+    render_session_resume,
+    render_session_summary,
+)
 from leonervis_code.cli.repl import run_repl
 from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse
 from leonervis_code.core.orchestration import (
@@ -45,7 +49,12 @@ from leonervis_code.providers.routing import (
     FAKE_PROVIDER_PROFILES,
     resolve_route,
 )
-from leonervis_code.session_store import SessionStore, SessionStoreError
+from leonervis_code.session import SessionResumeConflictError, SessionResumeContextError
+from leonervis_code.session_store import (
+    SessionResumeCommitError,
+    SessionStore,
+    SessionStoreError,
+)
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -655,6 +664,10 @@ def main(
             read_file_factory=ReadFileTool,
         )
         try:
+            resume_result = session.startup_resume_result
+            if resume_result is not None:
+                message, _ = render_session_resume(resume_result)
+                print(message, file=errors)
             if arguments.command == "prompt":
                 print(session.prompt(arguments.prompt), file=output)
                 return 0
@@ -681,6 +694,15 @@ def main(
         return render_provider_failure(error, errors)
     except ProviderProfileError as error:
         print(f"provider profile error: {error}", file=errors)
+        return 2
+    except SessionResumeContextError as error:
+        print(render_resume_rejection(error.report, startup=True), file=errors)
+        return 2
+    except SessionResumeConflictError as error:
+        print(f"session resume conflict: {error}", file=errors)
+        return 2
+    except SessionResumeCommitError as error:
+        print(f"session resume commit error [{error.stage.value}]: {error}", file=errors)
         return 2
     except SessionStoreError as error:
         print(f"session error: {error}", file=errors)

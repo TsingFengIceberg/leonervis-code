@@ -11,8 +11,10 @@ from leonervis_code.cli.presentation import (
     render_context_inspection,
     render_message,
     render_prompt,
+    render_resume_rejection,
     render_runtime_status,
     render_runtime_switch,
+    render_session_resume,
     render_switch_rejection,
 )
 from leonervis_code.providers.manager import CurrentTargetContextAssessment, RuntimeStatus
@@ -24,7 +26,13 @@ from leonervis_code.providers.request_context import (
 )
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.core.contracts import AssistantText, UserMessage
-from leonervis_code.session import EffectiveContextInspection
+from leonervis_code.session import (
+    EffectiveContextInspection,
+    ResumeEffect,
+    SessionResumeResult,
+)
+from leonervis_code.session_records import BindingSnapshot
+from leonervis_code.session_store import LatestUpdateStatus, SessionInfo
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -186,6 +194,126 @@ def test_runtime_switch_rendering_distinguishes_fits_unknown_and_rejection() -> 
     assert "Current runtime and profile selection are unchanged" in rejected
     assert "/session new" in rejected
     assert "/compact" not in rejected
+
+
+def test_resume_rendering_distinguishes_fit_unknown_fake_and_known_rejection(tmp_path) -> None:
+    info = SessionInfo(
+        session_id="12345678-1234-4234-9234-123456789abc",
+        path=tmp_path / "session.jsonl",
+        workspace=str(tmp_path),
+        workspace_fingerprint="v1-" + "a" * 64,
+        created_at="2026-07-18T00:00:00.000000Z",
+        record_count=2,
+        turn_count=1,
+        closed=False,
+        binding=BindingSnapshot.fake(),
+    )
+    fits = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount(80, RequestTokenCountMethod.ESTIMATED),
+        requested_output_tokens=20,
+        context_window_limit=100,
+        model_output_limit=40,
+        decision=ContextFitDecision.FITS,
+    )
+    fit_result = SessionResumeResult(
+        info,
+        ResumeEffect.APPLIED,
+        CurrentTargetContextAssessment(status(), fits),
+        "ctx-v1-" + "a" * 64,
+        False,
+        LatestUpdateStatus.UPDATED,
+    )
+    message, kind = render_session_resume(fit_result)
+    assert kind == "success"
+    assert "input=80 (estimated) + reserve=20 <= window=100" in message
+
+    unknown = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount.unknown("counter failed safely"),
+        requested_output_tokens=20,
+        context_window_limit=100,
+        model_output_limit=40,
+        decision=ContextFitDecision.UNKNOWN,
+    )
+    unknown_result = SessionResumeResult(
+        info,
+        ResumeEffect.APPLIED,
+        CurrentTargetContextAssessment(status(), unknown),
+        "ctx-v1-" + "a" * 64,
+        False,
+        LatestUpdateStatus.UPDATED,
+    )
+    message, kind = render_session_resume(unknown_result)
+    assert kind == "warning"
+    assert "resume was applied" in message
+    assert "no history was deleted" in message
+
+    fake_result = SessionResumeResult(
+        info,
+        ResumeEffect.APPLIED,
+        CurrentTargetContextAssessment(status(), None, "unavailable"),
+        "ctx-v1-" + "a" * 64,
+        False,
+        LatestUpdateStatus.UPDATED,
+    )
+    message, kind = render_session_resume(fake_result)
+    assert kind == "warning"
+    assert "no provider request was made" in message
+
+    exceeded = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount(81, RequestTokenCountMethod.EXACT),
+        requested_output_tokens=20,
+        context_window_limit=100,
+        model_output_limit=40,
+        decision=ContextFitDecision.CONTEXT_EXCEEDED,
+    )
+    rejected = render_resume_rejection(exceeded)
+    assert "target transcript" in rejected
+    assert "runtime are unchanged" in rejected
+    assert "compact" not in rejected.lower()
+
+
+def test_resume_rendering_reports_same_current_and_latest_partial_outcomes(tmp_path) -> None:
+    info = SessionInfo(
+        session_id="12345678-1234-4234-9234-123456789abc",
+        path=tmp_path / "session.jsonl",
+        workspace=str(tmp_path),
+        workspace_fingerprint="v1-" + "a" * 64,
+        created_at="2026-07-18T00:00:00.000000Z",
+        record_count=1,
+        turn_count=0,
+        closed=False,
+        binding=BindingSnapshot.fake(),
+    )
+    current = SessionResumeResult(
+        info,
+        ResumeEffect.ALREADY_CURRENT,
+        None,
+        "ctx-v1-" + "a" * 64,
+        False,
+        LatestUpdateStatus.UPDATED,
+    )
+    message, kind = render_session_resume(current)
+    assert kind == "info"
+    assert "already current" in message
+    assert "no resume record" in message
+
+    latest_failed = SessionResumeResult(
+        info,
+        ResumeEffect.APPLIED_LATEST_FAILED,
+        CurrentTargetContextAssessment(status(), None, "unavailable"),
+        "ctx-v1-" + "a" * 64,
+        True,
+        LatestUpdateStatus.FAILED_UNCHANGED,
+        "latest failed",
+    )
+    message, kind = render_session_resume(latest_failed)
+    assert kind == "error"
+    assert "resume audit is durable" in message
+    assert "latest pointer update failed" in message
+    assert "crash tail was recovered" in message
 
 
 def test_semantic_colors_are_traditional_and_optional() -> None:

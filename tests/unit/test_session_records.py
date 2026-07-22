@@ -11,9 +11,12 @@ from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, Us
 from leonervis_code.session_records import (
     BindingSnapshot,
     ContextCompacted,
+    Recovery,
     RuntimeChanged,
+    SessionClosed,
     SessionHeader,
     SessionRecordError,
+    SessionResumed,
     TurnCommitted,
     decode_record,
     encode_record,
@@ -181,6 +184,46 @@ def test_replay_rejects_sequence_workspace_filename_and_records_after_close(tmp_
         replay_records([header], expected_workspace="/different")
     with pytest.raises(SessionRecordError, match="file name"):
         replay_records([header], expected_file_name="wrong.jsonl")
+
+
+def test_recovery_after_close_preserves_closed_state_until_resumed(tmp_path: Path) -> None:
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(tmp_path.resolve()),
+        workspace_fingerprint=workspace_fingerprint(tmp_path),
+        created_at=NOW,
+        binding=BindingSnapshot.fake(),
+    )
+    closed = SessionClosed(sequence=1, occurred_at=NOW, reason="closed")
+    recovery = Recovery(sequence=2, occurred_at=NOW, truncated_bytes=12)
+
+    recovered = replay_records([header, closed, recovery])
+
+    assert recovered.closed is True
+    with pytest.raises(SessionRecordError, match="requires session_resumed"):
+        replay_records(
+            [
+                header,
+                closed,
+                recovery,
+                TurnCommitted(
+                    sequence=3,
+                    committed_at=NOW,
+                    binding=header.binding,
+                    items=(UserMessage("u"), AssistantText("a")),
+                ),
+            ]
+        )
+    resumed = replay_records(
+        [
+            header,
+            closed,
+            recovery,
+            SessionResumed(sequence=3, occurred_at=NOW),
+        ]
+    )
+    assert resumed.closed is False
 
 
 def test_replay_requires_closed_turns_and_strict_tool_causality(tmp_path: Path) -> None:

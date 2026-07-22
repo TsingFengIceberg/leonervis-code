@@ -73,7 +73,7 @@ Compaction进行中，ProjectSession拒绝 prompt、Session切换、runtime swit
 
 Resume 从 mixed v1/v2 replay分别恢复 full history、effective summary、retained suffix与source。Checkpoint保存的 result ID是commit-time audit evidence；若当前 binary的 canonical prompt/tool contract升级，当前 context ID可重新计算为不同值，不因此拒绝合法旧Session。
 
-当前 startup `/resume` 仍在返回前追加 resume record并更新latest。Target-aware resume prepare/commit不属于本切片；恢复后的下一次真实 invocation继续由现有full preflight裁决。
+Foundation 3F-2 本身仍沿用当时的 startup `/resume` 顺序；该边界后来由 Foundation 3G 的 target-aware prepare/screen/commit补齐，见[0018：Target-aware Resume Prepare/Commit](./0018-target-aware-resume-prepare-commit.md)。恢复后的下一次真实invocation仍由full preflight裁决。
 
 ## 明确不做
 

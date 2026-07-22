@@ -380,7 +380,7 @@ def replay_records(
         _validate_record_version(record)
         if expected_sequence and isinstance(record, SessionHeader):
             raise SessionRecordError("session_header may only be the first record")
-        if closed and not isinstance(record, SessionResumed):
+        if closed and not isinstance(record, (Recovery, SessionResumed)):
             raise SessionRecordError(
                 "session transcript requires session_resumed after session_closed"
             )

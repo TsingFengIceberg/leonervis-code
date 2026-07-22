@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded `read_file` loop, provider-owned model limits, target-specific preflight, switch-time screening, provider-neutral Effective Context, and manual resumable failure-atomic `/compact` are implemented. Automatic compaction, write tools, Bash, and approval flows are not yet implemented.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded `read_file` loop, provider-owned model limits, target-specific preflight, switch-time screening, provider-neutral Effective Context, manual resumable `/compact`, and target-aware startup/REPL resume prepare/screen/commit are implemented. Automatic compaction, write tools, Bash, and approval flows are not yet implemented.
 
 ## Contents
 
@@ -155,7 +155,7 @@ uv run leonervis-code --resume latest prompt "Continue the previous turn"
 uv run leonervis-code --resume <session-uuid>
 ```
 
-A Session is workspace-bound and stores complete successful turns in append-only JSONL. Resuming restores history only; the current provider still comes from this invocation's CLI selector or active profile.
+A Session is workspace-bound and stores complete successful turns in append-only JSONL. Resuming restores history only; the current provider still comes from this invocation's CLI selector or active profile. Startup `--resume` and REPL `/resume` first replay the target under a read-only exclusive lease and screen its Effective Context against the current runtime. Known context/model-output overflow is rejected before writing `SessionResumed` or changing `latest.json`; `UNKNOWN` fails open with a warning, while fake mode explicitly sends no provider request. A compacted Session is measured as Host summary plus its retained real-turn suffix, not as the full transcript. `/resume latest` applies exact CAS to pointer changes during preparation, and resuming the current Session is a record-free no-op. The next real invocation still runs full preflight.
 
 ### REPL commands
 
@@ -176,7 +176,7 @@ A Session is workspace-bound and stores complete successful turns in append-only
 | `/resume <latest\|id>` | Switch Sessions while preserving the runtime |
 | `/exit`, `/quit` | Exit normally |
 
-Ctrl-D, EOF, or Ctrl-C while waiting for input also exits normally. `/context` does not invoke generation, mutate the Session, or write the transcript; after compaction it distinguishes the full transcript, summary, and retained real turns. `/compact` operates only with at least four complete effective turns, retains the latest two, and makes one no-tools summary request through the current real provider. Success appends and fsyncs one typed checkpoint while preserving full `/history`; fake runtime, unknown/non-reducing candidates, and all precommit failures commit nothing. Exact inspection or compact counting on an official Anthropic route may issue a count-only `messages.count_tokens` request, while OpenAI-compatible routes use a local estimate. Terminal colors are enabled only on a TTY; set `NO_COLOR=1` to disable them.
+Ctrl-D, EOF, or Ctrl-C while waiting for input also exits normally. `/context` does not invoke generation, mutate the Session, or write the transcript; after compaction it distinguishes the full transcript, summary, and retained real turns. `/compact` operates only with at least four complete effective turns, retains the latest two, and makes one no-tools summary request through the current real provider. Success appends and fsyncs one typed checkpoint while preserving full `/history`; fake runtime, unknown/non-reducing candidates, and all precommit failures commit nothing. Resume screening likewise invokes no generation or tool: known overflow preserves the current Session, runtime, latest pointer, and target transcript, while unknown/fake evidence applies the resume with an explicit warning. Exact inspection, compact, or resume counting on an official Anthropic route may issue a count-only `messages.count_tokens` request, while OpenAI-compatible routes use a local estimate. Terminal colors are enabled only on a TTY; set `NO_COLOR=1` to disable them.
 
 For a deterministic view of the bounded tool loop:
 
@@ -214,6 +214,7 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 - [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, and context capability.
 - [Architecture decision records](./docs/decisions/): complete problem statements, trade-offs, boundaries, and verification records for each learning slice.
+- [Target-aware Resume Prepare/Commit](./docs/decisions/0018-target-aware-resume-prepare-commit.md): read-only preparation, current-runtime screening, exact stale/CAS checks, and durable partial outcomes.
 - [Controlled Compact Transaction](./docs/decisions/0017-controlled-compact-transaction.md): manual `/compact`, no-tools summary generation, mixed Session schema, and persist-before-memory atomicity.
 - [Provider-neutral Effective Context Snapshot](./docs/decisions/0016-provider-neutral-effective-context-snapshot.md): full/effective context boundaries, stable `ctx-v1` identity, and read-only `/context`.
 - [Target-aware runtime switch UX](./docs/decisions/0015-target-aware-runtime-switch-ux.md): committed-context screening before switches, known-reject/unknown-allow behavior, and atomic audit semantics.
@@ -228,4 +229,4 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 The only workspace tool today is bounded `read_file`. There are no write/edit, glob/grep, Bash/test, network, approval, streaming, automatic retry/fallback, parallel-tool, automatic-compaction, multi-agent, or remote-service capabilities yet.
 
-The controlled compact slice now provides a manual typed checkpoint, stale-source checks, mixed v1/v2 replay, and failure atomicity. The recommended next slice is target-aware resume prepare/commit so startup and REPL Session switches can screen destination-runtime compatibility before changing resume audit or the latest pointer. [CLAUDE.md](./CLAUDE.md) and the ADRs record the complete scope, principles, and roadmap.
+Foundation 3G now makes startup and REPL resume replay and screen the target Effective Context before any audit/pointer write, with descriptor leases, exact stale/CAS checks, a same-current no-op, and typed partial outcomes keeping storage semantics auditable. The recommended next slice returns to the v0 tool surface with one smaller read-only vertical slice—preferably `glob`/file matching—while preserving workspace hard boundaries, structured results, and deterministic tests. Automatic compaction/retry, write/Bash, and approval remain separate later slices. [CLAUDE.md](./CLAUDE.md) and the ADRs record the complete scope, principles, and roadmap.

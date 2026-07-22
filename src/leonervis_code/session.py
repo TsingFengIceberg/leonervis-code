@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 import os
 from pathlib import Path
 from threading import RLock
@@ -42,10 +43,63 @@ from leonervis_code.providers.manager import (
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
-from leonervis_code.providers.request_context import ContextFitDecision, ContextPreflightError
+from leonervis_code.providers.request_context import (
+    ContextFitDecision,
+    ContextFitReport,
+    ContextPreflightError,
+    rejects_context_transition,
+)
 from leonervis_code.session_records import BindingSnapshot, ContextCompacted
-from leonervis_code.session_store import SessionInfo, SessionStore, SessionStoreError, SessionWriter
+from leonervis_code.session_store import (
+    LatestUpdateStatus,
+    SessionInfo,
+    SessionResumeStaleError,
+    SessionStore,
+    SessionStoreError,
+    SessionWriter,
+)
 from leonervis_code.tools.read_file import ReadFileTool
+
+
+class ResumeEffect(StrEnum):
+    ALREADY_CURRENT = "already_current"
+    APPLIED = "applied"
+    APPLIED_LATEST_FAILED = "applied_latest_failed"
+    APPLIED_LATEST_DURABILITY_UNKNOWN = "applied_latest_durability_unknown"
+
+
+@dataclass(frozen=True)
+class SessionResumeResult:
+    info: SessionInfo
+    effect: ResumeEffect
+    target_assessment: CurrentTargetContextAssessment | None
+    context_id: str
+    recovery_applied: bool
+    latest_status: LatestUpdateStatus
+    diagnostic: str | None = None
+
+    @property
+    def session_id(self) -> str:
+        return self.info.session_id
+
+    @property
+    def fit_report(self) -> ContextFitReport | None:
+        assessment = self.target_assessment
+        return assessment.fit_report if assessment is not None else None
+
+
+class SessionResumeContextError(RuntimeError):
+    """Raised when a destination Session is known not to fit the current target."""
+
+    def __init__(self, info: SessionInfo, context_id: str, report: ContextFitReport) -> None:
+        self.info = info
+        self.context_id = context_id
+        self.report = report
+        super().__init__("destination Session is incompatible with the current runtime")
+
+
+class SessionResumeConflictError(RuntimeError):
+    """Raised when a prepared target or current source becomes stale."""
 
 
 @dataclass(frozen=True)
@@ -145,6 +199,9 @@ class ProjectSession:
         session_store: SessionStore,
         writer: SessionWriter,
         read_file: ReadFileTool,
+        *,
+        loop: AgentLoop | None = None,
+        startup_resume_result: SessionResumeResult | None = None,
     ) -> None:
         self.workspace = workspace
         self._store = store
@@ -155,7 +212,8 @@ class ProjectSession:
         self._lock = RLock()
         self._closed = False
         self._compaction_active = False
-        self._loop = self._new_loop(writer)
+        self._loop = loop or self._new_loop(writer)
+        self._startup_resume_result = startup_resume_result
 
     @classmethod
     def open(
@@ -206,35 +264,84 @@ class ProjectSession:
             read_file = read_file_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
-            writer = (
-                session_store.open(resume) if resume is not None else session_store.create(binding)
-            )
-            return cls(resolved_workspace, store, manager, session_store, writer, read_file)
-        except Exception:
+            if resume is None:
+                writer = session_store.create(binding)
+                return cls(resolved_workspace, store, manager, session_store, writer, read_file)
+            prepared = session_store.prepare_resume(resume)
+            writer_holder: dict[str, SessionWriter] = {}
+            try:
+                loop = cls._loop_from_state(
+                    prepared.state,
+                    read_file,
+                    commit_turn=lambda turn: writer_holder["writer"].append_turn(
+                        turn.items,
+                        binding=binding_from_status(manager.status()),
+                    ),
+                )
+                snapshot = loop.effective_context_snapshot()
+                with manager.provider_for_context_transition() as runtime:
+                    assessment = runtime.assess_context(snapshot.to_conversation_request())
+                    report = assessment.fit_report
+                    if report is not None and rejects_context_transition(report.decision):
+                        raise SessionResumeContextError(prepared.info, snapshot.context_id, report)
+                    committed = prepared.commit()
+                writer = committed.writer
+                writer_holder["writer"] = writer
+                result = _resume_result(
+                    writer.info,
+                    snapshot.context_id,
+                    assessment,
+                    committed.recovery_applied,
+                    committed.latest_status,
+                    committed.latest_diagnostic,
+                )
+                return cls(
+                    resolved_workspace,
+                    store,
+                    manager,
+                    session_store,
+                    writer,
+                    read_file,
+                    loop=loop,
+                    startup_resume_result=result,
+                )
+            except BaseException:
+                prepared.abort()
+                raise
+        except BaseException:
             if writer is not None:
                 writer.release()
             manager.close()
             raise
 
     @property
+    def startup_resume_result(self) -> SessionResumeResult | None:
+        return self._startup_resume_result
+
+    @property
     def session_id(self) -> str:
-        return self._writer.session_id
+        with self._lock:
+            return self._writer.session_id
 
     @property
     def transcript_path(self) -> Path:
-        return self._writer.path
+        with self._lock:
+            return self._writer.path
 
     @property
     def history(self) -> tuple[ConversationItem, ...]:
-        return self._loop.history
+        with self._lock:
+            return self._loop.history
 
     @property
     def effective_history(self) -> tuple[ConversationItem, ...]:
-        return self._loop.effective_history
+        with self._lock:
+            return self._loop.effective_history
 
     @property
     def turns(self) -> tuple[ConversationTurn, ...]:
-        return self._loop.turns
+        with self._lock:
+            return self._loop.turns
 
     def session_info(self) -> SessionInfo:
         self._ensure_open()
@@ -262,22 +369,66 @@ class ProjectSession:
             old.release()
             return candidate.info
 
-    def switch_session(self, selector: str | Path) -> SessionInfo:
-        """Atomically swap durable history without changing the current runtime client."""
+    def switch_session(self, selector: str | Path) -> SessionResumeResult:
+        """Screen and atomically swap durable history without changing runtime."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            candidate = self._session_store.open(selector)
-            try:
-                loop = self._new_loop(candidate)
-            except Exception:
-                candidate.release()
-                raise
+            if _selector_matches_current(selector, self._writer, self._session_store):
+                snapshot = self._loop.effective_context_snapshot()
+                return SessionResumeResult(
+                    self._writer.info,
+                    ResumeEffect.ALREADY_CURRENT,
+                    None,
+                    snapshot.context_id,
+                    False,
+                    LatestUpdateStatus.UPDATED,
+                )
             old = self._writer
-            self._writer = candidate
-            self._loop = loop
-            old.release()
-            return candidate.info
+            old_loop = self._loop
+            old_sequence = old.state.next_sequence
+            old_context_id = old_loop.effective_context_snapshot().context_id
+            prepared = self._session_store.prepare_resume(selector)
+            writer_holder: dict[str, SessionWriter] = {}
+            try:
+                loop = self._loop_from_state(
+                    prepared.state,
+                    self._read_file,
+                    commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
+                )
+                snapshot = loop.effective_context_snapshot()
+                with self._manager.provider_for_context_transition() as runtime:
+                    assessment = runtime.assess_context(snapshot.to_conversation_request())
+                    report = assessment.fit_report
+                    if report is not None and rejects_context_transition(report.decision):
+                        raise SessionResumeContextError(prepared.info, snapshot.context_id, report)
+                    if (
+                        self._writer is not old
+                        or self._loop is not old_loop
+                        or old.state.next_sequence != old_sequence
+                        or old_loop.effective_context_snapshot().context_id != old_context_id
+                        or self._manager.status().generation != runtime.status.generation
+                    ):
+                        raise SessionResumeConflictError(
+                            "current Session or runtime changed during resume screening"
+                        )
+                    committed = prepared.commit()
+                writer_holder["writer"] = committed.writer
+                self._writer = committed.writer
+                self._loop = loop
+                old.release()
+                return _resume_result(
+                    committed.writer.info,
+                    snapshot.context_id,
+                    assessment,
+                    committed.recovery_applied,
+                    committed.latest_status,
+                    committed.latest_diagnostic,
+                )
+            except SessionResumeStaleError as error:
+                raise SessionResumeConflictError(str(error)) from None
+            finally:
+                prepared.abort()
 
     def prompt(self, text: str) -> str:
         """Run one complete turn; transcript fsync succeeds before memory commit."""
@@ -506,14 +657,22 @@ class ProjectSession:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def _new_loop(self, writer: SessionWriter) -> AgentLoop:
+    @staticmethod
+    def _loop_from_state(state, read_file, *, commit_turn) -> AgentLoop:
         return AgentLoop(
             None,
+            read_file,
+            initial_history=state.history,
+            initial_effective_history=state.effective_history,
+            initial_effective_summary=state.effective_summary,
+            initial_effective_source=state.effective_source,
+            commit_turn=commit_turn,
+        )
+
+    def _new_loop(self, writer: SessionWriter) -> AgentLoop:
+        return self._loop_from_state(
+            writer.state,
             self._read_file,
-            initial_history=writer.state.history,
-            initial_effective_history=writer.state.effective_history,
-            initial_effective_summary=writer.state.effective_summary,
-            initial_effective_source=writer.state.effective_source,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
         )
 
@@ -545,6 +704,48 @@ class ProjectSession:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("project session is closed")
+
+
+def _resume_result(
+    info: SessionInfo,
+    context_id: str,
+    assessment: CurrentTargetContextAssessment,
+    recovery_applied: bool,
+    latest_status: LatestUpdateStatus,
+    diagnostic: str | None,
+) -> SessionResumeResult:
+    effect = ResumeEffect.APPLIED
+    if latest_status == LatestUpdateStatus.FAILED_UNCHANGED:
+        effect = ResumeEffect.APPLIED_LATEST_FAILED
+    elif latest_status == LatestUpdateStatus.REPLACED_DURABILITY_UNKNOWN:
+        effect = ResumeEffect.APPLIED_LATEST_DURABILITY_UNKNOWN
+    return SessionResumeResult(
+        info,
+        effect,
+        assessment,
+        context_id,
+        recovery_applied,
+        latest_status,
+        diagnostic,
+    )
+
+
+def _selector_matches_current(
+    selector: str | Path,
+    writer: SessionWriter,
+    session_store: SessionStore,
+) -> bool:
+    if isinstance(selector, Path):
+        candidate = selector if selector.is_absolute() else Path.cwd() / selector
+        return candidate.absolute() == writer.path.absolute()
+    if selector == writer.session_id:
+        return True
+    if selector == "latest":
+        try:
+            return session_store.show("latest").session_id == writer.session_id
+        except SessionStoreError:
+            return False
+    return False
 
 
 def binding_from_status(status: RuntimeStatus) -> BindingSnapshot:

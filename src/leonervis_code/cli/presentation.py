@@ -271,6 +271,68 @@ def render_context_inspection(
     return "\n".join(lines), kind
 
 
+def render_session_resume(result: object) -> tuple[str, MessageKind]:
+    """Render target-aware resume evidence and any applied pointer warning."""
+    if result.effect.value == "already_current":
+        return (
+            f"Session {result.session_id} is already current; no resume record was written.",
+            "info",
+        )
+    report = result.fit_report
+    prefix = f"Resumed session {result.session_id}; current runtime unchanged."
+    if report is None:
+        message = (
+            f"{prefix} Compatibility screening is unavailable for fake runtime, "
+            "and no provider request was made."
+        )
+        kind: MessageKind = "warning"
+    elif report.decision == ContextFitDecision.FITS:
+        message = (
+            f"{prefix} Committed context fits: input={report.input_count.input_tokens} "
+            f"({report.input_count.method.value}) + reserve={report.requested_output_tokens} "
+            f"<= window={report.context_window_limit}. The next provider invocation "
+            "still runs full preflight."
+        )
+        kind = "success"
+    else:
+        diagnostic = report.input_count.diagnostic or "required context facts are unknown"
+        message = (
+            f"{prefix} Compatibility was not confirmed: {diagnostic}. The resume was "
+            "applied, no history was deleted, and the next provider invocation will "
+            "run full preflight."
+        )
+        kind = "warning"
+    if result.effect.value == "applied_latest_failed":
+        message += " The resume audit is durable, but latest pointer update failed."
+        kind = "error"
+    elif result.effect.value == "applied_latest_durability_unknown":
+        message += " The latest pointer was replaced, but crash durability is unconfirmed."
+        kind = "warning"
+    if result.recovery_applied:
+        message += " An incomplete crash tail was recovered during commit."
+    return message, kind
+
+
+def render_resume_rejection(report: ContextFitReport, *, startup: bool = False) -> str:
+    """Render a known-incompatible resume with truthful unchanged state."""
+    if report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+        detail = (
+            f"reserve={report.requested_output_tokens} > model max output="
+            f"{report.model_output_limit}"
+        )
+    else:
+        detail = (
+            f"input={report.input_count.input_tokens} ({report.input_count.method.value}) + "
+            f"reserve={report.requested_output_tokens} > window={report.context_window_limit}"
+        )
+    state = (
+        "No Session was resumed; the latest pointer and runtime selection are unchanged."
+        if startup
+        else "Current Session, latest pointer, target transcript, and runtime are unchanged."
+    )
+    return f"Session resume rejected: {detail}. {state}"
+
+
 def render_compact_result(result: object) -> str:
     """Render one committed checkpoint without exposing summary contents."""
     return (

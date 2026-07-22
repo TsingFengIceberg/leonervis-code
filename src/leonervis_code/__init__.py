@@ -4,6 +4,10 @@ from leonervis_code.session import (
     CompactContextResult,
     EffectiveContextInspection,
     ProjectSession,
+    ResumeEffect,
+    SessionResumeConflictError,
+    SessionResumeContextError,
+    SessionResumeResult,
 )
 from leonervis_code.session_store import SessionInfo, SessionLockedError, SessionStoreError
 
@@ -13,8 +17,12 @@ __all__ = [
     "CompactContextResult",
     "EffectiveContextInspection",
     "ProjectSession",
+    "ResumeEffect",
     "SessionInfo",
     "SessionLockedError",
+    "SessionResumeConflictError",
+    "SessionResumeContextError",
+    "SessionResumeResult",
     "SessionStoreError",
     "__version__",
 ]

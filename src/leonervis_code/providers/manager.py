@@ -37,6 +37,7 @@ from leonervis_code.providers.request_context import (
     RequestTokenCount,
     evaluate_context_fit,
     raise_for_context_fit,
+    rejects_context_transition,
 )
 from leonervis_code.providers.resolver import resolve_profile_route, resolve_runtime_route
 
@@ -172,6 +173,33 @@ class CompactionRuntimeSnapshot:
             route=self.route,
             capability=self.capability,
             request=request,
+        )
+
+
+@dataclass(frozen=True)
+class ContextTransitionRuntimeSnapshot:
+    """One current runtime pinned across read-only screening and transition commit."""
+
+    provider: ConversationProvider
+    route: RuntimeProviderRoute | None
+    capability: ModelContextCapability
+    status: RuntimeStatus
+
+    def assess_context(self, request: ConversationRequest) -> CurrentTargetContextAssessment:
+        if self.route is None:
+            return CurrentTargetContextAssessment(
+                self.status,
+                None,
+                "provider input assessment is unavailable for fake runtime",
+            )
+        return CurrentTargetContextAssessment(
+            self.status,
+            assess_context_fit(
+                provider=self.provider,
+                route=self.route,
+                capability=self.capability,
+                request=request,
+            ),
         )
 
 
@@ -447,6 +475,41 @@ class RuntimeProviderManager:
     @property
     def store(self) -> ProviderProfileStore:
         return self._store
+
+    @contextmanager
+    def provider_for_context_transition(self) -> Iterator[ContextTransitionRuntimeSnapshot]:
+        """Pin the current target across count-only screening and host commit."""
+        with self._lock:
+            self._ensure_open()
+            if self._turn_active:
+                raise RuntimeProviderStateError("a provider operation is already active")
+            self._turn_active = True
+            route = self._route
+            capability = self._capability
+            status = (
+                _fake_status(source=self._selection_source, generation=self._generation)
+                if route is None
+                else _status_for_route(
+                    route,
+                    profile=self._loaded_profile,
+                    source=self._selection_source,
+                    environment=self._environment,
+                    model_override=self._model_override,
+                    capability=capability,
+                    generation=self._generation,
+                )
+            )
+            snapshot = ContextTransitionRuntimeSnapshot(
+                self._provider,
+                route,
+                capability,
+                status,
+            )
+        try:
+            yield snapshot
+        finally:
+            with self._lock:
+                self._turn_active = False
 
     @contextmanager
     def provider_for_compaction(self) -> Iterator[CompactionRuntimeSnapshot]:
@@ -780,10 +843,7 @@ class RuntimeProviderManager:
             capability=candidate.capability,
             request=request,
         )
-        if report.decision in {
-            ContextFitDecision.CONTEXT_EXCEEDED,
-            ContextFitDecision.MODEL_OUTPUT_EXCEEDED,
-        }:
+        if rejects_context_transition(report.decision):
             raise RuntimeSwitchContextError(report)
         return report
 

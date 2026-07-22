@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
 
@@ -80,6 +81,116 @@ def test_session_list_marks_actual_latest_without_changing_creation_order(tmp_pa
     lines = output.getvalue().splitlines()
     assert lines[0].startswith(f"{second_id}: 1 turn, closed, created ")
     assert lines[1].startswith(f"{first_id} [latest]: 2 turns, closed, created ")
+
+
+def test_startup_resume_evidence_uses_stderr_and_stdout_remains_model_only(
+    tmp_path,
+) -> None:
+    common = {
+        "cwd": tmp_path,
+        "environment": {},
+        "user_profile_path": tmp_path / "user.json",
+        "project_profile_path": tmp_path / "project.json",
+    }
+    assert main(["prompt", "first"], stdout=io.StringIO(), stderr=io.StringIO(), **common) == 0
+    shown = io.StringIO()
+    assert main(["session", "show", "latest"], stdout=shown, stderr=io.StringIO(), **common) == 0
+    session_id = next(
+        line.removeprefix("session ID: ")
+        for line in shown.getvalue().splitlines()
+        if line.startswith("session ID: ")
+    )
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    status = main(
+        ["--resume", session_id, "prompt", "second"],
+        stdout=output,
+        stderr=errors,
+        **common,
+    )
+
+    assert status == 0
+    assert output.getvalue() == "Fake response: second\n"
+    assert "Resumed session" in errors.getvalue()
+    assert "screening is unavailable for fake runtime" in errors.getvalue()
+    assert "no provider request was made" in errors.getvalue()
+
+
+def test_startup_resume_known_overflow_has_empty_stdout_and_does_not_mutate_target(
+    tmp_path,
+) -> None:
+    user_path = tmp_path / "user.json"
+    project_path = tmp_path / "project.json"
+    common = {
+        "cwd": tmp_path,
+        "environment": {},
+        "user_profile_path": user_path,
+        "project_profile_path": project_path,
+    }
+    assert main(["prompt", "first"], stdout=io.StringIO(), stderr=io.StringIO(), **common) == 0
+    shown = io.StringIO()
+    assert main(["session", "show", "latest"], stdout=shown, stderr=io.StringIO(), **common) == 0
+    values = dict(line.split(": ", 1) for line in shown.getvalue().splitlines() if ": " in line)
+    session_id = values["session ID"]
+    transcript = Path(values["transcript"])
+    latest = transcript.parent / "latest.json"
+    before_transcript = transcript.read_bytes()
+    before_latest = latest.read_bytes()
+    assert (
+        main(
+            [
+                "provider",
+                "add",
+                "tiny",
+                "--provider",
+                "custom",
+                "--model",
+                "tiny-model",
+                "--protocol",
+                "openai-compatible",
+                "--base-url",
+                "http://127.0.0.1:11434/v1",
+                "--context-window-tokens",
+                "100",
+                "--model-max-output-tokens",
+                "4096",
+            ],
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+
+    class CountingProvider:
+        def count_input_tokens(self, request):
+            from leonervis_code.providers.request_context import (
+                RequestTokenCount,
+                RequestTokenCountMethod,
+            )
+
+            return RequestTokenCount(1000, RequestTokenCountMethod.ESTIMATED)
+
+        def respond(self, request):
+            raise AssertionError("resume rejection must not invoke generation")
+
+    output = io.StringIO()
+    errors = io.StringIO()
+    status = main(
+        ["--profile", "tiny", "--resume", session_id, "prompt", "second"],
+        stdout=output,
+        stderr=errors,
+        provider_factory=lambda route, *, environment: CountingProvider(),
+        **common,
+    )
+
+    assert status == 2
+    assert output.getvalue() == ""
+    assert "Session resume rejected" in errors.getvalue()
+    assert "No Session was resumed" in errors.getvalue()
+    assert transcript.read_bytes() == before_transcript
+    assert latest.read_bytes() == before_latest
 
 
 def test_prompt_command_uses_its_cwd_as_the_read_file_workspace(monkeypatch, tmp_path) -> None:

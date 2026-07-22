@@ -6,6 +6,7 @@ from leonervis_code.providers.definitions import (
 )
 from leonervis_code.providers.manager import (
     CompactionRuntimeSnapshot,
+    ContextTransitionRuntimeSnapshot,
     CurrentTargetContextAssessment,
     RuntimeProviderManager,
     RuntimeProviderStateError,
@@ -47,6 +48,7 @@ __all__ = [
     "ADAPTER_CONTRACT_VERSION",
     "ActiveProfileSelection",
     "CompactionRuntimeSnapshot",
+    "ContextTransitionRuntimeSnapshot",
     "ContextFitDecision",
     "ContextFitReport",
     "ContextPreflightError",

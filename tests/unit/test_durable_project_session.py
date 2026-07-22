@@ -11,8 +11,12 @@ from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.manager import RuntimeSwitchAuditError
 from leonervis_code.providers.profile import ProviderProfileSpec
 from leonervis_code.providers.profile_store import ProviderProfileStore
-from leonervis_code.providers.request_context import RequestTokenCount, RequestTokenCountMethod
-from leonervis_code.session import ProjectSession
+from leonervis_code.providers.request_context import (
+    ContextFitDecision,
+    RequestTokenCount,
+    RequestTokenCountMethod,
+)
+from leonervis_code.session import ProjectSession, ResumeEffect, SessionResumeContextError
 from leonervis_code.session_store import SessionStore, SessionStoreError
 from leonervis_code.system_prompt import build_system_prompt
 
@@ -82,6 +86,66 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     assert second.prompt("again") == "Fake response: again"
     assert second.transcript_path == transcript
     second.close()
+
+
+def test_target_aware_resume_rejects_known_overflow_without_mutation(tmp_path: Path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="tiny",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="tiny-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100,
+            model_max_output_tokens=4096,
+        )
+    )
+    first = ProjectSession.open(
+        tmp_path,
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    first.prompt("hello")
+    target = first.transcript_path
+    first.close()
+    target_before = target.read_bytes()
+    latest = target.parent / "latest.json"
+    latest_before = latest.read_bytes()
+
+    with pytest.raises(SessionResumeContextError):
+        ProjectSession.open(
+            tmp_path,
+            resume=SESSION_ONE,
+            profile="tiny",
+            environment={},
+            user_profile_path=store.user_path,
+            project_profile_path=store.project_path,
+            provider_factory=lambda route, *, environment: RecordingProvider("tiny"),
+            session_store_factory=session_store_factory(SESSION_TWO),
+        )
+
+    assert target.read_bytes() == target_before
+    assert latest.read_bytes() == latest_before
+
+
+def test_same_current_resume_is_a_mutation_free_noop(tmp_path: Path) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    before = session.transcript_path.read_bytes()
+    before_records = session.session_info().record_count
+
+    result = session.switch_session(session.session_id)
+
+    assert result.effect == ResumeEffect.ALREADY_CURRENT
+    assert session.transcript_path.read_bytes() == before
+    assert session.session_info().record_count == before_records
+    session.close()
 
 
 def test_project_session_resume_does_not_restore_historical_provider_binding(
@@ -299,6 +363,104 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert resumed.inspect_context().summary_present
     resumed.prompt("continue")
     assert resumed_provider.requests[-1].effective_summary is not None
+    resumed.close()
+
+
+def test_resume_screening_counts_compacted_effective_projection_only(tmp_path: Path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="compact",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="compact-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+    compact_provider = RecordingProvider("compact")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="compact",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: compact_provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    for index in range(4):
+        session.prompt(f"turn-{index}")
+    session.compact_context()
+    session.close()
+
+    class ProjectionProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.counted = []
+
+        def count_input_tokens(self, request):
+            self.counted.append(request)
+            return RequestTokenCount(100, RequestTokenCountMethod.ESTIMATED)
+
+    resumed_provider = ProjectionProvider("resumed")
+    resumed = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        profile="compact",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: resumed_provider,
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+
+    screened = resumed_provider.counted[0]
+    assert screened.effective_summary is not None
+    assert len(screened.history) == 4
+    assert resumed.startup_resume_result.fit_report.decision == ContextFitDecision.FITS
+    assert resumed.history != screened.history
+    assert resumed_provider.requests == []
+    resumed.close()
+
+
+def test_unknown_target_compatibility_applies_resume_without_generation(tmp_path: Path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="unknown",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="unknown-model",
+            base_url="http://127.0.0.1:11434/v1",
+        )
+    )
+    first = ProjectSession.open(
+        tmp_path,
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    first.prompt("hello")
+    first.close()
+    provider = RecordingProvider("unknown")
+
+    resumed = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        profile="unknown",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+
+    result = resumed.startup_resume_result
+    assert result.fit_report.decision == ContextFitDecision.UNKNOWN
+    assert provider.requests == []
+    assert resumed.history[-1] == AssistantText("Fake response: hello")
     resumed.close()
 
 

@@ -6,6 +6,8 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -58,6 +60,48 @@ class SessionLockedError(SessionStoreError):
     """Raised when another writer already owns a session."""
 
 
+class AtomicJsonWriteError(SessionStoreError):
+    """Report whether an atomic JSON write reached pathname replacement."""
+
+    def __init__(self, message: str, *, replaced: bool) -> None:
+        self.replaced = replaced
+        super().__init__(message)
+
+
+class SessionResumeStaleError(SessionStoreError):
+    """Raised when a prepared target changed before its first durable write."""
+
+
+class ResumeDurableStage(StrEnum):
+    NONE = "none"
+    RECOVERY_DURABLE = "recovery_durable"
+    SESSION_RESUMED_DURABLE = "session_resumed_durable"
+    DURABILITY_UNKNOWN = "durability_unknown"
+
+
+class LatestUpdateStatus(StrEnum):
+    UPDATED = "updated"
+    FAILED_UNCHANGED = "failed_unchanged"
+    REPLACED_DURABILITY_UNKNOWN = "replaced_durability_unknown"
+
+
+class SessionResumeCommitError(SessionStoreError):
+    """Describe the durable resume stage reached before a storage failure."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: ResumeDurableStage,
+        recovery_applied: bool = False,
+        session_resumed_applied: bool = False,
+    ) -> None:
+        self.stage = stage
+        self.recovery_applied = recovery_applied
+        self.session_resumed_applied = session_resumed_applied
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class SessionInfo:
     """Validated, redacted metadata for one stored session."""
@@ -71,6 +115,41 @@ class SessionInfo:
     turn_count: int
     closed: bool
     binding: BindingSnapshot
+
+
+@dataclass(frozen=True)
+class TranscriptStaleToken:
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class LatestStaleToken:
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    sha256: str
+    data: bytes
+
+
+@dataclass(frozen=True)
+class PendingTailRecovery:
+    truncate_offset: int
+    truncated_bytes: int
+
+
+@dataclass(frozen=True)
+class CommittedSessionResume:
+    writer: SessionWriter
+    recovery_applied: bool
+    latest_status: LatestUpdateStatus
+    latest_diagnostic: str | None = None
 
 
 _ACTIVE_WRITERS: set[str] = set()
@@ -130,6 +209,19 @@ class SessionStore:
                 )
                 _create_transcript(transcript_path, encode_record(header))
                 self._write_latest(session_id)
+            except AtomicJsonWriteError as error:
+                lock_stream.close()
+                _release_active_writer(lock_path)
+                if not error.replaced:
+                    try:
+                        transcript_path.unlink()
+                    except OSError:
+                        pass
+                    try:
+                        lock_path.unlink()
+                    except OSError:
+                        pass
+                raise
             except Exception:
                 lock_stream.close()
                 _release_active_writer(lock_path)
@@ -149,32 +241,72 @@ class SessionStore:
             expected_session_id=session_id,
             expected_file_name=transcript_path.name,
         )
-        return SessionWriter(self, transcript_path, lock_path, lock_stream, state)
+        transcript_descriptor = _open_existing_transcript(transcript_path, writable=True)
+        return SessionWriter(
+            self,
+            transcript_path,
+            lock_path,
+            lock_stream,
+            transcript_descriptor,
+            state,
+        )
 
-    def open(self, selector: str | Path) -> SessionWriter:
-        """Exclusively open latest, a strict UUID, or a path contained in this session root."""
-        self._ensure_root()
-        path = self._select_path(selector)
+    def prepare_resume(self, selector: str | Path) -> PreparedSessionResume:
+        """Lock and replay one resume target without durable mutation."""
+        _validate_existing_session_root(self.root, self.workspace)
+        selector_was_latest = selector == "latest"
+        latest_token: LatestStaleToken | None = None
+        if selector_was_latest:
+            with self._directory_lock(existing_only=True):
+                latest_path = self.root / _LATEST_NAME
+                latest_data, latest_info = _read_regular_file_descriptor(latest_path)
+                latest_token = _latest_token(latest_data, latest_info)
+                path = self._decode_latest_data(latest_data)
+        else:
+            path = self._select_path_readonly(selector)
         session_id = _session_id_from_path(path)
         lock_path = self.root / f"{session_id}.lock"
-        lock_stream = self._acquire_writer_lock(lock_path, create_exclusive=False)
+        lock_stream = self._acquire_writer_lock(
+            lock_path,
+            create_exclusive=False,
+            existing_only=True,
+        )
+        lock_info = os.fstat(lock_stream.fileno())
+        transcript_descriptor: int | None = None
         try:
-            state = self._load_state(path, allow_repair=True)
-            resumed = SessionResumed(sequence=state.next_sequence, occurred_at=self._clock())
-            _append_record(path, resumed)
-            state = replay_records(
-                [*state.records, resumed],
-                expected_workspace=str(self.workspace),
-                expected_workspace_fingerprint=self.workspace_fingerprint,
-                expected_session_id=session_id,
-                expected_file_name=path.name,
+            transcript_descriptor = _open_existing_transcript(path)
+            data, info = _read_descriptor_bytes(transcript_descriptor, path)
+            state, pending_recovery = self._prepare_replay(path, data)
+            token = _transcript_token(data, info)
+            prepared = PreparedSessionResume(
+                self,
+                path,
+                lock_path,
+                lock_stream,
+                (lock_info.st_dev, lock_info.st_ino),
+                transcript_descriptor,
+                state,
+                data,
+                token,
+                pending_recovery,
+                selector_was_latest=selector_was_latest,
+                latest_token=latest_token,
             )
-            with self._directory_lock():
-                self._write_latest(session_id)
-            return SessionWriter(self, path, lock_path, lock_stream, state)
-        except Exception:
-            lock_stream.close()
-            _release_active_writer(lock_path)
+            transcript_descriptor = None
+            return prepared
+        except BaseException:
+            if transcript_descriptor is not None:
+                os.close(transcript_descriptor)
+            _release_writer_lease(lock_path, lock_stream)
+            raise
+
+    def open(self, selector: str | Path) -> SessionWriter:
+        """Compatibility wrapper over the prepared resume transaction."""
+        prepared = self.prepare_resume(selector)
+        try:
+            return prepared.commit().writer
+        except BaseException:
+            prepared.abort()
             raise
 
     def show(self, selector: str | Path) -> SessionInfo:
@@ -199,6 +331,71 @@ class SessionStore:
                 infos.append(_info(path, self._load_state(path, allow_repair=False)))
         return tuple(
             sorted(infos, key=lambda item: (item.created_at, item.session_id), reverse=True)
+        )
+
+    def _prepare_replay(
+        self,
+        path: Path,
+        data: bytes,
+    ) -> tuple[ReplayState, PendingTailRecovery | None]:
+        if not data:
+            raise SessionStoreError("session transcript is empty")
+        if len(data) > MAX_TRANSCRIPT_BYTES:
+            raise SessionStoreError(f"session transcript exceeds {MAX_TRANSCRIPT_BYTES} bytes")
+        if data.endswith(b"\n"):
+            return self._replay(path, _decode_lines(data)), None
+        tail_start = data.rfind(b"\n") + 1
+        tail = data[tail_start:]
+        try:
+            json.loads(tail.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            if tail_start == 0:
+                raise SessionStoreError(
+                    "session transcript has an incomplete final record"
+                ) from None
+            prefix = data[:tail_start]
+            return (
+                self._replay(path, _decode_lines(prefix)),
+                PendingTailRecovery(tail_start, len(tail)),
+            )
+        raise SessionStoreError(
+            "session transcript ends with a complete JSON record without a newline"
+        )
+
+    def _select_path_readonly(self, selector: str | Path) -> Path:
+        if isinstance(selector, Path):
+            return _validated_selected_path_readonly(selector, self.root)
+        if not isinstance(selector, str):
+            raise SessionStoreError("session selector must be latest, a UUID, or a path")
+        if selector == "latest":
+            raise SessionStoreError("latest selector must be resolved through prepare_resume")
+        if "/" in selector or "\\" in selector or selector.endswith(".jsonl"):
+            return _validated_selected_path_readonly(Path(selector), self.root)
+        try:
+            session_id = canonical_session_id(selector)
+        except SessionRecordError as error:
+            raise SessionStoreError(str(error)) from None
+        return _validated_selected_path_readonly(self.root / f"{session_id}.jsonl", self.root)
+
+    def _decode_latest_data(self, data: bytes) -> Path:
+        try:
+            value = json.loads(data.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            raise SessionStoreError("latest session metadata is unreadable or invalid") from None
+        if not isinstance(value, dict):
+            raise SessionStoreError("latest session metadata must be a JSON object")
+        expected = {"schema_version", "session_id", "transcript"}
+        if set(value) != expected or value.get("schema_version") != LATEST_SCHEMA_VERSION:
+            raise SessionStoreError("latest session metadata has an unsupported schema")
+        try:
+            session_id = canonical_session_id(value.get("session_id"))
+        except SessionRecordError as error:
+            raise SessionStoreError(f"invalid latest session target: {error}") from None
+        if value.get("transcript") != f"{session_id}.jsonl":
+            raise SessionStoreError("latest session target does not match its session ID")
+        return _validated_selected_path_readonly(
+            self.root / f"{session_id}.jsonl",
+            self.root,
         )
 
     def _load_state(self, path: Path, *, allow_repair: bool) -> ReplayState:
@@ -317,9 +514,13 @@ class SessionStore:
         _ensure_directory(self.root, boundary=self.workspace)
 
     @contextmanager
-    def _directory_lock(self) -> Iterator[None]:
+    def _directory_lock(self, *, existing_only: bool = False) -> Iterator[None]:
         path = self.root / _DIRECTORY_LOCK_NAME
-        stream = _open_lock(path, exclusive_create=False)
+        stream = _open_lock(
+            path,
+            exclusive_create=False,
+            existing_only=existing_only,
+        )
         try:
             _lock_stream(stream, nonblocking=False)
             yield
@@ -327,14 +528,24 @@ class SessionStore:
             _unlock_stream(stream)
             stream.close()
 
-    def _acquire_writer_lock(self, path: Path, *, create_exclusive: bool) -> BinaryIO:
+    def _acquire_writer_lock(
+        self,
+        path: Path,
+        *,
+        create_exclusive: bool,
+        existing_only: bool = False,
+    ) -> BinaryIO:
         key = str(path)
         with _ACTIVE_WRITERS_GUARD:
             if key in _ACTIVE_WRITERS:
                 raise SessionLockedError(f"session already has an active writer: {path.stem}")
             _ACTIVE_WRITERS.add(key)
         try:
-            stream = _open_lock(path, exclusive_create=create_exclusive)
+            stream = _open_lock(
+                path,
+                exclusive_create=create_exclusive,
+                existing_only=existing_only,
+            )
             _lock_stream(stream, nonblocking=True)
             return stream
         except SessionLockedError:
@@ -343,6 +554,175 @@ class SessionStore:
         except Exception:
             _release_active_writer(path)
             raise
+
+
+class PreparedSessionResume:
+    """Single-use, mutation-free replay lease promoted only by commit."""
+
+    def __init__(
+        self,
+        store: SessionStore,
+        path: Path,
+        lock_path: Path,
+        lock_stream: BinaryIO,
+        lock_identity: tuple[int, int],
+        transcript_descriptor: int,
+        state: ReplayState,
+        original_data: bytes,
+        transcript_token: TranscriptStaleToken,
+        pending_recovery: PendingTailRecovery | None,
+        *,
+        selector_was_latest: bool,
+        latest_token: LatestStaleToken | None,
+    ) -> None:
+        self._store = store
+        self.path = path
+        self.lock_path = lock_path
+        self._lock_stream = lock_stream
+        self._lock_identity = lock_identity
+        self._transcript_descriptor = transcript_descriptor
+        self.state = state
+        self.original_data = original_data
+        self.transcript_token = transcript_token
+        self.pending_recovery = pending_recovery
+        self.selector_was_latest = selector_was_latest
+        self.latest_token = latest_token
+        self._live = True
+
+    @property
+    def session_id(self) -> str:
+        return self.state.header.session_id
+
+    @property
+    def info(self) -> SessionInfo:
+        return _info(self.path, self.state)
+
+    def commit(self) -> CommittedSessionResume:
+        """Revalidate, durably resume, update latest, and transfer ownership."""
+        if not self._live:
+            raise SessionResumeStaleError("prepared resume is no longer active")
+        recovery_applied = False
+        with self._store._directory_lock(existing_only=True):
+            self._revalidate()
+            records = list(self.state.records)
+            recovery: Recovery | None = None
+            if self.pending_recovery is not None:
+                recovery = Recovery(
+                    sequence=len(records),
+                    occurred_at=self._store._clock(),
+                    truncated_bytes=self.pending_recovery.truncated_bytes,
+                )
+                records.append(recovery)
+            resumed = SessionResumed(
+                sequence=len(records),
+                occurred_at=self._store._clock(),
+            )
+            records.append(resumed)
+            candidate = self._store._replay(self.path, records)
+            try:
+                if recovery is not None:
+                    _truncate_and_append_recovery_descriptor(
+                        self._transcript_descriptor,
+                        self.path,
+                        self.pending_recovery.truncate_offset,
+                        recovery,
+                    )
+                    recovery_applied = True
+                _append_record_descriptor(self._transcript_descriptor, self.path, resumed)
+            except BaseException as error:
+                stage = (
+                    ResumeDurableStage.RECOVERY_DURABLE
+                    if recovery_applied
+                    else ResumeDurableStage.DURABILITY_UNKNOWN
+                )
+                self.abort()
+                raise SessionResumeCommitError(
+                    "could not durably append the resume audit",
+                    stage=stage,
+                    recovery_applied=recovery_applied,
+                    session_resumed_applied=False,
+                ) from error
+            latest_status = LatestUpdateStatus.UPDATED
+            latest_diagnostic = None
+            try:
+                self._store._write_latest(self.session_id)
+            except AtomicJsonWriteError as error:
+                latest_status = (
+                    LatestUpdateStatus.REPLACED_DURABILITY_UNKNOWN
+                    if error.replaced
+                    else LatestUpdateStatus.FAILED_UNCHANGED
+                )
+                latest_diagnostic = str(error)
+            writer = SessionWriter(
+                self._store,
+                self.path,
+                self.lock_path,
+                self._lock_stream,
+                self._transcript_descriptor,
+                candidate,
+            )
+            self._live = False
+            return CommittedSessionResume(
+                writer,
+                recovery_applied,
+                latest_status,
+                latest_diagnostic,
+            )
+
+    def abort(self) -> None:
+        if not self._live:
+            return
+        self._live = False
+        try:
+            try:
+                os.close(self._transcript_descriptor)
+            finally:
+                _unlock_stream(self._lock_stream)
+        finally:
+            try:
+                self._lock_stream.close()
+            finally:
+                _release_active_writer(self.lock_path)
+
+    def _revalidate(self) -> None:
+        try:
+            lock_path_info = self.lock_path.lstat()
+            lock_descriptor_info = os.fstat(self._lock_stream.fileno())
+        except OSError:
+            raise SessionResumeStaleError(
+                "target Session lock changed during resume preparation"
+            ) from None
+        if (
+            self.lock_path.is_symlink()
+            or not stat.S_ISREG(lock_path_info.st_mode)
+            or (lock_path_info.st_dev, lock_path_info.st_ino) != self._lock_identity
+            or (lock_descriptor_info.st_dev, lock_descriptor_info.st_ino) != self._lock_identity
+        ):
+            raise SessionResumeStaleError("target Session lock changed during resume preparation")
+        data, info = _read_descriptor_bytes(self._transcript_descriptor, self.path)
+        if _transcript_token(data, info) != self.transcript_token:
+            raise SessionResumeStaleError("target Session changed during resume preparation")
+        pathname = self.path.lstat()
+        if (pathname.st_dev, pathname.st_ino) != (
+            self.transcript_token.device,
+            self.transcript_token.inode,
+        ):
+            raise SessionResumeStaleError("target Session path changed during resume preparation")
+        if self.selector_was_latest:
+            assert self.latest_token is not None
+            latest_data, latest_info = _read_regular_file_descriptor(
+                self._store.root / _LATEST_NAME
+            )
+            if _latest_token(latest_data, latest_info) != self.latest_token:
+                raise SessionResumeStaleError(
+                    "workspace latest Session changed during resume preparation"
+                )
+
+    def __enter__(self) -> PreparedSessionResume:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.abort()
 
 
 class SessionWriter:
@@ -354,12 +734,14 @@ class SessionWriter:
         path: Path,
         lock_path: Path,
         lock_stream: BinaryIO,
+        transcript_descriptor: int,
         state: ReplayState,
     ) -> None:
         self._store = store
         self.path = path
         self.lock_path = lock_path
         self._lock_stream = lock_stream
+        self._transcript_descriptor = transcript_descriptor
         self._state = state
         self._released = False
 
@@ -410,8 +792,10 @@ class SessionWriter:
     def append_audit(self, record: AuditRecord) -> AuditRecord:
         """Append one typed audit event; audit events never enter replay history."""
         self._ensure_writable()
-        if isinstance(record, Recovery):
-            raise SessionStoreError("recovery records are reserved for automatic tail repair")
+        if isinstance(record, (Recovery, SessionResumed)):
+            raise SessionStoreError(
+                "recovery and session_resumed records are reserved for prepared resume"
+            )
         if record.sequence != self._state.next_sequence:
             raise SessionStoreError(
                 f"audit sequence must be {self._state.next_sequence}, got {record.sequence}"
@@ -487,7 +871,7 @@ class SessionWriter:
             expected_session_id=self.session_id,
             expected_file_name=self.path.name,
         )
-        _append_record(self.path, record)
+        _append_record_descriptor(self._transcript_descriptor, self.path, record)
         self._state = candidate
 
     def _ensure_writable(self) -> None:
@@ -501,10 +885,194 @@ class SessionWriter:
             return
         self._released = True
         try:
-            _unlock_stream(self._lock_stream)
+            try:
+                os.close(self._transcript_descriptor)
+            finally:
+                _unlock_stream(self._lock_stream)
         finally:
-            self._lock_stream.close()
-            _release_active_writer(self.lock_path)
+            try:
+                self._lock_stream.close()
+            finally:
+                _release_active_writer(self.lock_path)
+
+
+def _open_existing_transcript(path: Path, *, writable: bool = True) -> int:
+    flags = os.O_RDWR if writable else os.O_RDONLY
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise SessionStoreError(f"session transcript is not a regular file: {path}")
+        return descriptor
+    except SessionStoreError:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise
+    except OSError:
+        raise SessionStoreError(f"session transcript is inaccessible: {path}") from None
+
+
+def _read_descriptor_bytes(descriptor: int, path: Path) -> tuple[bytes, os.stat_result]:
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise SessionStoreError(f"session transcript is not a regular file: {path}")
+        if info.st_size > MAX_TRANSCRIPT_BYTES:
+            raise SessionStoreError(
+                f"session transcript exceeds {MAX_TRANSCRIPT_BYTES} bytes: {path}"
+            )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = info.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        final = os.fstat(descriptor)
+        if len(data) != info.st_size or (final.st_dev, final.st_ino, final.st_size) != (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+        ):
+            raise SessionStoreError("session transcript changed while it was being read")
+        return data, final
+    except SessionStoreError:
+        raise
+    except OSError:
+        raise SessionStoreError(f"could not read session transcript: {path}") from None
+
+
+def _read_regular_file_descriptor(path: Path) -> tuple[bytes, os.stat_result]:
+    descriptor = _open_existing_transcript(path, writable=False)
+    try:
+        data, info = _read_descriptor_bytes(descriptor, path)
+        if len(data) > MAX_RECORD_BYTES:
+            raise SessionStoreError("latest session metadata is oversized")
+        return data, info
+    finally:
+        os.close(descriptor)
+
+
+def _transcript_token(data: bytes, info: os.stat_result) -> TranscriptStaleToken:
+    return TranscriptStaleToken(
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        hashlib.sha256(data).hexdigest(),
+    )
+
+
+def _latest_token(data: bytes, info: os.stat_result) -> LatestStaleToken:
+    return LatestStaleToken(
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        hashlib.sha256(data).hexdigest(),
+        data,
+    )
+
+
+def _append_record_descriptor(descriptor: int, path: Path, record: SessionRecord) -> None:
+    payload = encode_record(record)
+    try:
+        path_info = path.lstat()
+        info = os.fstat(descriptor)
+        if path.is_symlink() or (path_info.st_dev, path_info.st_ino) != (
+            info.st_dev,
+            info.st_ino,
+        ):
+            raise SessionResumeStaleError("session transcript path no longer matches its writer")
+        if info.st_size + len(payload) > MAX_TRANSCRIPT_BYTES:
+            raise SessionStoreError(
+                f"session transcript would exceed {MAX_TRANSCRIPT_BYTES} bytes: {path}"
+            )
+        os.lseek(descriptor, 0, os.SEEK_END)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
+        os.fsync(descriptor)
+    except SessionStoreError:
+        raise
+    except OSError:
+        raise SessionStoreError(f"could not append session transcript: {path}") from None
+
+
+def _truncate_and_append_recovery_descriptor(
+    descriptor: int,
+    path: Path,
+    offset: int,
+    record: Recovery,
+) -> None:
+    try:
+        os.ftruncate(descriptor, offset)
+        _append_record_descriptor(descriptor, path, record)
+    except SessionStoreError:
+        raise
+    except OSError:
+        raise SessionStoreError(f"could not repair session transcript: {path}") from None
+
+
+def _validate_existing_session_root(root: Path, workspace: Path) -> None:
+    if root.is_symlink() or workspace not in root.parents:
+        raise SessionStoreError("session root is unsafe")
+    try:
+        info = root.lstat()
+    except OSError:
+        raise SessionStoreError(
+            f"session directory does not exist or is inaccessible: {root}"
+        ) from None
+    if not stat.S_ISDIR(info.st_mode):
+        raise SessionStoreError(f"session root is not a directory: {root}")
+    for name in (_DIRECTORY_LOCK_NAME, _LATEST_NAME):
+        path = root / name
+        if path.is_symlink():
+            raise SessionStoreError(f"session path must not be a symlink: {path}")
+        try:
+            child = path.lstat()
+        except OSError:
+            raise SessionStoreError(
+                f"session file does not exist or is inaccessible: {path}"
+            ) from None
+        if not stat.S_ISREG(child.st_mode):
+            raise SessionStoreError(f"session path is not a regular file: {path}")
+
+
+def _validated_selected_path_readonly(path: Path, root: Path) -> Path:
+    candidate = path if path.is_absolute() else Path.cwd() / path
+    absolute = candidate.absolute()
+    if absolute.parent != root.absolute():
+        raise SessionStoreError("session path must be directly inside the current session root")
+    _session_id_from_path(absolute)
+    if absolute.is_symlink():
+        raise SessionStoreError(f"session path must not be a symlink: {absolute}")
+    try:
+        info = absolute.lstat()
+    except OSError:
+        raise SessionStoreError(
+            f"session file does not exist or is inaccessible: {absolute}"
+        ) from None
+    if not stat.S_ISREG(info.st_mode):
+        raise SessionStoreError(f"session path is not a regular file: {absolute}")
+    return absolute
+
+
+def _release_writer_lease(path: Path, stream: BinaryIO) -> None:
+    try:
+        _unlock_stream(stream)
+    finally:
+        try:
+            stream.close()
+        finally:
+            _release_active_writer(path)
 
 
 def _factory_session_id(factory: Callable[[], UUID | str]) -> str:
@@ -622,6 +1190,7 @@ def _atomic_json_write(path: Path, data: dict[str, object]) -> None:
     )
     temporary: str | None = None
     descriptor: int | None = None
+    replaced = False
     try:
         descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".latest.", suffix=".tmp")
         os.fchmod(descriptor, 0o600)
@@ -631,11 +1200,14 @@ def _atomic_json_write(path: Path, data: dict[str, object]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        replaced = True
         temporary = None
-        os.chmod(path, 0o600)
         _fsync_directory(path.parent)
     except OSError:
-        raise SessionStoreError(f"could not update latest session metadata: {path}") from None
+        raise AtomicJsonWriteError(
+            f"could not update latest session metadata: {path}",
+            replaced=replaced,
+        ) from None
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -713,12 +1285,19 @@ def _ensure_directory(path: Path, *, boundary: Path) -> None:
             raise SessionStoreError(f"could not secure session directory: {current}") from None
 
 
-def _open_lock(path: Path, *, exclusive_create: bool) -> BinaryIO:
+def _open_lock(
+    path: Path,
+    *,
+    exclusive_create: bool,
+    existing_only: bool = False,
+) -> BinaryIO:
     if path.parent.is_symlink() or not path.parent.is_dir():
         raise SessionStoreError(f"session lock directory is unsafe: {path.parent}")
     if path.is_symlink():
         raise SessionStoreError(f"session lock must not be a symlink: {path}")
-    flags = os.O_RDWR | os.O_CREAT
+    flags = os.O_RDWR
+    if not existing_only:
+        flags |= os.O_CREAT
     if exclusive_create:
         flags |= os.O_EXCL
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -728,7 +1307,8 @@ def _open_lock(path: Path, *, exclusive_create: bool) -> BinaryIO:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise SessionStoreError(f"session lock is not a regular file: {path}")
-        os.fchmod(descriptor, 0o600)
+        if not existing_only:
+            os.fchmod(descriptor, 0o600)
         stream = os.fdopen(descriptor, "a+b")
         descriptor = None
         return stream

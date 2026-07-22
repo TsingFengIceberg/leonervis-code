@@ -12,6 +12,7 @@
 - [Foundation 3B: local multi-provider real-model path](#foundation-3b-local-multi-provider-real-model-path)
 - [Foundation 2B: offline adapter-owned compatibility policy](#foundation-2b-offline-adapter-owned-compatibility-policy)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
+- [Foundation 3G: Target-aware Resume Prepare/Commit](#foundation-3g-target-aware-resume-preparecommit)
 - [Foundation 3F-2: Controlled Compact Transaction](#foundation-3f-2-controlled-compact-transaction)
 - [Provider-neutral Effective Context Snapshot and `/context`](#provider-neutral-effective-context-snapshot-and-context)
 - [Target-aware runtime switch UX](#target-aware-runtime-switch-ux)
@@ -272,6 +273,18 @@ Foundation 1B originally proved only process-local atomic history. Foundation 3D
 
 See [0001: single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md), [0002: deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md), [0003: in-memory text history](./decisions/0003-foundation-1a-in-memory-text-history.md), and [0004: bounded read_file tool loop](./decisions/0004-foundation-1b-bounded-read-file-tool-loop.md) for the detailed decisions.
 
+## Foundation 3G: Target-aware Resume Prepare/Commit
+
+Startup `--resume` and REPL `/resume` now prepare the target, build its candidate Effective Context, and screen it against the current runtime before durable commit. Known context/model-output overflow is rejected before any resume audit, tail recovery, or latest-pointer write. `UNKNOWN` fails open with a warning; fake mode explicitly reports screening unavailable and sends no provider request. Resume still restores Session state only and never reconstructs the runtime from historical bindings.
+
+`SessionStore.prepare_resume()` is a physically read-only, single-use exclusive lease. It requires the existing root, directory lock, target lock, latest metadata, and transcript; replays through a retained `O_NOFOLLOW` descriptor; and records an incomplete final crash tail only as pending recovery. The transcript stale token includes device/inode/size/mtime/ctime plus exact-byte SHA-256, while the `latest` selector also captures a pointer token. Before its first write, commit revalidates the transcript, pathname, target lock, and latest CAS. Appends, same-size replacement, inode/symlink/lock swaps, and a latest-pointer move during counting therefore become retryable conflicts. Explicit UUID/path selection ignores unrelated latest moves, while a same-current selector returns a write-free no-op.
+
+Commit candidate-replays the proposed records before applying `Recovery` when needed, then `SessionResumed`, then the atomic latest update. `Recovery` may follow `SessionClosed` but keeps the state closed until `SessionResumed`. The prepared descriptor/lock transfers to `SessionWriter` after success; ordinary appends also use that descriptor and verify pathname identity, eliminating the revalidate/reopen TOCTOU gap.
+
+The fsync of `SessionResumed` is the semantic commit point. Typed outcomes distinguish precommit/stale failure, recovery-only durability, unknown transcript durability, applied resume with an unchanged failed latest pointer, and replaced latest with unknown directory-fsync durability. Errors after the commit point no longer claim that everything was unchanged or attempt unreliable rollback. Top-level `--resume ... prompt` sends resume evidence to stderr so stdout contains only the final model response; known rejection exits 2 with empty stdout.
+
+The Manager's context-transition lease pins the current provider, route, capability, status, and generation while blocking switch, turn, compact, and close. Screening uses the candidate loop's `effective_context_snapshot()`, so a compacted Session is measured only as summary plus retained suffix. The next real invocation still performs full preflight. The canonical model system prompt was reviewed: this slice has no model-visible change, so version 2, exact text, and fingerprint remain unchanged. See [0018: Target-aware Resume Prepare/Commit](./decisions/0018-target-aware-resume-prepare-commit.md).
+
 ## Foundation 3F-2: Controlled Compact Transaction
 
 REPL `/compact` can now shorten provider-visible effective context manually while preserving the complete append-only transcript and `/history`. The first fixed policy requires at least four complete effective turns, retains the latest two verbatim, and uses the current real provider once to summarize the earlier projection. Fake runtime is unavailable, compaction is never automatic, and the original user turn is not retried.
@@ -313,7 +326,7 @@ The Manager screens the same provider/route/capability candidate it already prep
 
 Under its facade lock, `ProjectSession` freezes history, screens and commits, and then appends the existing schema-v1 `RuntimeChanged` record. If the runtime changed but audit append fails, `RuntimeSwitchAuditError` carries the applied result rather than falsely claiming that the switch did not happen or attempting an unreliable rollback. Transcript bindings now preserve the real runtime generation. A rejected switch writes no conversation, `TurnFailed`, or runtime-change record.
 
-This slice does not pre-screen `/resume` or startup `--resume`: `SessionStore.open()` currently appends a resume record and updates the latest pointer before returning, so atomic rejection requires a later read-only prepare/commit design. It also does not compact, delete history, or create a new Session automatically.
+The original Foundation 3E slice did not pre-screen `/resume` or startup `--resume`; Foundation 3G now closes that boundary with read-only preparation, current-runtime screening, and a durable commit transaction. Runtime switching itself still does not compact, delete history, or create a new Session automatically.
 
 See [0015: target-aware runtime switch UX](./decisions/0015-target-aware-runtime-switch-ux.md). The canonical model system prompt was reviewed; this remains Host-side runtime control, so version 1 and its fingerprint remain unchanged.
 
@@ -381,3 +394,4 @@ This slice establishes capacity facts only. It does not count current request to
 15. [0015: target-aware runtime switch UX](./decisions/0015-target-aware-runtime-switch-ux.md)
 16. [0016: provider-neutral Effective Context Snapshot](./decisions/0016-provider-neutral-effective-context-snapshot.md)
 17. [0017: Controlled Compact Transaction](./decisions/0017-controlled-compact-transaction.md)
+18. [0018: Target-aware Resume Prepare/Commit](./decisions/0018-target-aware-resume-prepare-commit.md)

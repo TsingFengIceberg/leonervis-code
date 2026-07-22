@@ -118,6 +118,59 @@ def test_compaction_runtime_lease_is_real_pinned_and_blocks_switches(tmp_path) -
     assert manager.use_profile("two").status.profile == "two"
 
 
+def test_context_transition_lease_is_pinned_read_only_and_releases_after_base_exception(
+    tmp_path,
+) -> None:
+    store = configured_store(tmp_path)
+    profile = store.get_profile("one")
+    store.replace_profile(
+        profile.profile_id,
+        replace(
+            profile.to_spec(),
+            context_window_tokens=100,
+            model_max_output_tokens=80,
+            max_output_tokens=20,
+        ),
+        expected_revision=profile.revision,
+    )
+
+    class CountingProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            return RequestTokenCount(70, RequestTokenCountMethod.ESTIMATED)
+
+    provider = CountingProvider("one")
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: provider,
+    )
+    request = ConversationRequest(
+        build_system_prompt(),
+        (UserMessage("hello"), AssistantText("reply")),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        with manager.provider_for_context_transition() as runtime:
+            assessment = runtime.assess_context(request)
+            assert assessment.fit_report is not None
+            assert assessment.fit_report.decision == ContextFitDecision.FITS
+            assert provider.requests == []
+            with pytest.raises(RuntimeProviderStateError, match="active operation"):
+                manager.use_profile("two")
+            with pytest.raises(RuntimeProviderStateError, match="already active"):
+                with manager.provider_for_turn():
+                    pass
+            with pytest.raises(RuntimeProviderStateError, match="already active"):
+                with manager.provider_for_compaction():
+                    pass
+            with pytest.raises(RuntimeProviderStateError, match="during a conversation turn"):
+                manager.close()
+            raise KeyboardInterrupt
+
+    assert manager.use_profile("two").status.profile == "two"
+
+
 def test_fake_runtime_rejects_controlled_compaction(tmp_path) -> None:
     manager = RuntimeProviderManager(configured_store(tmp_path), environment={})
 
