@@ -38,6 +38,8 @@ from leonervis_code.providers.request_context import (
 )
 from leonervis_code.session import ProjectSession
 from leonervis_code.system_prompt import build_system_prompt
+from leonervis_code.tools.glob import GlobTool
+from leonervis_code.tools.read_file import ReadFileTool
 
 
 @dataclass
@@ -659,6 +661,32 @@ def test_fake_runtime_has_explicit_empty_provenance(tmp_path) -> None:
     assert status.profile_fingerprint is None
     assert status.route_fingerprint is None
     assert status.model_override is None
+
+
+def test_project_session_constructs_both_tools_from_the_resolved_workspace(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    seen: list[tuple[str, object]] = []
+
+    def read_factory(path):
+        seen.append(("read_file", path))
+        return ReadFileTool(path)
+
+    def glob_factory(path):
+        seen.append(("glob", path))
+        return GlobTool(path)
+
+    session = ProjectSession.open(
+        workspace / ".",
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+        read_file_factory=read_factory,
+        glob_factory=glob_factory,
+    )
+    session.close()
+
+    assert seen == [("read_file", workspace.resolve()), ("glob", workspace.resolve())]
 
 
 def test_session_closes_provider_when_tool_construction_fails(tmp_path) -> None:

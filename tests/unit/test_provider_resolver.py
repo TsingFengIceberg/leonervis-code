@@ -189,7 +189,7 @@ def test_route_fingerprint_is_canonical_and_credential_state_independent() -> No
         environment={"OPENAI_API_KEY": "first", "OPENAI_BASE_URL": "https://proxy.test/v1"},
     )
 
-    assert ADAPTER_CONTRACT_VERSION == 3
+    assert ADAPTER_CONTRACT_VERSION == 4
     assert first.fingerprint() == second.fingerprint()
     assert len(first.fingerprint()) == 64
     assert first.fingerprint() != overridden.fingerprint()

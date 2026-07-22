@@ -18,6 +18,7 @@ from leonervis_code.session import (
 )
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import LatestUpdateStatus, SessionInfo
+from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -63,7 +64,7 @@ class Session:
         )
 
     def inspect_context(self):
-        loop = AgentLoop(None, ReadFileTool(self.tmp_path))
+        loop = AgentLoop(None, ReadFileTool(self.tmp_path), GlobTool(self.tmp_path))
         assessment = CurrentTargetContextAssessment(
             self.status(),
             None,

@@ -10,7 +10,6 @@ from leonervis_code.core.effective_context import CanonicalToolDefinition
 MAX_CONTENT_BYTES = 32 * 1024
 TRUNCATION_MARKER = "\n[truncated]\n"
 READ_FILE_TOOL_NAME = "read_file"
-MAX_READ_FILE_EXECUTIONS_PER_TURN = 3
 
 
 def read_file_model_definition() -> dict[str, object]:

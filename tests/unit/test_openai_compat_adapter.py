@@ -32,6 +32,7 @@ from leonervis_code.providers.openai_compat import (
     build_compact_summary_request,
     build_request,
     create_openai_compatible_provider,
+    glob_tool_definition,
     parse_compact_summary_response,
     parse_response,
     read_file_tool_definition,
@@ -40,6 +41,7 @@ from leonervis_code.providers.openai_compat import (
 from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.providers.resolver import resolve_runtime_route
 from leonervis_code.system_prompt import build_system_prompt
+from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -169,6 +171,21 @@ def test_serializer_preserves_tool_call_and_result_pairing() -> None:
     ]
 
 
+def test_serializer_preserves_glob_pattern_as_native_arguments() -> None:
+    history = (
+        UserMessage("Find"),
+        ToolUse("glob-provider", "glob", "src/**/*.py"),
+        ToolResult("glob-provider", "src/app.py\n"),
+    )
+
+    serialized = serialize_history(history, route=route())
+
+    assert serialized[1]["tool_calls"][0]["function"] == {
+        "name": "glob",
+        "arguments": '{"pattern":"src/**/*.py"}',
+    }
+
+
 def test_tool_schema_is_exact_and_closed() -> None:
     assert read_file_tool_definition() == {
         "type": "function",
@@ -191,6 +208,20 @@ def test_tool_schema_is_exact_and_closed() -> None:
             },
         },
     }
+
+
+def test_glob_schema_and_parser_use_pattern_key() -> None:
+    definition = glob_tool_definition()
+    assert definition["function"]["name"] == "glob"
+    assert definition["function"]["parameters"]["required"] == ["pattern"]
+    call = tool_call(
+        call_id="glob-provider",
+        name="glob",
+        arguments='{"pattern":"src/**/*.py"}',
+    )
+    assert parse_response(
+        completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
+    ) == ToolUse("glob-provider", "glob", "src/**/*.py")
 
 
 def test_parser_decodes_complete_text_and_one_read_file_call() -> None:
@@ -337,7 +368,11 @@ def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:
             completion(content="I read it."),
         ]
     )
-    loop = AgentLoop(OpenAICompatibleConversationProvider(route(), client), ReadFileTool(tmp_path))
+    loop = AgentLoop(
+        OpenAICompatibleConversationProvider(route(), client),
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+    )
 
     assert loop.run("Read README") == "I read it."
     assert client.requests[1]["messages"][0] == {

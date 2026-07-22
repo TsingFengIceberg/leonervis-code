@@ -64,6 +64,7 @@ from leonervis_code.session_store import (
     SessionStoreError,
     SessionWriter,
 )
+from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -260,6 +261,7 @@ class ProjectSession:
         session_store: SessionStore,
         writer: SessionWriter,
         read_file: ReadFileTool,
+        glob: GlobTool,
         *,
         loop: AgentLoop | None = None,
         startup_resume_result: SessionResumeResult | None = None,
@@ -270,6 +272,7 @@ class ProjectSession:
         self._session_store = session_store
         self._writer = writer
         self._read_file = read_file
+        self._glob = glob
         self._lock = RLock()
         self._closed = False
         self._active_compaction: _PreparedCompaction | None = None
@@ -293,6 +296,7 @@ class ProjectSession:
         project_profile_path: Path | None = None,
         provider_factory: Callable[..., ConversationProvider] | None = None,
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
+        glob_factory: Callable[[Path], GlobTool] = GlobTool,
         session_store_factory: Callable[[Path], SessionStore] = SessionStore,
     ) -> ProjectSession:
         """Create or resume durable history while selecting runtime independently."""
@@ -323,17 +327,27 @@ class ProjectSession:
         writer: SessionWriter | None = None
         try:
             read_file = read_file_factory(resolved_workspace)
+            glob = glob_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
                 writer = session_store.create(binding)
-                return cls(resolved_workspace, store, manager, session_store, writer, read_file)
+                return cls(
+                    resolved_workspace,
+                    store,
+                    manager,
+                    session_store,
+                    writer,
+                    read_file,
+                    glob,
+                )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
             try:
                 loop = cls._loop_from_state(
                     prepared.state,
                     read_file,
+                    glob,
                     commit_turn=lambda turn: writer_holder["writer"].append_turn(
                         turn.items,
                         binding=binding_from_status(manager.status()),
@@ -363,6 +377,7 @@ class ProjectSession:
                     session_store,
                     writer,
                     read_file,
+                    glob,
                     loop=loop,
                     startup_resume_result=result,
                 )
@@ -455,6 +470,7 @@ class ProjectSession:
                 loop = self._loop_from_state(
                     prepared.state,
                     self._read_file,
+                    self._glob,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                 )
                 snapshot = loop.effective_context_snapshot()
@@ -855,10 +871,11 @@ class ProjectSession:
         self.close()
 
     @staticmethod
-    def _loop_from_state(state, read_file, *, commit_turn) -> AgentLoop:
+    def _loop_from_state(state, read_file, glob, *, commit_turn) -> AgentLoop:
         return AgentLoop(
             None,
             read_file,
+            glob,
             initial_history=state.history,
             initial_effective_history=state.effective_history,
             initial_effective_summary=state.effective_summary,
@@ -870,6 +887,7 @@ class ProjectSession:
         return self._loop_from_state(
             writer.state,
             self._read_file,
+            self._glob,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
         )
 

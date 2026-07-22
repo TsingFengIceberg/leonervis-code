@@ -1,4 +1,4 @@
-"""The bounded orchestration loop for Foundation 1B."""
+"""The bounded orchestration loop for the current sequential tool surface."""
 
 from __future__ import annotations
 
@@ -28,12 +28,9 @@ from leonervis_code.core.effective_context import (
     validate_complete_history,
 )
 from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.tools.read_file import (
-    MAX_READ_FILE_EXECUTIONS_PER_TURN,
-    READ_FILE_TOOL_NAME,
-    ReadFileTool,
-    read_file_tool_snapshot,
-)
+from leonervis_code.tools.catalog import MAX_TOOL_EXECUTIONS_PER_TURN, TOOL_CATALOG
+from leonervis_code.tools.glob import GLOB_TOOL_NAME, GlobTool
+from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 
@@ -69,6 +66,7 @@ class AgentLoop:
         self,
         provider: ConversationProvider | None,
         read_file: ReadFileTool,
+        glob: GlobTool,
         *,
         initial_history: tuple[ConversationItem, ...] = (),
         initial_effective_history: tuple[ConversationItem, ...] | None = None,
@@ -80,6 +78,7 @@ class AgentLoop:
         """Store a provider, confined tool, validated history, and durable commit hook."""
         self._provider = provider
         self._read_file = read_file
+        self._glob = glob
         restored = validate_complete_history(initial_history)
         effective_items = (
             restored.history if initial_effective_history is None else initial_effective_history
@@ -143,7 +142,7 @@ class AgentLoop:
             representation_version=representation_version,
             source=self._effective_source,
             system_prompt=self._system_prompt_factory(),
-            tool_definitions=(read_file_tool_snapshot(),),
+            tool_definitions=TOOL_CATALOG,
             full_history=self._full_history,
             effective_history=self._effective_history,
             effective_summary=self._effective_summary,
@@ -193,7 +192,7 @@ class AgentLoop:
                 return response.text
 
             pending += (response,)
-            if tool_calls == MAX_READ_FILE_EXECUTIONS_PER_TURN:
+            if tool_calls == MAX_TOOL_EXECUTIONS_PER_TURN:
                 pending += (
                     ToolResult(
                         tool_use_id=response.tool_use_id,
@@ -247,9 +246,11 @@ class AgentLoop:
         self._turns += (ConversationTurn(user=user, assistant=assistant),)
 
     def _execute(self, request: ToolUse) -> ToolResult:
-        """Dispatch the only Foundation 1B tool or return a model-visible error."""
+        """Dispatch one current read-only tool or return a model-visible error."""
         if request.name == READ_FILE_TOOL_NAME:
             return self._read_file.execute(request)
+        if request.name == GLOB_TOOL_NAME:
+            return self._glob.execute(request)
         return ToolResult(
             tool_use_id=request.tool_use_id,
             content=f"unknown tool: {request.name}",

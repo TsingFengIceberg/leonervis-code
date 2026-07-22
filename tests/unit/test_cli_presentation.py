@@ -39,6 +39,7 @@ from leonervis_code.session import (
 )
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import LatestUpdateStatus, SessionInfo
+from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -124,7 +125,9 @@ def test_runtime_status_renders_context_capability_without_changing_prompt() -> 
 
 
 def inspection(tmp_path, report=None, diagnostic=None, *history):
-    loop = AgentLoop(None, ReadFileTool(tmp_path), initial_history=tuple(history))
+    loop = AgentLoop(
+        None, ReadFileTool(tmp_path), GlobTool(tmp_path), initial_history=tuple(history)
+    )
     target = CurrentTargetContextAssessment(status(), report, diagnostic)
     return EffectiveContextInspection(loop.effective_context_snapshot(), target)
 

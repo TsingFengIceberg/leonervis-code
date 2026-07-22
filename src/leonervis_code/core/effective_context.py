@@ -99,10 +99,14 @@ class EffectiveContextSnapshot:
         _validate_system_prompt_snapshot(self.system_prompt)
         if not isinstance(self.tool_definitions, tuple) or not self.tool_definitions:
             raise ValueError("effective context requires immutable tool definitions")
+        tool_names: set[str] = set()
         for definition in self.tool_definitions:
             if not isinstance(definition, CanonicalToolDefinition):
                 raise ValueError("effective context contains an invalid tool definition")
             CanonicalToolDefinition.from_mapping(definition.as_mapping())
+            if definition.name in tool_names:
+                raise ValueError("effective context contains a duplicate tool definition")
+            tool_names.add(definition.name)
         validate_complete_history(self.full_history)
         validate_complete_history(self.effective_history)
         if self.source == EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY:

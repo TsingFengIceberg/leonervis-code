@@ -1,1 +1,1 @@
-"""Read-only tool implementations for Foundation 1B."""
+"""Bounded read-only workspace tools and their canonical catalog."""

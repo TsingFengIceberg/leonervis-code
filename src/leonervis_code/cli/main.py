@@ -56,6 +56,7 @@ from leonervis_code.session_store import (
     SessionStore,
     SessionStoreError,
 )
+from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -203,7 +204,7 @@ def render_demo_read(workspace: Path, path: str, stdout: TextIO) -> int:
     provider = ScriptedFakeProvider(
         [tool_use, AssistantText("Demo final response: provider received the read_file result.")]
     )
-    demo_loop = AgentLoop(provider, ReadFileTool(workspace))
+    demo_loop = AgentLoop(provider, ReadFileTool(workspace), GlobTool(workspace))
     stdout.write(f"[demo] provider requested read_file: {path}\n")
     response = demo_loop.run(f"Demo read {path}")
     result = provider.received_requests[1].history[-1]
@@ -663,6 +664,7 @@ def main(
             project_profile_path=project_profile_path,
             provider_factory=factory,
             read_file_factory=ReadFileTool,
+            glob_factory=GlobTool,
         )
         try:
             resume_result = session.startup_resume_result

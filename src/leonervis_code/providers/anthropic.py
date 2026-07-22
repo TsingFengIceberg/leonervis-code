@@ -34,7 +34,11 @@ from leonervis_code.providers.request_context import (
     RequestTokenCountMethod,
     estimate_serialized_input_tokens,
 )
-from leonervis_code.tools.read_file import read_file_model_definition
+from leonervis_code.tools.catalog import (
+    model_tool_definitions,
+    tool_input_from_use,
+    tool_operand_key,
+)
 
 PROVIDER_ID = "anthropic"
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
@@ -232,7 +236,8 @@ def build_input_projection(
                 committed_context=committed_context,
             ),
         ],
-        "tools": [read_file_tool_definition()],
+        "tools": list(model_tool_definitions()),
+        "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
     }
 
 
@@ -284,8 +289,13 @@ def build_compact_summary_request(
 
 
 def read_file_tool_definition() -> dict[str, object]:
-    """Wrap the shared read_file contract for Anthropic Messages."""
-    return read_file_model_definition()
+    """Retain the tested Anthropic wrapper for the canonical read contract."""
+    return model_tool_definitions()[0]
+
+
+def glob_tool_definition() -> dict[str, object]:
+    """Return the canonical Anthropic glob contract."""
+    return model_tool_definitions()[1]
 
 
 def serialize_history(
@@ -322,12 +332,16 @@ def serialize_history(
         if isinstance(item, ToolUse):
             if expected != "assistant":
                 raise _invalid_history(config, "tool use is out of causal order")
-            if item.name != "read_file":
-                raise _invalid_history(config, f"unsupported tool in history: {item.name}")
+            try:
+                tool_input = tool_input_from_use(item)
+            except ValueError:
+                raise _invalid_history(
+                    config, f"unsupported tool in history: {item.name}"
+                ) from None
             if not isinstance(item.tool_use_id, str) or not item.tool_use_id:
                 raise _invalid_history(config, "tool use ID must not be blank")
-            if not isinstance(item.path, str):
-                raise _invalid_history(config, "read_file path must be a string")
+            if not isinstance(item.path, str) or not item.path:
+                raise _invalid_history(config, "tool operand must be nonblank text")
             messages.append(
                 {
                     "role": "assistant",
@@ -335,8 +349,8 @@ def serialize_history(
                         {
                             "type": "tool_use",
                             "id": item.tool_use_id,
-                            "name": "read_file",
-                            "input": {"path": item.path},
+                            "name": item.name,
+                            "input": tool_input,
                         }
                     ],
                 }
@@ -432,7 +446,7 @@ def parse_compact_summary_response(
 
 
 def parse_response(response: object, *, config: AnthropicProviderConfig) -> ProviderResponse:
-    """Decode only complete text or one-read_file response shapes."""
+    """Decode only complete text or one supported sequential tool response."""
     stop_reason = getattr(response, "stop_reason", None)
     if stop_reason == "refusal":
         raise _adapter_error(
@@ -481,14 +495,21 @@ def parse_response(response: object, *, config: AnthropicProviderConfig) -> Prov
     tool_input = getattr(block, "input", None)
     if not isinstance(tool_use_id, str) or not tool_use_id:
         raise _invalid_response(config, "Anthropic tool use ID was malformed")
-    if name != "read_file":
-        raise _invalid_response(config, "Anthropic requested an unsupported tool")
-    if not isinstance(tool_input, dict) or set(tool_input) != {"path"}:
-        raise _invalid_response(config, "Anthropic read_file input was malformed")
-    path = tool_input["path"]
-    if not isinstance(path, str):
-        raise _invalid_response(config, "Anthropic read_file path was not text")
-    return ToolUse(tool_use_id=tool_use_id, name=name, path=path)
+    try:
+        operand_key = tool_operand_key(name)
+    except ValueError:
+        raise _invalid_response(config, "Anthropic requested an unsupported tool") from None
+    if not isinstance(tool_input, dict) or set(tool_input) != {operand_key}:
+        raise _invalid_response(config, f"Anthropic {name} input was malformed")
+    operand = tool_input[operand_key]
+    if (
+        not isinstance(operand, str)
+        or not operand.strip()
+        or "\x00" in operand
+        or len(operand) > 4096
+    ):
+        raise _invalid_response(config, f"Anthropic {name} operand was malformed")
+    return ToolUse(tool_use_id=tool_use_id, name=name, path=operand)
 
 
 def normalize_sdk_error(

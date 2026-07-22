@@ -29,7 +29,11 @@ from leonervis_code.providers.request_context import (
     RequestTokenCount,
     estimate_serialized_input_tokens,
 )
-from leonervis_code.tools.read_file import read_file_model_definition
+from leonervis_code.tools.catalog import (
+    model_tool_definitions,
+    tool_input_from_use,
+    tool_operand_key,
+)
 
 
 class ChatCompletionsClient(Protocol):
@@ -120,9 +124,7 @@ def create_openai_compatible_provider(
     return OpenAICompatibleConversationProvider(route, client.chat.completions, owner=client)
 
 
-def read_file_tool_definition() -> dict[str, object]:
-    """Wrap the shared read_file contract as one compatible function tool."""
-    definition = read_file_model_definition()
+def _compatible_tool_definition(definition: dict[str, object]) -> dict[str, object]:
     return {
         "type": "function",
         "function": {
@@ -131,6 +133,21 @@ def read_file_tool_definition() -> dict[str, object]:
             "parameters": definition["input_schema"],
         },
     }
+
+
+def read_file_tool_definition() -> dict[str, object]:
+    """Retain the tested compatible wrapper for the canonical read contract."""
+    return _compatible_tool_definition(model_tool_definitions()[0])
+
+
+def glob_tool_definition() -> dict[str, object]:
+    """Wrap the canonical glob contract as one compatible function tool."""
+    return _compatible_tool_definition(model_tool_definitions()[1])
+
+
+def model_tool_definitions_for_openai() -> tuple[dict[str, object], ...]:
+    """Wrap every canonical tool in its fixed provider-visible order."""
+    return tuple(_compatible_tool_definition(item) for item in model_tool_definitions())
 
 
 def build_input_projection(
@@ -151,7 +168,7 @@ def build_input_projection(
                 committed_context=committed_context,
             ),
         ],
-        "tools": [read_file_tool_definition()],
+        "tools": list(model_tool_definitions_for_openai()),
         "parallel_tool_calls": False,
     }
 
@@ -234,10 +251,14 @@ def serialize_history(
         if isinstance(item, ToolUse):
             if expected != "assistant":
                 raise _invalid_history(route, "tool use is out of causal order")
-            if item.name != "read_file":
-                raise _invalid_history(route, f"unsupported tool in history: {item.name}")
+            try:
+                tool_input = tool_input_from_use(item)
+            except ValueError:
+                raise _invalid_history(route, f"unsupported tool in history: {item.name}") from None
             if not item.tool_use_id:
                 raise _invalid_history(route, "tool use ID must not be blank")
+            if not isinstance(item.path, str) or not item.path:
+                raise _invalid_history(route, "tool operand must be nonblank text")
             messages.append(
                 {
                     "role": "assistant",
@@ -247,9 +268,9 @@ def serialize_history(
                             "id": item.tool_use_id,
                             "type": "function",
                             "function": {
-                                "name": "read_file",
+                                "name": item.name,
                                 "arguments": json.dumps(
-                                    {"path": item.path}, separators=(",", ":"), ensure_ascii=False
+                                    tool_input, separators=(",", ":"), ensure_ascii=False
                                 ),
                             },
                         }
@@ -341,7 +362,7 @@ def parse_compact_summary_response(
 
 
 def parse_response(response: object, *, route: RuntimeProviderRoute) -> ProviderResponse:
-    """Decode only complete text or exactly one valid read_file function call."""
+    """Decode only complete text or one supported sequential function call."""
     choices = getattr(response, "choices", None)
     if not isinstance(choices, list) or len(choices) != 1:
         raise _invalid_response(route, "provider response must contain exactly one choice")
@@ -392,20 +413,27 @@ def parse_response(response: object, *, route: RuntimeProviderRoute) -> Provider
     arguments = getattr(function, "arguments", None)
     if not isinstance(tool_use_id, str) or not tool_use_id:
         raise _invalid_response(route, "provider tool call ID was malformed")
-    if name != "read_file":
-        raise _invalid_response(route, "provider requested an unsupported tool")
+    try:
+        operand_key = tool_operand_key(name)
+    except ValueError:
+        raise _invalid_response(route, "provider requested an unsupported tool") from None
     if not isinstance(arguments, str):
         raise _invalid_response(route, "provider tool arguments were not JSON text")
     try:
         tool_input = json.loads(arguments)
     except (TypeError, json.JSONDecodeError):
         raise _invalid_response(route, "provider tool arguments were invalid JSON") from None
-    if not isinstance(tool_input, dict) or set(tool_input) != {"path"}:
-        raise _invalid_response(route, "provider read_file arguments were malformed")
-    path = tool_input["path"]
-    if not isinstance(path, str):
-        raise _invalid_response(route, "provider read_file path was not text")
-    return ToolUse(tool_use_id=tool_use_id, name=name, path=path)
+    if not isinstance(tool_input, dict) or set(tool_input) != {operand_key}:
+        raise _invalid_response(route, f"provider {name} arguments were malformed")
+    operand = tool_input[operand_key]
+    if (
+        not isinstance(operand, str)
+        or not operand.strip()
+        or "\x00" in operand
+        or len(operand) > 4096
+    ):
+        raise _invalid_response(route, f"provider {name} operand was malformed")
+    return ToolUse(tool_use_id=tool_use_id, name=name, path=operand)
 
 
 def token_limit_field(model: str) -> str:

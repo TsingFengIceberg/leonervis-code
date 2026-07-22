@@ -22,7 +22,8 @@ from leonervis_code.core.effective_context import (
     validate_complete_history,
 )
 from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.tools.read_file import read_file_model_definition, read_file_tool_snapshot
+from leonervis_code.tools.catalog import TOOL_CATALOG
+from leonervis_code.tools.read_file import read_file_model_definition
 
 
 def snapshot(*history) -> EffectiveContextSnapshot:
@@ -31,7 +32,7 @@ def snapshot(*history) -> EffectiveContextSnapshot:
         representation_version=EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         source=EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
         system_prompt=build_system_prompt(),
-        tool_definitions=(read_file_tool_snapshot(),),
+        tool_definitions=TOOL_CATALOG,
         full_history=items,
         effective_history=items,
     )
@@ -44,7 +45,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v1-ff7700d72f43eae495183814c8551a5a30a18d7cdc05f724445514753288f4ad"
+        == "ctx-v1-2f2a2891390a71ac67b7ff5646558152484e9e8d963bca65f4b88ac7a21bb820"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -128,9 +129,15 @@ def test_context_identity_includes_prompt_and_tool_contract() -> None:
     tool["description"] = "different"
     altered_tool = replace(
         context,
-        tool_definitions=(CanonicalToolDefinition.from_mapping(tool),),
+        tool_definitions=(CanonicalToolDefinition.from_mapping(tool), TOOL_CATALOG[1]),
     )
     assert altered_tool.context_id != context.context_id
+    assert (
+        replace(context, tool_definitions=tuple(reversed(TOOL_CATALOG))).context_id
+        != context.context_id
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        replace(context, tool_definitions=(TOOL_CATALOG[0], TOOL_CATALOG[0]))
 
 
 def test_full_history_source_requires_transcript_and_effective_equality() -> None:
@@ -140,7 +147,7 @@ def test_full_history_source_requires_transcript_and_effective_equality() -> Non
             representation_version=1,
             source=EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
             system_prompt=build_system_prompt(),
-            tool_definitions=(read_file_tool_snapshot(),),
+            tool_definitions=TOOL_CATALOG,
             full_history=full,
             effective_history=(),
         )
@@ -160,7 +167,7 @@ def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None
         representation_version=COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         source=EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
         system_prompt=build_system_prompt(),
-        tool_definitions=(read_file_tool_snapshot(),),
+        tool_definitions=TOOL_CATALOG,
         full_history=full,
         effective_history=full[-4:],
         effective_summary=summary,

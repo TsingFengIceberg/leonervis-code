@@ -1,4 +1,4 @@
-"""Structured contracts shared by the Foundation 1B tool-loop slice."""
+"""Structured contracts shared by the sequential model-tool loop."""
 
 from __future__ import annotations
 
@@ -52,7 +52,11 @@ class AssistantText:
 
 @dataclass(frozen=True)
 class ToolUse:
-    """One provider-requested read-only tool action."""
+    """One provider-requested tool with one neutral string operand.
+
+    ``path`` remains the schema-v1 compatibility field: it is a file path for
+    ``read_file`` and a file-pattern operand for ``glob``.
+    """
 
     tool_use_id: str
     name: str

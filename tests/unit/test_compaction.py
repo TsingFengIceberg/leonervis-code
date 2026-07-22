@@ -81,6 +81,17 @@ def test_compact_source_serializes_complete_tool_turns_and_previous_summary() ->
     assert source.startswith('{"previous_summary":"old","turns":[')
     assert '"tool_use_id":"call-1"' in source
     assert '"truncated":true' in source
+    glob_source = build_compact_source_text(
+        previous_summary=None,
+        summarized_history=(
+            UserMessage("find"),
+            ToolUse("glob-1", "glob", "src/**/*.py"),
+            ToolResult("glob-1", "src/app.py\n"),
+            AssistantText("done"),
+        ),
+    )
+    assert '"name":"glob"' in glob_source
+    assert '"path":"src/**/*.py"' in glob_source
     with pytest.raises(ValueError, match="unmatched tool use"):
         build_compact_source_text(
             previous_summary=None,

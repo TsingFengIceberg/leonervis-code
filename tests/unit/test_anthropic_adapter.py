@@ -26,6 +26,7 @@ from leonervis_code.providers.anthropic import (
     AnthropicConversationProvider,
     AnthropicProviderConfig,
     create_anthropic_provider,
+    glob_tool_definition,
     normalize_sdk_error,
     parse_compact_summary_response,
     parse_response,
@@ -35,6 +36,7 @@ from leonervis_code.providers.anthropic import (
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.system_prompt import build_system_prompt
+from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -122,7 +124,13 @@ def test_official_token_count_uses_shared_input_projection_and_safe_fallback() -
     assert exact.method == RequestTokenCountMethod.EXACT
     assert estimated.method == RequestTokenCountMethod.ESTIMATED
     assert "secret" not in (estimated.diagnostic or "")
-    assert set(client.count_requests[0]) == {"model", "system", "messages", "tools"}
+    assert set(client.count_requests[0]) == {
+        "model",
+        "system",
+        "messages",
+        "tools",
+        "tool_choice",
+    }
 
 
 def test_counter_accepts_empty_and_complete_committed_history_without_weakening_send() -> None:
@@ -209,6 +217,23 @@ def test_serializer_preserves_every_current_causal_item_and_tool_id() -> None:
     ]
 
 
+def test_serializer_preserves_glob_operand_with_its_native_key() -> None:
+    history = (
+        UserMessage("Find Python"),
+        ToolUse("glob-1", "glob", "src/**/*.py"),
+        ToolResult("glob-1", "src/app.py\n"),
+    )
+
+    serialized = serialize_history(history, config=config())
+
+    assert serialized[1]["content"][0] == {
+        "type": "tool_use",
+        "id": "glob-1",
+        "name": "glob",
+        "input": {"pattern": "src/**/*.py"},
+    }
+
+
 def test_serializer_rejects_unknown_tools_and_broken_causality() -> None:
     with pytest.raises(ProviderAdapterError) as unknown:
         serialize_history(
@@ -251,6 +276,24 @@ def test_read_file_schema_is_exact_and_closed() -> None:
             "additionalProperties": False,
         },
     }
+
+
+def test_glob_schema_is_exact_and_parser_maps_pattern_to_neutral_operand() -> None:
+    definition = glob_tool_definition()
+    assert definition["name"] == "glob"
+    assert definition["input_schema"]["required"] == ["pattern"]
+    assert definition["input_schema"]["additionalProperties"] is False
+    assert parse_response(
+        message(
+            ToolUseBlock(
+                id="glob-provider",
+                name="glob",
+                input={"pattern": "src/**/*.py"},
+                type="tool_use",
+            )
+        ),
+        config=config(),
+    ) == ToolUse("glob-provider", "glob", "src/**/*.py")
 
 
 def test_parser_concatenates_text_and_preserves_valid_tool_use() -> None:
@@ -333,7 +376,8 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
             "max_tokens": 64,
             "system": build_system_prompt().text,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
-            "tools": [read_file_tool_definition()],
+            "tools": [read_file_tool_definition(), glob_tool_definition()],
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
         }
     ]
@@ -545,7 +589,11 @@ def test_adapter_backed_loop_preserves_atomic_commit_after_failure(tmp_path) -> 
             failure,
         ]
     )
-    loop = AgentLoop(AnthropicConversationProvider(config(), client), ReadFileTool(tmp_path))
+    loop = AgentLoop(
+        AnthropicConversationProvider(config(), client),
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+    )
 
     with pytest.raises(ProviderAdapterError):
         loop.run("Read README")

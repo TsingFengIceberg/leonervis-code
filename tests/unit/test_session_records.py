@@ -80,6 +80,29 @@ def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> No
     assert state.next_sequence == 3
 
 
+def test_schema_v1_round_trips_mixed_read_and_glob_tool_pairs() -> None:
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("find and read"),
+            ToolUse("glob-1", "glob", "src/**/*.py"),
+            ToolResult("glob-1", "src/app.py\n", truncated=True),
+            ToolUse("read-1", "read_file", "src/app.py"),
+            ToolResult("read-1", "contents"),
+            AssistantText("done"),
+        ),
+    )
+
+    encoded = encode_record(turn)
+    decoded = decode_record(encoded)
+
+    assert decoded == turn
+    assert b'"schema_version":1' in encoded
+    assert b'"name":"glob","path":"src/**/*.py"' in encoded
+
+
 def test_codec_restores_conversation_payloads_larger_than_metadata_limit() -> None:
     long_user = "用" * 5000
     long_assistant = "答" * 6000

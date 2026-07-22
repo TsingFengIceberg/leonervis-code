@@ -6,7 +6,12 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.core.contracts import AssistantText, UserMessage
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ToolResult,
+    ToolUse,
+    UserMessage,
+)
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.manager import RuntimeSwitchAuditError
 from leonervis_code.providers.profile import ProviderProfileSpec
@@ -92,6 +97,58 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     assert second.history == (UserMessage("hello"), AssistantText("Fake response: hello"))
     assert second.prompt("again") == "Fake response: again"
     assert second.transcript_path == transcript
+    second.close()
+
+
+def test_project_session_persists_and_resumes_glob_causality(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("app", encoding="utf-8")
+
+    class GlobProvider:
+        def __init__(self, *, continue_history=False):
+            self.calls = 0
+            self.continue_history = continue_history
+            self.requests = []
+
+        def count_input_tokens(self, request):
+            return RequestTokenCount(100, RequestTokenCountMethod.ESTIMATED)
+
+        def respond(self, request):
+            self.calls += 1
+            self.requests.append(request)
+            if self.continue_history:
+                assert ToolUse("glob-1", "glob", "src/*.py") in request.history
+                assert ToolResult("glob-1", "src/app.py\n") in request.history
+                return AssistantText("resumed")
+            if self.calls == 1:
+                return ToolUse("glob-1", "glob", "src/*.py")
+            return AssistantText("found")
+
+    first_provider = GlobProvider()
+    first = ProjectSession.open(
+        tmp_path,
+        model="custom/model",
+        custom_protocol="openai-compatible",
+        custom_base_url="http://127.0.0.1:11434/v1",
+        environment={},
+        provider_factory=lambda route, *, environment: first_provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    assert first.prompt("find") == "found"
+    first.close()
+
+    resumed_provider = GlobProvider(continue_history=True)
+    second = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        model="custom/model",
+        custom_protocol="openai-compatible",
+        custom_base_url="http://127.0.0.1:11434/v1",
+        environment={},
+        provider_factory=lambda route, *, environment: resumed_provider,
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+    assert second.prompt("continue") == "resumed"
     second.close()
 
 
