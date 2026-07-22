@@ -812,8 +812,7 @@ def _item_from_value(value: object) -> ConversationItem:
     item_type = _required_field_text(value, "item_type", "turn item")
     if item_type in {"user_message", "assistant_text"}:
         _closed_fields(value, {"item_type", "text"}, item_type)
-        text = _required_field_text(value, "text", item_type, allow_empty=True)
-        _text_payload(text, f"{item_type} text")
+        text = _required_field_payload_text(value, "text", item_type)
         return UserMessage(text) if item_type == "user_message" else AssistantText(text)
     if item_type == "tool_use":
         _closed_fields(value, {"item_type", "tool_use_id", "name", "path"}, item_type)
@@ -828,8 +827,7 @@ def _item_from_value(value: object) -> ConversationItem:
             {"item_type", "tool_use_id", "content", "is_error", "truncated"},
             item_type,
         )
-        content = _required_field_text(value, "content", item_type, allow_empty=True)
-        _text_payload(content, "tool_result content")
+        content = _required_field_payload_text(value, "content", item_type)
         is_error = value.get("is_error")
         truncated = value.get("truncated")
         if type(is_error) is not bool or type(truncated) is not bool:
@@ -967,6 +965,15 @@ def _closed_fields(value: dict[str, object], expected: set[str], label: str) -> 
     missing = expected - set(value)
     if missing:
         raise SessionRecordError(f"{label} is missing required field: {sorted(missing)[0]}")
+
+
+def _required_field_payload_text(value: dict[str, object], field: str, label: str) -> str:
+    """Decode conversation payload text without the 4096-character metadata cap."""
+    result = value.get(field)
+    if not isinstance(result, str):
+        raise SessionRecordError(f"{label} {field} must be text")
+    _text_payload(result, f"{label} {field}")
+    return result
 
 
 def _required_field_text(

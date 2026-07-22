@@ -73,6 +73,27 @@ def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> No
     assert state.next_sequence == 3
 
 
+def test_codec_restores_conversation_payloads_larger_than_metadata_limit() -> None:
+    long_user = "用" * 5000
+    long_assistant = "答" * 6000
+    long_result = "结果" * 3000
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage(long_user),
+            ToolUse("tool-long", "read_file", "README.md"),
+            ToolResult("tool-long", long_result),
+            AssistantText(long_assistant),
+        ),
+    )
+
+    decoded = decode_record(encode_record(turn))
+
+    assert decoded == turn
+
+
 def test_canonical_codec_is_compact_sorted_and_contains_no_secret_value(tmp_path: Path) -> None:
     binding = BindingSnapshot(
         profile_id="profile-id",
