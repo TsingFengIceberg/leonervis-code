@@ -106,6 +106,9 @@ class Session:
     def session_info(self):
         return self._info(self.current)
 
+    def action_audits(self):
+        return ()
+
     def latest_session_info(self):
         return self._info(self.latest)
 
@@ -168,6 +171,11 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert compact.kind == "success"
     assert "Full transcript and /history were preserved" in compact.message
     assert dispatch_slash("/compact extra", session).message == "Usage: /compact"
+    assert dispatch_slash("/actions", session).message == "No action audits yet."
+    assert dispatch_slash("/actions 10", session).message == "No action audits yet."
+    assert dispatch_slash("/actions 0", session).message == "Usage: /actions [1-100]"
+    assert dispatch_slash("/actions 101", session).message == "Usage: /actions [1-100]"
+    assert dispatch_slash("/actions two", session).message == "Usage: /actions [1-100]"
     assert session.prompts == []
 
 

@@ -13,6 +13,9 @@ from leonervis_code import ProjectSession, __version__
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.brand import color_enabled
 from leonervis_code.cli.presentation import (
+    DEFAULT_ACTION_AUDIT_COUNT,
+    MAX_ACTION_AUDIT_COUNT,
+    render_action_audits,
     render_resume_rejection,
     render_prompt_event,
     render_session_resume,
@@ -81,6 +84,18 @@ def nonblank_model(value: str) -> str:
     if not value.strip():
         raise argparse.ArgumentTypeError("model must not be blank")
     return value
+
+
+def action_audit_count(value: str) -> int:
+    """Accept one bounded ASCII count for terminal audit rendering."""
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("action audit limit must be an integer")
+    count = int(value)
+    if not 1 <= count <= MAX_ACTION_AUDIT_COUNT:
+        raise argparse.ArgumentTypeError(
+            f"action audit limit must be between 1 and {MAX_ACTION_AUDIT_COUNT}"
+        )
+    return count
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,6 +231,16 @@ def build_parser() -> argparse.ArgumentParser:
     session_commands.add_parser("list", help="list durable sessions")
     session_show = session_commands.add_parser("show", help="show one durable session")
     session_show.add_argument("selector", nargs="?", default="latest")
+    session_actions = session_commands.add_parser(
+        "actions", help="show recent redacted action audits for one durable session"
+    )
+    session_actions.add_argument("selector", nargs="?", default="latest")
+    session_actions.add_argument(
+        "--limit",
+        type=action_audit_count,
+        default=DEFAULT_ACTION_AUDIT_COUNT,
+        help=f"number of recent actions to show (default: {DEFAULT_ACTION_AUDIT_COUNT})",
+    )
     return parser
 
 
@@ -533,6 +558,11 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     store = SessionStore(workspace)
     if arguments.session_command == "show":
         render_session_info(store.show(arguments.selector), stdout)
+        return 0
+    if arguments.session_command == "actions":
+        stdout.write(
+            f"{render_action_audits(store.action_audits(arguments.selector), arguments.limit)}\n"
+        )
         return 0
     sessions = store.list()
     if not sessions:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
+from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.presentation import (
     BLUE,
     GREEN,
@@ -9,6 +11,7 @@ from leonervis_code.cli.presentation import (
     RESET,
     YELLOW,
     render_context_inspection,
+    render_action_audits,
     render_message,
     render_prompt,
     render_prompt_event,
@@ -25,9 +28,14 @@ from leonervis_code.providers.request_context import (
     RequestTokenCount,
     RequestTokenCountMethod,
 )
-from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.core.compaction import CompactionTrigger
-from leonervis_code.core.contracts import AssistantText, UserMessage
+from leonervis_code.core.contracts import AssistantText, ToolArguments, UserMessage
+from leonervis_code.core.permissions import (
+    PermissionAction,
+    PermissionDecision,
+    PermissionReason,
+    PermissionResult,
+)
 from leonervis_code.session import (
     AutoCompactionCommitted,
     AutoCompactionNotApplied,
@@ -37,7 +45,11 @@ from leonervis_code.session import (
     ResumeEffect,
     SessionResumeResult,
 )
-from leonervis_code.session_records import BindingSnapshot
+from leonervis_code.session_records import (
+    ActionAuditStatus,
+    ApprovalAuditOutcome,
+    BindingSnapshot,
+)
 from leonervis_code.session_store import LatestUpdateStatus, SessionInfo
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -83,6 +95,131 @@ def test_prompt_uses_short_session_and_runtime_identity_only() -> None:
         )
         == "leonervis[12345678|direct:openai]> "
     )
+
+
+def test_action_audits_are_recent_bounded_and_redacted() -> None:
+    def audit(sequence: int, path: str, status, *, result_code=None):
+        return SimpleNamespace(
+            identity=SimpleNamespace(
+                tool_name="write_file",
+                action=PermissionAction.WORKSPACE_CREATE,
+                arguments=ToolArguments.from_mapping(
+                    {"content": f"secret-content-{sequence}", "path": path}
+                ),
+            ),
+            permission_result=PermissionResult(
+                PermissionDecision.ASK,
+                PermissionReason.APPROVAL_REQUIRED_WORKSPACE_CREATE,
+            ),
+            approval_outcome=ApprovalAuditOutcome.ACCEPTED,
+            status=status,
+            result_code=result_code,
+            requested_sequence=sequence,
+        )
+
+    rendered = render_action_audits(
+        (
+            audit(1, "first.txt", ActionAuditStatus.SUCCEEDED, result_code="created"),
+            audit(
+                6,
+                "odd\nname.txt",
+                ActionAuditStatus.PARTIAL,
+                result_code="durability\nunknown",
+            ),
+        ),
+        1,
+    )
+
+    assert "Showing 1 most recent of 2 action audits." in rendered
+    assert "Action #6: write_file" in rendered
+    assert "class: workspace-create" in rendered
+    assert "path: 'odd\\nname.txt'" in rendered
+    assert "permission: ask (approval_required_workspace_create)" in rendered
+    assert "approval: accepted" in rendered
+    assert "result: partial (durability\\nunknown)" in rendered
+    assert "first.txt" not in rendered
+    assert "secret-content" not in rendered
+    assert render_action_audits((), 20) == "No action audits yet."
+
+
+def test_action_audits_explain_nonexecuted_and_interrupted_lifecycles() -> None:
+    def audit(
+        sequence: int,
+        status: ActionAuditStatus,
+        *,
+        decision: PermissionDecision | None,
+        reason: PermissionReason | None,
+        approval: ApprovalAuditOutcome | None = None,
+    ):
+        permission = (
+            PermissionResult(decision, reason)
+            if decision is not None and reason is not None
+            else None
+        )
+        return SimpleNamespace(
+            identity=SimpleNamespace(
+                tool_name="write_file",
+                action=PermissionAction.WORKSPACE_OVERWRITE,
+                arguments=ToolArguments.from_mapping({"content": "secret", "path": "note.txt"}),
+            ),
+            permission_result=permission,
+            approval_outcome=approval,
+            status=status,
+            result_code=None,
+            requested_sequence=sequence,
+        )
+
+    rendered = render_action_audits(
+        (
+            audit(1, ActionAuditStatus.REQUESTED, decision=None, reason=None),
+            audit(
+                2,
+                ActionAuditStatus.DENIED,
+                decision=PermissionDecision.DENY,
+                reason=PermissionReason.DENIED_READ_ONLY_MODE,
+            ),
+            audit(
+                3,
+                ActionAuditStatus.AUTHORIZED,
+                decision=PermissionDecision.ALLOW,
+                reason=PermissionReason.ALLOWED_WORKSPACE_OVERWRITE_AUTO,
+            ),
+            audit(
+                4,
+                ActionAuditStatus.AWAITING_APPROVAL,
+                decision=PermissionDecision.ASK,
+                reason=PermissionReason.APPROVAL_REQUIRED_WORKSPACE_OVERWRITE,
+            ),
+            audit(
+                5,
+                ActionAuditStatus.ABANDONED,
+                decision=PermissionDecision.ASK,
+                reason=PermissionReason.APPROVAL_REQUIRED_WORKSPACE_OVERWRITE,
+            ),
+            audit(
+                6,
+                ActionAuditStatus.OUTCOME_UNKNOWN,
+                decision=PermissionDecision.ASK,
+                reason=PermissionReason.APPROVAL_REQUIRED_WORKSPACE_OVERWRITE,
+                approval=ApprovalAuditOutcome.ACCEPTED,
+            ),
+        ),
+        20,
+    )
+
+    assert "Action #1" in rendered
+    assert "permission: pending\n  approval: not reached\n  result: requested" in rendered
+    assert (
+        "permission: deny (denied_read_only_mode)\n  approval: not requested\n  result: denied"
+    ) in rendered
+    assert (
+        "permission: allow (allowed_workspace_overwrite_auto)\n"
+        "  approval: not required\n"
+        "  result: authorized"
+    ) in rendered
+    assert "approval: pending\n  result: awaiting-approval" in rendered
+    assert "approval: not recorded\n  result: abandoned" in rendered
+    assert "approval: accepted\n  result: outcome-unknown" in rendered
 
 
 def test_prompt_omits_model_and_sanitizes_runtime_fields() -> None:

@@ -67,6 +67,7 @@ from leonervis_code.providers.request_context import (
     raise_for_context_fit,
 )
 from leonervis_code.session_records import (
+    ActionAuditState,
     ActionExecutionOutcome,
     BindingSnapshot,
     ContextCompacted,
@@ -488,6 +489,12 @@ class ProjectSession:
     def session_info(self) -> SessionInfo:
         self._ensure_open()
         return self._writer.info
+
+    def action_audits(self) -> tuple[ActionAuditState, ...]:
+        """Return the current Session's replayed Host-only action lifecycles."""
+        with self._lock:
+            self._ensure_open()
+            return self._writer.state.action_audits
 
     def list_sessions(self) -> tuple[SessionInfo, ...]:
         self._ensure_open()

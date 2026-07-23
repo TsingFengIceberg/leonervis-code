@@ -50,16 +50,17 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/q", 0) == "/quit"
     assert complete_command("/", 0) == "/help"
     assert complete_command("/", 1) == "/history"
-    assert complete_command("/", 2) == "/exit"
-    assert complete_command("/", 3) == "/quit"
-    assert complete_command("/", 4) == "/status"
-    assert complete_command("/", 5) == "/context"
-    assert complete_command("/", 6) == "/compact"
-    assert complete_command("/", 7) == "/provider"
-    assert complete_command("/", 8) == "/model"
-    assert complete_command("/", 9) == "/session"
-    assert complete_command("/", 10) == "/resume"
-    assert complete_command("/", 11) is None
+    assert complete_command("/", 2) == "/actions"
+    assert complete_command("/", 3) == "/exit"
+    assert complete_command("/", 4) == "/quit"
+    assert complete_command("/", 5) == "/status"
+    assert complete_command("/", 6) == "/context"
+    assert complete_command("/", 7) == "/compact"
+    assert complete_command("/", 8) == "/provider"
+    assert complete_command("/", 9) == "/model"
+    assert complete_command("/", 10) == "/session"
+    assert complete_command("/", 11) == "/resume"
+    assert complete_command("/", 12) is None
     assert complete_command("ordinary prompt", 0) is None
 
 
@@ -243,7 +244,7 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
 
     rendered = output.getvalue()
     assert loop.prompts == []
-    assert "Commands: /help, /history <count>, /session, /provider" in rendered
+    assert "Commands: /help, /history <count>, /actions [count], /session, /provider" in rendered
     assert "Unknown command: /unknown. Type /help for controls." in rendered
 
 
@@ -351,6 +352,9 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
         def session_info(self):
             return self._info(self.current)
 
+        def action_audits(self):
+            return ()
+
         def latest_session_info(self):
             return self._info(self.latest)
 
@@ -395,7 +399,7 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
     run_repl(
         session,
         stdin=io.StringIO(
-            "/session show\n/session list\n/session new\n/session show\n"
+            "/session show\n/session list\n/actions\n/session new\n/session show\n"
             "/resume 22345678-1234-4234-9234-123456789abc\nHello\n/exit\n"
         ),
         stdout=output,
@@ -411,6 +415,7 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
     assert "Auto-save: enabled" in rendered
     assert "Started new session 32345678-1234-4234-9234-123456789abc" in rendered
     assert "runtime provider unchanged" in rendered
+    assert "No action audits yet." in rendered
     assert "12345678-1234-4234-9234-123456789abc [current]" in rendered
     assert "22345678-1234-4234-9234-123456789abc [latest]" in rendered
 

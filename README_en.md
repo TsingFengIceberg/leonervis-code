@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded sequential `read_file`/`glob`/literal `grep`/`write_file` loop, provider-owned model limits, target-specific preflight, switch-time screening, provider-neutral Effective Context, manual and automatic compaction, and target-aware resume are implemented. Foundation 4A now connects permission policy, exact action identity, single-use approval, durable action audit, CLI/AgentLoop approval flow, and controlled create/overwrite writes end to end; Bash, patch/edit, delete, and mkdir remain unavailable.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded sequential `read_file`/`glob`/literal `grep`/`write_file` loop, provider-owned model limits, target-specific preflight, switch-time screening, provider-neutral Effective Context, manual and automatic compaction, and target-aware resume are implemented. Foundation 4A now connects permission policy, exact action identity, single-use approval, durable action audit, CLI/AgentLoop approval flow, and controlled create/overwrite writes end to end, with redacted Action Audit inspection commands; Bash, patch/edit, delete, and mkdir remain unavailable.
 
 ## Contents
 
@@ -157,11 +157,12 @@ The runtime resolves the context window and model maximum output independently: 
 uv run leonervis-code prompt "First turn"
 uv run leonervis-code session list
 uv run leonervis-code session show latest
+uv run leonervis-code session actions latest
 uv run leonervis-code --resume latest prompt "Continue the previous turn"
 uv run leonervis-code --resume <session-uuid>
 ```
 
-A Session is workspace-bound and stores complete successful turns in append-only JSONL. Resuming restores history only; the current provider still comes from this invocation's CLI selector or active profile. Startup `--resume` and REPL `/resume` first replay the target under a read-only exclusive lease and screen its Effective Context against the current runtime. Known context/model-output overflow is rejected before writing `SessionResumed` or changing `latest.json`; `UNKNOWN` fails open with a warning, while fake mode explicitly sends no provider request. A compacted Session is measured as Host summary plus its retained real-turn suffix, not as the full transcript. `/resume latest` applies exact CAS to pointer changes during preparation, and resuming the current Session is a record-free no-op. The next real invocation still runs full preflight.
+A Session is workspace-bound and stores complete successful turns in append-only JSONL. `session actions latest` shows the 20 most recent redacted action lifecycles by default, with `--limit 1..100` for another bound; it strictly replays an existing transcript without creating or repairing Session state. Resuming restores history only; the current provider still comes from this invocation's CLI selector or active profile. Startup `--resume` and REPL `/resume` first replay the target under a read-only exclusive lease and screen its Effective Context against the current runtime. Known context/model-output overflow is rejected before writing `SessionResumed` or changing `latest.json`; `UNKNOWN` fails open with a warning, while fake mode explicitly sends no provider request. A compacted Session is measured as Host summary plus its retained real-turn suffix, not as the full transcript. `/resume latest` applies exact CAS to pointer changes during preparation, and resuming the current Session is a record-free no-op. The next real invocation still runs full preflight.
 
 ### REPL commands
 
@@ -169,6 +170,7 @@ A Session is workspace-bound and stores complete successful turns in append-only
 | --- | --- |
 | `/help` | Show control commands |
 | `/history <count>` | Show recent complete turns in the current Session |
+| `/actions [count]` | Show recent redacted Action Audits for the current Session, default 20 and maximum 100 |
 | `/status` | Show redacted runtime, model, and context-window status |
 | `/context` | Read-only inspection of Effective Context, content ID, count, and target fit |
 | `/compact` | Use the current real provider to summarize older complete turns and persist an effective-context checkpoint |
@@ -222,6 +224,7 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 - [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, context capability, compaction, permission/approval, and controlled writes.
 - [Architecture decision records](./docs/decisions/): complete problem statements, trade-offs, boundaries, and verification records for each learning slice.
+- [Action Audit Observability](./docs/decisions/0025-foundation-4a-action-audit-observability.md): standalone and REPL read-only inspection, redacted fields, count bounds, and the unchanged model contract.
 - [Approval Coordination and Controlled `write_file`](./docs/decisions/0024-foundation-4a-approval-coordination-and-controlled-write.md): coordinator ordering, prepared-turn leases, CLI approval UX, create/overwrite hard bounds, and partial-outcome semantics.
 - [Exact Action Identity and Durable Action Audit](./docs/decisions/0023-foundation-4a-exact-action-identity-and-durable-audit.md): the exact manifest/digest, prepared-turn lease, single-use grant, append-only lifecycle, and crash/recovery semantics.
 - [Permission Policy Contract](./docs/decisions/0022-foundation-4a-permission-policy-contract.md): orthogonal permission/approval semantics, action classes, the deterministic decision matrix, stable reasons, and the pure policy boundary.
@@ -243,4 +246,4 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 The current model-visible surface has the fixed order `read_file`, `glob`, literal `grep`, and complete-content `write_file`; all four share at most three sequential calls per user turn. Regex/index/ignore-aware search, patch/edit, delete, mkdir, Bash/test, network tools, streaming, automatic retry/fallback, parallel tools, multi-agent operation, and remote services remain unavailable.
 
-Foundation 4A has now completed Slices 1–9. The pure `PermissionGate` fixes orthogonal `read-only | workspace-write | danger-full-access` and `ask | auto` controls. ActionIdentity, a prepared-turn lease, single-use grants, and five append-only action records connect request, approval, durable start, and outcome into a resumable audit chain. The CLI offers minimal confirmation in the REPL and fail-safely cancels one-shot asks. The Host classifies writes as create or controlled overwrite, binds `path-absent` or expected SHA-256 state, and executes with a same-directory temporary file, atomic target installation, conflict rechecks, and directory fsync. Visible effects with incomplete cleanup or durability are recorded as `partial` and must not be retried automatically. The canonical system prompt is now v5 and the adapter contract is v6; ToolArguments v1, new `turn_committed` schema v2, action-audit schema v1, `context_compacted` v2/v3 replay, and `ctx-v1`/`ctx-v2` representations remain unchanged. The next independent slice should improve write ergonomics/observability or design controlled edit in another small step rather than adding Bash directly. The tracked ADRs and implemented-foundations documents are authoritative for the full boundaries.
+Foundation 4A has now completed Slices 1–10. The pure `PermissionGate`, exact identity, single-use approval, durable start, and controlled create/overwrite path form a resumable audit chain. `session actions` and REPL `/actions` now show redacted summaries of recent action class, relative path, permission/approval, and final status without exposing content, messages, the absolute workspace, or internal IDs. Standalone inspection is strictly read-only and neither creates nor repairs Session state; slash inspection never enters model history. The canonical system prompt remains v5 and the adapter contract remains v6; ToolArguments v1, new `turn_committed` schema v2, action-audit schema v1, `context_compacted` v2/v3 replay, and `ctx-v1`/`ctx-v2` representations are unchanged. The next independent slice should design and implement controlled exact `edit_file`, reusing the existing PermissionGate, approval, precondition, audit, and failure-atomic boundaries rather than adding Bash directly. The tracked ADRs and implemented-foundations documents are authoritative for the full boundaries.

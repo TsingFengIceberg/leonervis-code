@@ -6,11 +6,14 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from leonervis_code.cli.presentation import (
+    DEFAULT_ACTION_AUDIT_COUNT,
     HELP_TEXT,
+    MAX_ACTION_AUDIT_COUNT,
     PROVIDER_HELP,
     SESSION_HELP,
     MessageKind,
     render_compact_result,
+    render_action_audits,
     render_context_inspection,
     render_recent_history,
     render_runtime_status,
@@ -36,6 +39,7 @@ from leonervis_code.session_store import SessionResumeCommitError, SessionStoreE
 TOP_LEVEL_COMMANDS = (
     "/help",
     "/history",
+    "/actions",
     "/exit",
     "/quit",
     "/status",
@@ -50,6 +54,8 @@ TOP_LEVEL_COMMANDS = (
 
 class ReplSession(Protocol):
     turns: tuple
+
+    def action_audits(self): ...
 
     def status(self): ...
 
@@ -135,6 +141,8 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         return _usage("Usage: /compact")
     if command == "/history" or command.startswith("/history "):
         return _history(command, session)
+    if command == "/actions" or command.startswith("/actions "):
+        return _actions(command, session)
     if command == "/session show" or command.startswith("/session show "):
         if command != "/session show":
             return _usage("Usage: /session show")
@@ -177,6 +185,22 @@ def _history(command: str, session: ReplSession) -> SlashResult:
     if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit() or int(parts[1]) <= 0:
         return _usage("Usage: /history <positive integer>")
     return _call(lambda: render_recent_history(session.turns, int(parts[1])))
+
+
+def _actions(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) == 1:
+        count = DEFAULT_ACTION_AUDIT_COUNT
+    elif (
+        len(parts) == 2
+        and parts[1].isascii()
+        and parts[1].isdigit()
+        and 1 <= int(parts[1]) <= MAX_ACTION_AUDIT_COUNT
+    ):
+        count = int(parts[1])
+    else:
+        return _usage(f"Usage: /actions [1-{MAX_ACTION_AUDIT_COUNT}]")
+    return _call(lambda: render_action_audits(session.action_audits(), count), kind="info")
 
 
 def _session_list(session: ReplSession) -> SlashResult:

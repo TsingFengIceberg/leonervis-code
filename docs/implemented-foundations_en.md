@@ -14,6 +14,7 @@
 - [Foundation 4A: Permission Policy Contract](#foundation-4a-permission-policy-contract)
 - [Foundation 4A Slice 3–4: Exact Action Identity and Durable Action Audit](#foundation-4a-slice-34-exact-action-identity-and-durable-action-audit)
 - [Foundation 4A Slice 5–9: Approval Coordination and Controlled `write_file`](#foundation-4a-slice-59-approval-coordination-and-controlled-write_file)
+- [Foundation 4A Slice 10: Action Audit Observability](#foundation-4a-slice-10-action-audit-observability)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -297,6 +298,16 @@ This model-visible change advances the canonical system prompt to v5 and the ada
 
 See [0024: Foundation 4A Approval Coordination, Runtime Integration, and Controlled `write_file`](./decisions/0024-foundation-4a-approval-coordination-and-controlled-write.md) for the complete decision. Bash, patch/edit, delete, mkdir, parallel actions, and portable full-filesystem CAS remain explicitly out of scope.
 
+## Foundation 4A Slice 10: Action Audit Observability
+
+Durable action audits previously existed only in Host transcript replay state. The standalone CLI can now inspect a selected Session with `session actions [latest|id] [--limit N]`, while the REPL uses `/actions [count]` for the current Session. The default is the 20 most recent entries and explicit counts are bounded from 1 through 100. A truncated view remains chronological and an empty Session has an explicit result.
+
+Output retains only the human audit summary: request sequence, tool, trusted action class, workspace-relative path, permission decision/reason, approval outcome, and derived final status/result code. Complete write content, executor messages, the absolute workspace, request/tool-use/grant/lease IDs, digests, workspace fingerprints, and precondition hashes are not rendered. Paths and persisted result codes escape control characters so stored data cannot reshape the terminal presentation.
+
+The standalone path validates an existing Session root and strictly replays with `allow_repair=False`; it creates no directory, takes no writer lease, repairs no tail, changes no latest pointer, and appends no record. The REPL path reads already-replayed state under the current Session lock, calls no provider, and never enters model history. Corrupt or unsafe transcripts continue to fail closed.
+
+This is a Host-only observability change. The reviewed canonical system prompt remains v5, the four-tool order and shared three-call budget are unchanged, and the adapter contract remains v6. ToolArguments v1, `turn_committed` schema v2, action-audit schema v1, `context_compacted` v2/v3 replay, and `ctx-v1`/`ctx-v2` representations are unchanged. See [0025: Foundation 4A Action Audit Observability](./decisions/0025-foundation-4a-action-audit-observability.md). JSON export, filters, repair/retry, full forensic dumps, and remote audit remain out of scope.
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -487,3 +498,4 @@ This slice establishes capacity facts only. It does not count current request to
 22. [0022: Foundation 4A Permission Policy Contract](./decisions/0022-foundation-4a-permission-policy-contract.md)
 23. [0023: Foundation 4A Exact Action Identity, Single-use Approval Grant, and Durable Action Audit](./decisions/0023-foundation-4a-exact-action-identity-and-durable-audit.md)
 24. [0024: Foundation 4A Approval Coordination, Runtime Integration, and Controlled `write_file`](./decisions/0024-foundation-4a-approval-coordination-and-controlled-write.md)
+25. [0025: Foundation 4A Action Audit Observability](./decisions/0025-foundation-4a-action-audit-observability.md)

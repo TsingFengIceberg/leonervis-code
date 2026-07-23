@@ -2,13 +2,30 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
 from leonervis_code import __version__
 from leonervis_code.cli.main import main
-from leonervis_code.core.contracts import AssistantText
+from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
+from leonervis_code.core.contracts import AssistantText, ToolArguments
+from leonervis_code.core.permissions import (
+    ApprovalMode,
+    PermissionAction,
+    PermissionGate,
+    PermissionMode,
+    PermissionRequest,
+)
 from leonervis_code.providers.profile_store import ProviderProfileStore
+from leonervis_code.session_records import (
+    ActionAuthorization,
+    ActionExecutionOutcome,
+    ApprovalAuditOutcome,
+    BindingSnapshot,
+    workspace_fingerprint,
+)
+from leonervis_code.session_store import SessionStore
 
 
 class InteractiveStream(io.StringIO):
@@ -81,6 +98,112 @@ def test_session_list_marks_actual_latest_without_changing_creation_order(tmp_pa
     lines = output.getvalue().splitlines()
     assert lines[0].startswith(f"{second_id}: 1 turn, closed, created ")
     assert lines[1].startswith(f"{first_id} [latest]: 2 turns, closed, created ")
+
+
+def test_session_actions_replays_recent_redacted_action_audits(tmp_path) -> None:
+    session_id = "12345678-1234-4234-9234-123456789abc"
+    grant_id = "52345678-1234-4234-9234-123456789abc"
+    store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: UUID(session_id),
+        clock=lambda: "2026-07-23T12:00:00.000000Z",
+    )
+    binding = BindingSnapshot.fake()
+    writer = store.create(binding)
+    identity = ActionIdentity(
+        request_id="32345678-1234-4234-9234-123456789abc",
+        tool_use_id="write-1",
+        tool_name="write_file",
+        arguments=ToolArguments.from_mapping(
+            {"content": "private-content-must-not-render", "path": "note.txt"}
+        ),
+        action=PermissionAction.WORKSPACE_CREATE,
+        workspace_fingerprint=workspace_fingerprint(tmp_path),
+        lease=ActionLease(
+            session_id=session_id,
+            lease_id="22345678-1234-4234-9234-123456789abc",
+            runtime_generation=0,
+            context_id="ctx-v1-" + "1" * 64,
+        ),
+        precondition=ActionPrecondition.path_absent(),
+    )
+    writer.action_requested(
+        identity=identity,
+        binding=binding,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+    )
+    permission = PermissionGate().evaluate(
+        PermissionRequest(
+            PermissionMode.WORKSPACE_WRITE,
+            ApprovalMode.ASK,
+            PermissionAction.WORKSPACE_CREATE,
+        )
+    )
+    writer.permission_decided(identity=identity, result=permission)
+    writer.approval_resolved(
+        identity=identity,
+        outcome=ApprovalAuditOutcome.ACCEPTED,
+        grant_id=grant_id,
+    )
+    writer.action_execution_started(
+        identity=identity,
+        authorization=ActionAuthorization.APPROVAL_GRANT,
+        grant_id=grant_id,
+    )
+    writer.action_execution_finished(
+        identity=identity,
+        outcome=ActionExecutionOutcome.SUCCEEDED,
+        result_code="created",
+        message="private execution detail",
+    )
+    writer.close()
+
+    output = io.StringIO()
+    errors = io.StringIO()
+    status = main(
+        ["session", "actions", "latest", "--limit", "1"],
+        cwd=tmp_path,
+        stdout=output,
+        stderr=errors,
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+    )
+
+    assert status == 0
+    assert errors.getvalue() == ""
+    rendered = output.getvalue()
+    assert "Action #1: write_file" in rendered
+    assert "class: workspace-create" in rendered
+    assert "path: 'note.txt'" in rendered
+    assert "permission: ask (approval_required_workspace_create)" in rendered
+    assert "approval: accepted" in rendered
+    assert "result: succeeded (created)" in rendered
+    assert "private-content-must-not-render" not in rendered
+    assert "private execution detail" not in rendered
+    assert grant_id not in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_session_actions_is_read_only_when_no_session_root_exists(tmp_path) -> None:
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    status = main(
+        ["session", "actions", "latest"],
+        cwd=tmp_path,
+        stdout=output,
+        stderr=errors,
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+    )
+
+    assert status == 2
+    assert output.getvalue() == ""
+    assert "session directory does not exist or is inaccessible" in errors.getvalue()
+    assert not (tmp_path / ".leonervis-code").exists()
 
 
 def test_startup_resume_evidence_uses_stderr_and_stdout_remains_model_only(
@@ -699,7 +822,16 @@ def test_profile_identity_cli_supports_rename_replace_ids_and_migrate(tmp_path) 
 
 @pytest.mark.parametrize(
     "arguments",
-    [["unknown"], ["prompt"], ["prompt", ""], ["prompt", "   "]],
+    [
+        ["unknown"],
+        ["prompt"],
+        ["prompt", ""],
+        ["prompt", "   "],
+        ["session", "actions", "--limit", "0"],
+        ["session", "actions", "--limit", "101"],
+        ["session", "actions", "--limit", "two"],
+        ["session", "actions", "--limit", "１０"],
+    ],
 )
 def test_invalid_cli_input_exits_with_usage_error(arguments, capsys) -> None:
     with pytest.raises(SystemExit) as error:

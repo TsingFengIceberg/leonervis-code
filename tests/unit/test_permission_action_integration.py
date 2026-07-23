@@ -117,7 +117,7 @@ def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_pat
             AssistantText("not written"),
         )
         assert not (tmp_path / "note.txt").exists()
-        audit = session._writer.state.action_audits[-1]
+        audit = session.action_audits()[-1]
         assert audit.status == ActionAuditStatus.DENIED
         assert audit.execution_outcome is None
     finally:

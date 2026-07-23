@@ -30,6 +30,7 @@ from leonervis_code.core.permissions import (
     PermissionResult,
 )
 from leonervis_code.session_records import (
+    ActionAuditState,
     ActionAuthorization,
     ActionExecutionFinished,
     ActionExecutionOutcome,
@@ -347,6 +348,12 @@ class SessionStore:
         self._ensure_root()
         path = self._select_path(selector)
         return _info(path, self._load_state(path, allow_repair=False))
+
+    def action_audits(self, selector: str | Path) -> tuple[ActionAuditState, ...]:
+        """Strictly replay and return one session's Host-only action lifecycles."""
+        _validate_existing_session_root(self.root, self.workspace)
+        path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
+        return self._load_state(path, allow_repair=False).action_audits
 
     def list(self) -> tuple[SessionInfo, ...]:
         """Return all strictly validated transcripts, newest first."""

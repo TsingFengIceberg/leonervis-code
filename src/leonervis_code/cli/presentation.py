@@ -16,12 +16,15 @@ BOLD = "\x1b[1m"
 _READLINE_START = "\001"
 _READLINE_END = "\002"
 _RUNTIME_WIDTH = 24
+DEFAULT_ACTION_AUDIT_COUNT = 20
+MAX_ACTION_AUDIT_COUNT = 100
 _SAFE_PROMPT_CHARACTER = re.compile(r"[A-Za-z0-9._:-]")
 
 MessageKind = Literal["plain", "info", "success", "warning", "error"]
 
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /session, /provider, /status, /context, /compact, "
+    "Commands: /help, /history <count>, /actions [count], /session, /provider, /status, "
+    "/context, /compact, "
     "/model <model>, /resume <latest|id>, /exit, /quit. Ctrl-D or Ctrl-C exits."
 )
 SESSION_HELP = (
@@ -90,6 +93,15 @@ class ConversationTurnView(Protocol):
     assistant: object
 
 
+class ActionAuditView(Protocol):
+    identity: object
+    permission_result: object | None
+    approval_outcome: object | None
+    status: object
+    result_code: str | None
+    requested_sequence: int
+
+
 def render_prompt(
     status: RuntimeStatusView | None,
     session: SessionInfoView | None,
@@ -139,6 +151,54 @@ def render_recent_history(turns: tuple[ConversationTurnView, ...], count: int) -
     return "\n\n".join(
         f"User: {turn.user.text}\nAssistant: {turn.assistant.text}" for turn in recent_turns
     )
+
+
+def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str:
+    """Render recent Host action lifecycles without sensitive identity material."""
+    recent = audits[-count:]
+    if not recent:
+        return "No action audits yet."
+
+    entries = []
+    for audit in recent:
+        identity = audit.identity
+        arguments = identity.arguments.as_mapping()
+        path = arguments.get("path")
+        path_line = f"\n  path: {path!r}" if isinstance(path, str) else ""
+
+        permission = audit.permission_result
+        if permission is None:
+            permission_line = "pending" if audit.status.value == "requested" else "not recorded"
+            approval_line = "not reached"
+        else:
+            permission_line = f"{permission.decision.value} ({permission.reason.value})"
+            if permission.decision.value == "ask":
+                if audit.approval_outcome is not None:
+                    approval_line = audit.approval_outcome.value
+                elif audit.status.value == "awaiting-approval":
+                    approval_line = "pending"
+                else:
+                    approval_line = "not recorded"
+            elif permission.decision.value == "deny":
+                approval_line = "not requested"
+            else:
+                approval_line = "not required"
+
+        result_line = audit.status.value
+        if audit.result_code is not None:
+            result_line += f" ({_safe_inline(audit.result_code)})"
+        entries.append(
+            f"Action #{audit.requested_sequence}: {identity.tool_name}\n"
+            f"  class: {identity.action.value}{path_line}\n"
+            f"  permission: {permission_line}\n"
+            f"  approval: {approval_line}\n"
+            f"  result: {result_line}"
+        )
+
+    prefix = ""
+    if len(recent) < len(audits):
+        prefix = f"Showing {len(recent)} most recent of {len(audits)} action audits.\n\n"
+    return prefix + "\n\n".join(entries)
 
 
 def render_session_summary(
@@ -442,6 +502,12 @@ def render_session_info(info: SessionInfoView) -> str:
         f"Turns: {info.turn_count}\n"
         f"Created: {info.created_at}"
     )
+
+
+def _safe_inline(value: str) -> str:
+    """Escape control characters before rendering persisted text in a terminal."""
+    rendered = repr(value)
+    return rendered[1:-1]
 
 
 def _count_label(value: int, label: str) -> str:
