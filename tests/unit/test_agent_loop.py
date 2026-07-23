@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from leonervis_code.agent.loop import AgentLoop, ToolLoopLimitError
@@ -58,6 +60,7 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "read_file",
         "glob",
         "grep",
+        "write_file",
     ]
     assert provider.received_requests[1].history[-1] == ToolResult("glob-1", "src/app.py\n")
     assert provider.received_requests[2].history[-1] == ToolResult("grep-1", grep_result)
@@ -401,3 +404,81 @@ def test_loop_pins_one_system_prompt_snapshot_across_tool_continuations(tmp_path
         provider.received_requests[0].system_prompt is provider.received_requests[1].system_prompt
     )
     assert all(snapshots[0].text not in repr(item) for item in loop.history)
+
+
+def _action_lease_for(prepared, *, lease_id="12345678-1234-4234-9234-123456789abc"):
+    from leonervis_code.core.actions import ActionLease
+
+    return ActionLease(
+        session_id="22345678-1234-4234-9234-123456789abc",
+        lease_id=lease_id,
+        runtime_generation=0,
+        context_id=prepared.context.context_id,
+    )
+
+
+def test_prepared_turn_binds_one_action_lease_and_cannot_rebase_after_binding(tmp_path) -> None:
+    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    prepared = loop.prepare_turn("hello")
+    lease = _action_lease_for(prepared)
+
+    leased = prepared.with_action_lease(lease)
+
+    assert leased.action_lease == lease
+    with pytest.raises(ValueError, match="already has"):
+        leased.with_action_lease(lease)
+    with pytest.raises(ValueError, match="cannot be rebased"):
+        leased.rebase(loop.effective_context_snapshot())
+    with pytest.raises(ValueError, match="context does not match"):
+        prepared.with_action_lease(replace(lease, context_id=f"ctx-v1-{'0' * 64}"))
+
+
+def test_action_dispatcher_receives_the_same_lease_across_tool_continuations(tmp_path) -> None:
+    first = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "a.txt"}))
+    second = ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "*.txt"}))
+    provider = ScriptedFakeProvider([first, second, AssistantText("done")])
+    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    prepared = loop.prepare_turn("inspect")
+    lease = _action_lease_for(prepared)
+    received = []
+
+    def dispatch(request, current_lease):
+        received.append((request, current_lease))
+        return ToolResult(request.tool_use_id, f"resolved {request.name}")
+
+    loop.install_action_dispatcher(dispatch)
+
+    assert loop.run_prepared(prepared.with_action_lease(lease), provider=provider) == "done"
+    assert received == [(first, lease), (second, lease)]
+    assert provider.received_requests[1].history[-1] == ToolResult("read-1", "resolved read_file")
+    assert provider.received_requests[2].history[-1] == ToolResult("glob-1", "resolved glob")
+
+
+def test_fourth_tool_call_gets_limit_result_without_entering_action_dispatch(tmp_path) -> None:
+    calls = [
+        ToolUse(
+            f"read-{index}",
+            "read_file",
+            ToolArguments.from_mapping({"path": f"{index}.txt"}),
+        )
+        for index in range(1, 5)
+    ]
+    provider = ScriptedFakeProvider([*calls, AssistantText("stopped")])
+    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    prepared = loop.prepare_turn("inspect")
+    lease = _action_lease_for(prepared)
+    dispatched = []
+
+    def dispatch(request, _lease):
+        dispatched.append(request.tool_use_id)
+        return ToolResult(request.tool_use_id, "permission denied", is_error=True)
+
+    loop.install_action_dispatcher(dispatch)
+
+    assert loop.run_prepared(prepared.with_action_lease(lease), provider=provider) == "stopped"
+    assert dispatched == ["read-1", "read-2", "read-3"]
+    assert provider.received_requests[-1].history[-1] == ToolResult(
+        "read-4",
+        "tool call limit reached for this conversation turn",
+        is_error=True,
+    )

@@ -34,6 +34,7 @@ from leonervis_code.providers.anthropic import (
     parse_response,
     read_file_tool_definition,
     serialize_history,
+    write_file_tool_definition,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import RequestTokenCountMethod
@@ -333,6 +334,47 @@ def test_grep_schema_is_exact_and_parser_preserves_two_arguments() -> None:
     )
 
 
+def test_write_file_schema_is_exact_and_parser_preserves_path_and_content() -> None:
+    assert write_file_tool_definition() == {
+        "name": "write_file",
+        "description": (
+            "Write bounded UTF-8 text to one workspace-relative file. The Host detects whether "
+            "the action creates or overwrites, applies permission and approval policy, rejects "
+            "symlinks, and uses exact target-state conflict checks before atomic installation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Portable workspace-relative destination file path.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Complete UTF-8 file content, at most 4096 bytes.",
+                },
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    }
+    assert parse_response(
+        message(
+            ToolUseBlock(
+                id="write-provider",
+                name="write_file",
+                input={"content": "hello\n", "path": "notes.txt"},
+                type="tool_use",
+            )
+        ),
+        config=config(),
+    ) == ToolUse(
+        "write-provider",
+        "write_file",
+        ToolArguments.from_mapping({"path": "notes.txt", "content": "hello\n"}),
+    )
+
+
 def test_parser_concatenates_text_and_preserves_valid_tool_use() -> None:
     assert parse_response(
         message(TextBlock(text="one", type="text"), TextBlock(text=" two", type="text")),
@@ -421,6 +463,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 read_file_tool_definition(),
                 glob_tool_definition(),
                 grep_tool_definition(),
+                write_file_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,

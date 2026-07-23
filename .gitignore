@@ -2,6 +2,10 @@
 .claude/
 CLAUDE.md
 
+# Local cross-agent instructions and handoff package
+AGENTS.md
+/.handoff/
+
 # Local configuration and Leonervis runtime state
 .env
 .env.*

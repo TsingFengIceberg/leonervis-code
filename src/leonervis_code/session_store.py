@@ -22,13 +22,27 @@ if os.name == "nt":
 else:
     import fcntl
 
+from leonervis_code.core.actions import ActionIdentity
 from leonervis_code.core.contracts import ConversationItem
+from leonervis_code.core.permissions import (
+    ApprovalMode,
+    PermissionMode,
+    PermissionResult,
+)
 from leonervis_code.session_records import (
+    ActionAuthorization,
+    ActionExecutionFinished,
+    ActionExecutionOutcome,
+    ActionExecutionStarted,
+    ActionRequested,
+    ApprovalAuditOutcome,
+    ApprovalResolved,
     AuditRecord,
     BindingSnapshot,
     ContextCompacted,
     MAX_RECORD_BYTES,
     MAX_RECORDS,
+    PermissionDecided,
     Recovery,
     ReplayState,
     RuntimeChanged,
@@ -99,6 +113,25 @@ class SessionResumeCommitError(SessionStoreError):
         self.stage = stage
         self.recovery_applied = recovery_applied
         self.session_resumed_applied = session_resumed_applied
+        super().__init__(message)
+
+
+class ActionOutcomeAuditError(SessionStoreError):
+    """Report a known executor outcome whose final audit append did not commit."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        action_request_id: str,
+        action_digest: str,
+        execution_outcome: ActionExecutionOutcome,
+        result_code: str,
+    ) -> None:
+        self.action_request_id = action_request_id
+        self.action_digest = action_digest
+        self.execution_outcome = execution_outcome
+        self.result_code = result_code
         super().__init__(message)
 
 
@@ -835,6 +868,117 @@ class SessionWriter:
             message=message,
         )
         self.append_audit(record)
+        return record
+
+    def action_requested(
+        self,
+        *,
+        identity: ActionIdentity,
+        binding: BindingSnapshot,
+        permission_mode: PermissionMode,
+        approval_mode: ApprovalMode,
+        occurred_at: str | None = None,
+    ) -> ActionRequested:
+        """Durably begin the lifecycle for one exact Host action."""
+        record = ActionRequested(
+            sequence=self._state.next_sequence,
+            occurred_at=occurred_at or self._store._clock(),
+            binding=binding,
+            identity=identity,
+            permission_mode=permission_mode,
+            approval_mode=approval_mode,
+        )
+        self.append_audit(record)
+        return record
+
+    def permission_decided(
+        self,
+        *,
+        identity: ActionIdentity,
+        result: PermissionResult,
+        occurred_at: str | None = None,
+    ) -> PermissionDecided:
+        """Durably record the deterministic permission result for an action."""
+        record = PermissionDecided(
+            sequence=self._state.next_sequence,
+            occurred_at=occurred_at or self._store._clock(),
+            action_request_id=identity.request_id,
+            action_digest=identity.digest,
+            decision=result.decision,
+            reason=result.reason,
+        )
+        self.append_audit(record)
+        return record
+
+    def approval_resolved(
+        self,
+        *,
+        identity: ActionIdentity,
+        outcome: ApprovalAuditOutcome,
+        grant_id: str | None,
+        occurred_at: str | None = None,
+    ) -> ApprovalResolved:
+        """Durably record one accepted, rejected, or cancelled approval."""
+        record = ApprovalResolved(
+            sequence=self._state.next_sequence,
+            occurred_at=occurred_at or self._store._clock(),
+            action_request_id=identity.request_id,
+            action_digest=identity.digest,
+            outcome=outcome,
+            grant_id=grant_id,
+        )
+        self.append_audit(record)
+        return record
+
+    def action_execution_started(
+        self,
+        *,
+        identity: ActionIdentity,
+        authorization: ActionAuthorization,
+        grant_id: str | None,
+        occurred_at: str | None = None,
+    ) -> ActionExecutionStarted:
+        """Commit the durable start barrier before any external effect begins."""
+        record = ActionExecutionStarted(
+            sequence=self._state.next_sequence,
+            occurred_at=occurred_at or self._store._clock(),
+            action_request_id=identity.request_id,
+            action_digest=identity.digest,
+            authorization=authorization,
+            grant_id=grant_id,
+        )
+        self.append_audit(record)
+        return record
+
+    def action_execution_finished(
+        self,
+        *,
+        identity: ActionIdentity,
+        outcome: ActionExecutionOutcome,
+        result_code: str,
+        message: str,
+        occurred_at: str | None = None,
+    ) -> ActionExecutionFinished:
+        """Record a known outcome or raise with truthful partial-outcome evidence."""
+        record = ActionExecutionFinished(
+            sequence=self._state.next_sequence,
+            occurred_at=occurred_at or self._store._clock(),
+            action_request_id=identity.request_id,
+            action_digest=identity.digest,
+            outcome=outcome,
+            result_code=result_code,
+            message=message,
+        )
+        try:
+            self.append_audit(record)
+        except Exception as error:
+            raise ActionOutcomeAuditError(
+                "action outcome is known but its final audit record was not durably committed",
+                action_request_id=identity.request_id,
+                action_digest=identity.digest,
+                execution_outcome=outcome,
+                result_code=result_code,
+            ) from error
         return record
 
     def close(self, *, reason: str = "closed", occurred_at: str | None = None) -> None:

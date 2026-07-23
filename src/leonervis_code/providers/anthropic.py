@@ -303,6 +303,11 @@ def grep_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[2]
 
 
+def write_file_tool_definition() -> dict[str, object]:
+    """Return the canonical Anthropic controlled write contract."""
+    return model_tool_definitions()[3]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

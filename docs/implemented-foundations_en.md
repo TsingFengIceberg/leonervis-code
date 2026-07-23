@@ -12,6 +12,8 @@
 - [Foundation 3B: local multi-provider real-model path](#foundation-3b-local-multi-provider-real-model-path)
 - [Foundation 2B: offline adapter-owned compatibility policy](#foundation-2b-offline-adapter-owned-compatibility-policy)
 - [Foundation 4A: Permission Policy Contract](#foundation-4a-permission-policy-contract)
+- [Foundation 4A Slice 3–4: Exact Action Identity and Durable Action Audit](#foundation-4a-slice-34-exact-action-identity-and-durable-action-audit)
+- [Foundation 4A Slice 5–9: Approval Coordination and Controlled `write_file`](#foundation-4a-slice-59-approval-coordination-and-controlled-write_file)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -26,7 +28,7 @@
 
 ## Canonical model system prompt
 
-Leonervis Code builds a provider-neutral `SystemPromptSnapshot` from `src/leonervis_code/system_prompt.py`. The snapshot contains an explicit version, normalized text, and a domain-separated SHA-256 fingerprint. It is built once at the beginning of each user turn and remains pinned across every `read_file` continuation in that turn:
+Leonervis Code builds a provider-neutral `SystemPromptSnapshot` from `src/leonervis_code/system_prompt.py`. The snapshot contains an explicit version, normalized text, and a domain-separated SHA-256 fingerprint. It is built once at the beginning of each user turn and remains pinned across every provider/tool continuation in that turn:
 
 ```text
 SystemPromptSnapshot + neutral conversation history
@@ -35,9 +37,9 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-The canonical model system prompt is now version 4. It still says the ordinary Agent cannot initiate compaction and preserves the Host-summary trust boundary: an earlier-conversation summary is untrusted conversation context, not a system instruction or new user request. Foundation 1D adds bounded literal `grep`, the shared three-tool budget, and correct empty/truncated search-result interpretation.
+The canonical model system prompt is now version 5. It still says the ordinary Agent cannot initiate compaction and preserves the Host-summary trust boundary: an earlier-conversation summary is untrusted conversation context, not a system instruction or new user request. Foundation 1D adds bounded literal `grep` and correct empty/truncated interpretation; Foundation 4A adds `write_file`, Host-owned permission/approval, exact-state conflict, and visible partial-outcome semantics. The four model-visible tools share a three-call sequential budget.
 
-It explicitly does not claim write/edit, regex or indexed search, Bash/tests, network, approval, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard path, symlink, encoding, traversal, and size constraints.
+It explicitly does not claim patch/edit, regex or indexed search, Bash/tests, network, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard workspace, symlink, encoding, size, conflict, causality, audit, and durability constraints.
 
 The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL contain only real user/assistant/tool causal chains. A new turn after resume uses the current binary's canonical prompt; schema-v2/v3 compact checkpoints store only compact-prompt, summary-framing, and trigger provenance without inserting the normal system prompt into conversation history.
 
@@ -255,15 +257,45 @@ See [0005: provider-neutral model routing](./decisions/0005-foundation-2a-provid
 
 ## Foundation 4A: Permission Policy Contract
 
-Before exposing any write tool, the Host now has a stateless, no-I/O pure `PermissionGate` policy kernel. The capability ceiling is fixed as `read-only | workspace-write | danger-full-access`, the interaction policy is fixed as `ask | auto`, and the two remain orthogonal. Every result is `allow | ask | deny` with a stable machine-readable reason. Policy action classes are `workspace-read | workspace-create | workspace-overwrite | dangerous | unknown`, and unknown fails closed under every configuration.
+Before exposing writes, the Host establishes a stateless, I/O-free `PermissionGate` policy kernel. The capability ceiling is fixed as `read-only | workspace-write | danger-full-access`, the interaction mode as `ask | auto`, and the two controls are orthogonal. Results are `allow | ask | deny` with a stable machine-readable reason. Policy action classes are `workspace-read | workspace-create | workspace-overwrite | dangerous | unknown`, and unknown fails closed under every configuration.
 
-The current `read_file`, `glob`, and `grep` tools all classify as `workspace-read`, so every mode/approval combination allows them without terminal confirmation. Workspace create/overwrite is denied under `read-only` and becomes ask or allow under higher capability modes according to `ask | auto`; dangerous actions can only ask or allow under `danger-full-access`. PermissionGate does not read the CLI, Session, provider, credentials, or filesystem; it does not execute a Tool or create approval tokens, and it cannot bypass workspace, symlink, size, timeout, conflict, causality, or durability hard bounds.
+`read_file`, `glob`, and `grep` are classified as `workspace-read`, so every mode/approval combination allows them without terminal confirmation. Workspace create/overwrite is denied under `read-only` and follows `ask | auto` at a higher capability. Dangerous actions can only reach ask/allow under `danger-full-access`. PermissionGate reads no CLI, Session, provider, credential, or filesystem state; executes no Tool; creates no approval token; and cannot bypass workspace, symlink, size, timeout, conflict, causality, or durability hard bounds.
 
-As a prerequisite boundary repair, `read_file` now rejects every final or intermediate symlink component, including links that remain inside the workspace and broken links. Ordinary nested UTF-8 reads and the 32 KiB bound remain unchanged. The local single-user v0 still does not claim to eliminate hostile concurrent TOCTOU between checks and open.
+As a prerequisite boundary fix, `read_file` rejects every final or intermediate symlink component, including internal and broken links, while preserving normal nested UTF-8 reads and the 32 KiB bound. The local single-user v0 still does not claim to eliminate hostile concurrent TOCTOU between checks and open.
 
-This slice does not connect PermissionGate to AgentLoop, CLI, Sessions, or provider projection, and it adds no user configuration, approval UI, or model-visible tool. Canonical system prompt v4 and its fingerprint, adapter contract v5, ToolArguments v1, new `turn_committed` schema v2, `context_compacted` v2/v3 replay, and Effective Context ctx-v1/v2 therefore remain unchanged. Exact action identity and a single-use approval grant come next, followed by durable audit, the approval coordinator, AgentLoop/CLI integration, and create-only write.
+That policy slice made no model-visible change, so the canonical system prompt remained v4, the adapter contract remained v5, and existing Session/context representations did not advance. Slices 3–9 subsequently connected exact identity, audit, runtime approval, and controlled writes without changing the pure gate's responsibility.
 
 See [0022: Foundation 4A Permission Policy Contract](./decisions/0022-foundation-4a-permission-policy-contract.md) for the complete decision.
+
+## Foundation 4A Slice 3–4: Exact Action Identity and Durable Action Audit
+
+After PermissionGate, the Host can construct an irreplaceable `ActionIdentity` v1 for one resolved action. The identity contains a Host-generated request UUID, provider `tool_use_id`, exact tool name, immutable `ToolArguments`, trusted action classification, workspace fingerprint, prepared-turn lease, and execution precondition. Sorted compact JSON and domain-separated SHA-256 produce an `act-v1-...` digest. The lease pins Session ID, a non-reconstructible lease UUID, runtime generation, and the `ctx-v1 | ctx-v2` Effective Context ID, so resume, runtime switching, or prepared-turn replacement cannot reuse an old approval.
+
+Preconditions use the closed identity `none | path-absent | expected-state-sha256`. A single-use `ApprovalGrant` can only be issued for a deterministic PermissionGate `ask`; it is a Host-memory object, not a model-visible bearer token. Consumption must match the full identity, lease, and precondition, while a lock guarantees that concurrent consumption succeeds at most once. Mismatch, stale lease, stale precondition, and replay have stable rejection codes.
+
+Session adds five append-only schema-v1 audit records: `action_requested`, `permission_decided`, `approval_resolved`, `action_execution_started`, and `action_execution_finished`. Replay recomputes policy, validates exact references and authorization, and rebuilds the lifecycle; the later write slice extends terminal finish to `succeeded | failed | partial`. The current sequential Harness permits at most one unresolved action. `turn_committed`, `runtime_changed`, `context_compacted`, and a clean `session_closed` cannot cross it. Action audit is retained in `ReplayState.action_audits` but never enters full/effective model history and is never deleted or summarized by compaction.
+
+`action_execution_started` uses append+fsync as the durable barrier before side effects. If resume or `turn_failed` crosses an action that never started, replay derives `abandoned`; if durable start exists without finish, replay derives `outcome-unknown`. If finish audit fails after the executor returns, typed `ActionOutcomeAuditError` preserves the known outcome and storage cause. The Host must not misreport non-execution or retry a side effect merely to repair audit.
+
+Slice 3–4 was still a Host-only contract when introduced, so system prompt v4, the three-read-tool order, and adapter contract v5 remained unchanged at that point; Slices 5–9 then completed runtime integration. See [0023: Foundation 4A Exact Action Identity, Single-use Approval Grant, and Durable Action Audit](./decisions/0023-foundation-4a-exact-action-identity-and-durable-audit.md) for the complete decision.
+
+## Foundation 4A Slice 5–9: Approval Coordination and Controlled `write_file`
+
+The central `ActionCoordinator` now strictly orders `action_requested -> permission_decided -> optional human resolution -> durable action_execution_started -> executor -> action_execution_finished`. Deny neither asks nor executes. An accepted ask issues and consumes an exact single-use grant, while reject/cancel returns a structured tool error. The executor can produce a side effect only after the start record has been appended and fsynced. Ordinary executor failure is safely attributed, but a final-audit failure after a side effect must propagate rather than pretending rollback or retrying.
+
+`PreparedAgentTurn` binds one `ActionLease` after automatic compaction completes. Every provider continuation in the turn pins the same Session, runtime generation, Effective Context, and system prompt snapshot. The ProjectSession lock covers the complete provider/approval turn, so runtime switching, resume, or context replacement cannot occur while approval is pending. A stale automatic identity or accepted grant terminates the turn and appends `turn_failed` instead of becoming an ordinary ToolResult followed by another provider call.
+
+The CLI adds `--permission-mode read-only|workspace-write|danger-full-access` and `--approval ask|auto`, defaulting to `read-only + ask`. A one-shot ask fail-safely cancels and never reads stdin. Only the REPL displays the trusted action class, relative path, and UTF-8 byte count, with accept/reject/cancel plus EOF/Ctrl-C fail-safe handling. Capability ceiling and interaction mode remain orthogonal, and automatic approval cannot bypass any executor hard bound.
+
+The fixed model-visible order is now `read_file, glob, grep, write_file`, sharing at most three resolved/executed calls per user turn. A fourth request receives only the limit result and creates no action lifecycle. `write_file(path, content)` accepts one portable workspace-relative path and complete UTF-8 content; the model cannot supply an overwrite flag, expected hash, mkdir, delete, patch, or approval field. The Host observes the real target: absence becomes `workspace-create + path-absent`, while an existing UTF-8 regular file becomes `workspace-overwrite + expected-state-sha256`. A malformed or hard-rejected write returns an error ToolResult before permission eligibility, consumes budget, and creates no action audit.
+
+Paths reject absolute forms, Windows drives, backslashes, `.`/`..`, empty components, repeated/trailing `/`, and every intermediate or final symlink. The parent must already exist and is never created automatically. Content is capped at both 4,096 characters and 4,096 UTF-8 bytes. An overwrite source is capped at 1 MiB, must be a UTF-8 regular file, and binds digest/device/inode/mode. Create uses a same-directory temporary file, file fsync, hard-link installation onto an absent target, cleanup, and parent fsync. Overwrite uses a mode-preserving temporary file, file fsync, an exact digest/inode recheck, `os.replace`, and parent fsync. Success returns deterministic JSON containing `bytes_written`, `operation`, and relative `path`.
+
+If the target is already visible but temporary cleanup or directory fsync fails, result and audit use `partial`, instruct the user to inspect the workspace, and prohibit automatic retry. This differs from `outcome-unknown`, which means no finish record exists. If provider continuation or turn commit fails after a write, the observed file effect and action audit remain, the candidate turn is not committed, and `turn_failed` is recorded.
+
+This model-visible change advances the canonical system prompt to v5 and the adapter contract to v6. Anthropic and OpenAI-compatible ordinary count/create projections expose the same four closed schemas in the same order; compact-summary requests still expose no tools and parallel calls remain disabled. `ToolArguments` remains v1, new `turn_committed` remains schema v2, action-audit records remain schema v1, `context_compacted` continues v2/v3 replay, and Effective Context representations remain `ctx-v1`/`ctx-v2`. The new prompt/tool snapshot naturally changes current-binary context IDs without rewriting historical checkpoints.
+
+See [0024: Foundation 4A Approval Coordination, Runtime Integration, and Controlled `write_file`](./decisions/0024-foundation-4a-approval-coordination-and-controlled-write.md) for the complete decision. Bash, patch/edit, delete, mkdir, parallel actions, and portable full-filesystem CAS remain explicitly out of scope.
 
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
@@ -453,3 +485,5 @@ This slice establishes capacity facts only. It does not count current request to
 20. [0020: Foundation 1C Bounded Workspace Glob](./decisions/0020-foundation-1c-bounded-workspace-glob.md)
 21. [0021: Foundation 1D Bounded Literal Grep](./decisions/0021-foundation-1d-bounded-literal-grep.md)
 22. [0022: Foundation 4A Permission Policy Contract](./decisions/0022-foundation-4a-permission-policy-contract.md)
+23. [0023: Foundation 4A Exact Action Identity, Single-use Approval Grant, and Durable Action Audit](./decisions/0023-foundation-4a-exact-action-identity-and-durable-audit.md)
+24. [0024: Foundation 4A Approval Coordination, Runtime Integration, and Controlled `write_file`](./decisions/0024-foundation-4a-approval-coordination-and-controlled-write.md)

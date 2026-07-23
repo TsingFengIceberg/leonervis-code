@@ -6,17 +6,19 @@ safety, locking, and durability live in :mod:`leonervis_code.session_store`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
+from enum import StrEnum
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
-from typing import TypeAlias
+from typing import TypeAlias, TypeVar
 from urllib.parse import urlparse
 from uuid import UUID
 
+from leonervis_code.core.actions import ActionIdentity, canonical_uuid4
 from leonervis_code.core.compaction import (
     COMPACT_MIN_EFFECTIVE_TURNS,
     COMPACT_PROMPT_VERSION,
@@ -35,6 +37,15 @@ from leonervis_code.core.contracts import (
     ToolResult,
     ToolUse,
     UserMessage,
+)
+from leonervis_code.core.permissions import (
+    ApprovalMode,
+    PermissionDecision,
+    PermissionGate,
+    PermissionMode,
+    PermissionReason,
+    PermissionRequest,
+    PermissionResult,
 )
 from leonervis_code.core.effective_context import (
     COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
@@ -57,6 +68,8 @@ MAX_STRING_LENGTH = 4096
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _WORKSPACE_FINGERPRINT = re.compile(r"v1-[0-9a-f]{64}\Z")
+_ACTION_DIGEST = re.compile(r"act-v1-[0-9a-f]{64}\Z")
+_EnumT = TypeVar("_EnumT", bound=StrEnum)
 
 
 class SessionRecordError(ValueError):
@@ -201,6 +214,125 @@ class TurnFailed:
     schema_version: int = SCHEMA_VERSION
 
 
+class ApprovalAuditOutcome(StrEnum):
+    """Durable human resolution of one policy ``ask`` decision."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+class ActionAuthorization(StrEnum):
+    """Durable evidence used to authorize the start of execution."""
+
+    POLICY_ALLOW = "policy-allow"
+    APPROVAL_GRANT = "approval-grant"
+
+
+class ActionExecutionOutcome(StrEnum):
+    """Known executor outcome recorded after the external effect returns."""
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    PARTIAL = "partial"
+
+
+class ActionAuditStatus(StrEnum):
+    """Derived replay state for one exact action lifecycle."""
+
+    REQUESTED = "requested"
+    AWAITING_APPROVAL = "awaiting-approval"
+    AUTHORIZED = "authorized"
+    APPROVED = "approved"
+    EXECUTING = "executing"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    PARTIAL = "partial"
+    DENIED = "denied"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    ABANDONED = "abandoned"
+    OUTCOME_UNKNOWN = "outcome-unknown"
+
+
+@dataclass(frozen=True)
+class ActionRequested:
+    sequence: int
+    occurred_at: str
+    binding: BindingSnapshot
+    identity: ActionIdentity
+    permission_mode: PermissionMode
+    approval_mode: ApprovalMode
+    record_type: str = "action_requested"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class PermissionDecided:
+    sequence: int
+    occurred_at: str
+    action_request_id: str
+    action_digest: str
+    decision: PermissionDecision
+    reason: PermissionReason
+    record_type: str = "permission_decided"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class ApprovalResolved:
+    sequence: int
+    occurred_at: str
+    action_request_id: str
+    action_digest: str
+    outcome: ApprovalAuditOutcome
+    grant_id: str | None
+    record_type: str = "approval_resolved"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class ActionExecutionStarted:
+    sequence: int
+    occurred_at: str
+    action_request_id: str
+    action_digest: str
+    authorization: ActionAuthorization
+    grant_id: str | None
+    record_type: str = "action_execution_started"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class ActionExecutionFinished:
+    sequence: int
+    occurred_at: str
+    action_request_id: str
+    action_digest: str
+    outcome: ActionExecutionOutcome
+    result_code: str
+    message: str
+    record_type: str = "action_execution_finished"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class ActionAuditState:
+    """One exact lifecycle reconstructed without entering model history."""
+
+    identity: ActionIdentity
+    permission_request: PermissionRequest
+    status: ActionAuditStatus
+    requested_sequence: int
+    last_sequence: int
+    permission_result: PermissionResult | None = None
+    approval_outcome: ApprovalAuditOutcome | None = None
+    grant_id: str | None = None
+    execution_outcome: ActionExecutionOutcome | None = None
+    result_code: str | None = None
+    message: str | None = None
+
+
 @dataclass(frozen=True)
 class SessionResumed:
     sequence: int
@@ -255,12 +387,28 @@ SessionRecord: TypeAlias = (
     | TurnCommitted
     | RuntimeChanged
     | TurnFailed
+    | ActionRequested
+    | PermissionDecided
+    | ApprovalResolved
+    | ActionExecutionStarted
+    | ActionExecutionFinished
     | SessionResumed
     | Recovery
     | ContextCompacted
     | SessionClosed
 )
-AuditRecord: TypeAlias = RuntimeChanged | TurnFailed | SessionResumed | Recovery | SessionClosed
+AuditRecord: TypeAlias = (
+    RuntimeChanged
+    | TurnFailed
+    | ActionRequested
+    | PermissionDecided
+    | ApprovalResolved
+    | ActionExecutionStarted
+    | ActionExecutionFinished
+    | SessionResumed
+    | Recovery
+    | SessionClosed
+)
 
 
 @dataclass(frozen=True)
@@ -274,6 +422,7 @@ class ReplayState:
     effective_summary: EffectiveContextSummary | None
     effective_source: str
     latest_checkpoint: ContextCompacted | None
+    action_audits: tuple[ActionAuditState, ...]
     turns: tuple[ConversationTurn, ...]
     binding: BindingSnapshot
     next_sequence: int
@@ -348,7 +497,7 @@ def replay_records(
     expected_session_id: str | None = None,
     expected_file_name: str | None = None,
 ) -> ReplayState:
-    """Validate sequence, binding, closed turns, and tool-use causality."""
+    """Validate sequence, conversation causality, and durable action lifecycles."""
     if not records:
         raise SessionRecordError("session transcript is missing its header")
     if len(records) > MAX_RECORDS:
@@ -378,6 +527,10 @@ def replay_records(
     binding = header.binding
     closed = False
     seen_tool_ids: set[str] = set()
+    action_states: dict[str, ActionAuditState] = {}
+    action_order: list[str] = []
+    grant_ids: set[str] = set()
+    live_action_request_id: str | None = None
     validated: list[SessionRecord] = []
     for expected_sequence, record in enumerate(records):
         if record.sequence != expected_sequence:
@@ -392,6 +545,7 @@ def replay_records(
                 "session transcript requires session_resumed after session_closed"
             )
         if isinstance(record, TurnCommitted):
+            _require_no_live_action(live_action_request_id, "turn_committed")
             _validate_timestamp(record.committed_at, "turn committed_at")
             _validate_turn(record.items, seen_tool_ids)
             history.extend(record.items)
@@ -399,6 +553,7 @@ def replay_records(
             turns.append(ConversationTurn(user=record.items[0], assistant=record.items[-1]))  # type: ignore[arg-type]
             binding = record.binding
         elif isinstance(record, RuntimeChanged):
+            _require_no_live_action(live_action_request_id, "runtime_changed")
             _validate_timestamp(record.occurred_at, "runtime_changed occurred_at")
             _required_text(record.reason, "runtime_changed reason", allow_empty=True)
             binding = record.binding
@@ -406,15 +561,128 @@ def replay_records(
             _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
             _required_text(record.failure_kind, "turn_failed failure_kind")
             _required_text(record.message, "turn_failed message", allow_empty=True)
+            _interrupt_live_action(action_states, live_action_request_id, record.sequence)
+            live_action_request_id = None
             binding = record.binding
+        elif isinstance(record, ActionRequested):
+            _require_no_live_action(live_action_request_id, "action_requested")
+            _validate_action_requested(record, header=header, binding=binding)
+            request_id = record.identity.request_id
+            if request_id in action_states:
+                raise SessionRecordError("action request ID is duplicated")
+            request = PermissionRequest(
+                record.permission_mode,
+                record.approval_mode,
+                record.identity.action,
+            )
+            action_states[request_id] = ActionAuditState(
+                identity=record.identity,
+                permission_request=request,
+                status=ActionAuditStatus.REQUESTED,
+                requested_sequence=record.sequence,
+                last_sequence=record.sequence,
+            )
+            action_order.append(request_id)
+            live_action_request_id = request_id
+        elif isinstance(record, PermissionDecided):
+            _validate_permission_decided_fields(record)
+            state = _referenced_action(record, action_states)
+            if state.status != ActionAuditStatus.REQUESTED:
+                raise SessionRecordError("permission_decided is out of order")
+            result = PermissionResult(record.decision, record.reason)
+            if PermissionGate().evaluate(state.permission_request) != result:
+                raise SessionRecordError("permission_decided does not match deterministic policy")
+            status = {
+                PermissionDecision.ALLOW: ActionAuditStatus.AUTHORIZED,
+                PermissionDecision.ASK: ActionAuditStatus.AWAITING_APPROVAL,
+                PermissionDecision.DENY: ActionAuditStatus.DENIED,
+            }[result.decision]
+            action_states[record.action_request_id] = replace(
+                state,
+                status=status,
+                permission_result=result,
+                last_sequence=record.sequence,
+            )
+            if status == ActionAuditStatus.DENIED:
+                live_action_request_id = None
+        elif isinstance(record, ApprovalResolved):
+            _validate_approval_resolved_fields(record)
+            state = _referenced_action(record, action_states)
+            if state.status != ActionAuditStatus.AWAITING_APPROVAL:
+                raise SessionRecordError("approval_resolved is out of order")
+            if record.outcome == ApprovalAuditOutcome.ACCEPTED:
+                assert record.grant_id is not None
+                if record.grant_id in grant_ids:
+                    raise SessionRecordError("approval grant ID is duplicated")
+                grant_ids.add(record.grant_id)
+                status = ActionAuditStatus.APPROVED
+            elif record.outcome == ApprovalAuditOutcome.REJECTED:
+                status = ActionAuditStatus.REJECTED
+            else:
+                status = ActionAuditStatus.CANCELLED
+            action_states[record.action_request_id] = replace(
+                state,
+                status=status,
+                approval_outcome=record.outcome,
+                grant_id=record.grant_id,
+                last_sequence=record.sequence,
+            )
+            if status in {ActionAuditStatus.REJECTED, ActionAuditStatus.CANCELLED}:
+                live_action_request_id = None
+        elif isinstance(record, ActionExecutionStarted):
+            _validate_action_execution_started_fields(record)
+            state = _referenced_action(record, action_states)
+            if state.identity.lease.runtime_generation != binding.generation:
+                raise SessionRecordError("action execution lease is stale for the current runtime")
+            if state.status == ActionAuditStatus.AUTHORIZED:
+                if (
+                    record.authorization != ActionAuthorization.POLICY_ALLOW
+                    or record.grant_id is not None
+                ):
+                    raise SessionRecordError("allowed action requires policy authorization")
+            elif state.status == ActionAuditStatus.APPROVED:
+                if (
+                    record.authorization != ActionAuthorization.APPROVAL_GRANT
+                    or record.grant_id != state.grant_id
+                ):
+                    raise SessionRecordError("approved action requires its exact approval grant")
+            else:
+                raise SessionRecordError("action_execution_started is out of order")
+            action_states[record.action_request_id] = replace(
+                state,
+                status=ActionAuditStatus.EXECUTING,
+                last_sequence=record.sequence,
+            )
+        elif isinstance(record, ActionExecutionFinished):
+            _validate_action_execution_finished_fields(record)
+            state = _referenced_action(record, action_states)
+            if state.status != ActionAuditStatus.EXECUTING:
+                raise SessionRecordError("action_execution_finished is out of order")
+            status = {
+                ActionExecutionOutcome.SUCCEEDED: ActionAuditStatus.SUCCEEDED,
+                ActionExecutionOutcome.FAILED: ActionAuditStatus.FAILED,
+                ActionExecutionOutcome.PARTIAL: ActionAuditStatus.PARTIAL,
+            }[record.outcome]
+            action_states[record.action_request_id] = replace(
+                state,
+                status=status,
+                execution_outcome=record.outcome,
+                result_code=record.result_code,
+                message=record.message,
+                last_sequence=record.sequence,
+            )
+            live_action_request_id = None
         elif isinstance(record, SessionResumed):
             _validate_timestamp(record.occurred_at, "session_resumed occurred_at")
+            _interrupt_live_action(action_states, live_action_request_id, record.sequence)
+            live_action_request_id = None
             closed = False
         elif isinstance(record, Recovery):
             _validate_timestamp(record.occurred_at, "recovery occurred_at")
             if type(record.truncated_bytes) is not int or record.truncated_bytes < 1:
                 raise SessionRecordError("recovery truncated_bytes must be a positive integer")
         elif isinstance(record, ContextCompacted):
+            _require_no_live_action(live_action_request_id, "context_compacted")
             _validate_context_compacted(
                 record,
                 full_history=tuple(history),
@@ -433,6 +701,7 @@ def replay_records(
             latest_checkpoint = record
             binding = record.binding
         elif isinstance(record, SessionClosed):
+            _require_no_live_action(live_action_request_id, "session_closed")
             _validate_timestamp(record.occurred_at, "session_closed occurred_at")
             _required_text(record.reason, "session_closed reason", allow_empty=True)
             closed = True
@@ -447,11 +716,143 @@ def replay_records(
         effective_summary=effective_summary,
         effective_source=effective_source,
         latest_checkpoint=latest_checkpoint,
+        action_audits=tuple(action_states[request_id] for request_id in action_order),
         turns=tuple(turns),
         binding=binding,
         next_sequence=len(validated),
         closed=closed,
     )
+
+
+def _require_no_live_action(
+    live_action_request_id: str | None,
+    record_type: str,
+) -> None:
+    if live_action_request_id is not None:
+        raise SessionRecordError(f"{record_type} cannot cross an unresolved action lifecycle")
+
+
+def _interrupt_live_action(
+    action_states: dict[str, ActionAuditState],
+    live_action_request_id: str | None,
+    sequence: int,
+) -> None:
+    if live_action_request_id is None:
+        return
+    state = action_states[live_action_request_id]
+    status = (
+        ActionAuditStatus.OUTCOME_UNKNOWN
+        if state.status == ActionAuditStatus.EXECUTING
+        else ActionAuditStatus.ABANDONED
+    )
+    action_states[live_action_request_id] = replace(
+        state,
+        status=status,
+        last_sequence=sequence,
+    )
+
+
+def _validate_action_requested(
+    record: ActionRequested,
+    *,
+    header: SessionHeader,
+    binding: BindingSnapshot,
+) -> None:
+    _validate_action_requested_fields(record)
+    if record.binding != binding:
+        raise SessionRecordError("action_requested binding does not match current runtime")
+    if record.identity.lease.session_id != header.session_id:
+        raise SessionRecordError("action identity Session does not match transcript")
+    if record.identity.workspace_fingerprint != header.workspace_fingerprint:
+        raise SessionRecordError("action identity workspace does not match transcript")
+    if record.identity.lease.runtime_generation != binding.generation:
+        raise SessionRecordError("action identity runtime generation is stale")
+
+
+def _validate_action_requested_fields(record: ActionRequested) -> None:
+    _validate_timestamp(record.occurred_at, "action_requested occurred_at")
+    record.binding.__post_init__()
+    if type(record.identity) is not ActionIdentity:
+        raise SessionRecordError("action_requested identity is invalid")
+    try:
+        record.identity.__post_init__()
+    except ValueError as error:
+        raise SessionRecordError(str(error)) from None
+    if type(record.permission_mode) is not PermissionMode:
+        raise SessionRecordError("action_requested permission mode is invalid")
+    if type(record.approval_mode) is not ApprovalMode:
+        raise SessionRecordError("action_requested approval mode is invalid")
+
+
+def _validate_permission_decided_fields(record: PermissionDecided) -> None:
+    _validate_action_reference_fields(record)
+    if type(record.decision) is not PermissionDecision:
+        raise SessionRecordError("permission_decided decision is invalid")
+    if type(record.reason) is not PermissionReason:
+        raise SessionRecordError("permission_decided reason is invalid")
+    try:
+        PermissionResult(record.decision, record.reason)
+    except ValueError as error:
+        raise SessionRecordError(str(error)) from None
+
+
+def _validate_approval_resolved_fields(record: ApprovalResolved) -> None:
+    _validate_action_reference_fields(record)
+    if type(record.outcome) is not ApprovalAuditOutcome:
+        raise SessionRecordError("approval_resolved outcome is invalid")
+    if record.outcome == ApprovalAuditOutcome.ACCEPTED:
+        if record.grant_id is None:
+            raise SessionRecordError("accepted approval requires a grant ID")
+        _canonical_action_uuid(record.grant_id, "approval grant ID")
+    elif record.grant_id is not None:
+        raise SessionRecordError("rejected or cancelled approval must not contain a grant ID")
+
+
+def _validate_action_execution_started_fields(record: ActionExecutionStarted) -> None:
+    _validate_action_reference_fields(record)
+    if type(record.authorization) is not ActionAuthorization:
+        raise SessionRecordError("action execution authorization is invalid")
+    if record.grant_id is not None:
+        _canonical_action_uuid(record.grant_id, "approval grant ID")
+
+
+def _validate_action_execution_finished_fields(record: ActionExecutionFinished) -> None:
+    _validate_action_reference_fields(record)
+    if type(record.outcome) is not ActionExecutionOutcome:
+        raise SessionRecordError("action execution outcome is invalid")
+    _required_text(record.result_code, "action execution result_code")
+    _required_text(record.message, "action execution message", allow_empty=True)
+
+
+def _validate_action_reference_fields(
+    record: PermissionDecided | ApprovalResolved | ActionExecutionStarted | ActionExecutionFinished,
+) -> None:
+    _validate_timestamp(record.occurred_at, f"{record.record_type} occurred_at")
+    _canonical_action_uuid(record.action_request_id, "action request ID")
+    if (
+        type(record.action_digest) is not str
+        or _ACTION_DIGEST.fullmatch(record.action_digest) is None
+    ):
+        raise SessionRecordError("action digest is invalid")
+
+
+def _referenced_action(
+    record: PermissionDecided | ApprovalResolved | ActionExecutionStarted | ActionExecutionFinished,
+    action_states: dict[str, ActionAuditState],
+) -> ActionAuditState:
+    state = action_states.get(record.action_request_id)
+    if state is None:
+        raise SessionRecordError(f"{record.record_type} references an unknown action")
+    if state.identity.digest != record.action_digest:
+        raise SessionRecordError(f"{record.record_type} action digest does not match")
+    return state
+
+
+def _canonical_action_uuid(value: object, label: str) -> str:
+    try:
+        return canonical_uuid4(value, label)
+    except ValueError as error:
+        raise SessionRecordError(str(error)) from None
 
 
 def _record_to_dict(record: SessionRecord) -> dict[str, object]:
@@ -496,6 +897,52 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             occurred_at=record.occurred_at,
             binding=_binding_to_dict(record.binding),
             failure_kind=record.failure_kind,
+            message=record.message,
+        )
+    elif isinstance(record, ActionRequested):
+        _validate_action_requested_fields(record)
+        common.update(
+            occurred_at=record.occurred_at,
+            binding=_binding_to_dict(record.binding),
+            identity=record.identity.as_mapping(),
+            permission_mode=record.permission_mode.value,
+            approval_mode=record.approval_mode.value,
+        )
+    elif isinstance(record, PermissionDecided):
+        _validate_permission_decided_fields(record)
+        common.update(
+            occurred_at=record.occurred_at,
+            action_request_id=record.action_request_id,
+            action_digest=record.action_digest,
+            decision=record.decision.value,
+            reason=record.reason.value,
+        )
+    elif isinstance(record, ApprovalResolved):
+        _validate_approval_resolved_fields(record)
+        common.update(
+            occurred_at=record.occurred_at,
+            action_request_id=record.action_request_id,
+            action_digest=record.action_digest,
+            outcome=record.outcome.value,
+            grant_id=record.grant_id,
+        )
+    elif isinstance(record, ActionExecutionStarted):
+        _validate_action_execution_started_fields(record)
+        common.update(
+            occurred_at=record.occurred_at,
+            action_request_id=record.action_request_id,
+            action_digest=record.action_digest,
+            authorization=record.authorization.value,
+            grant_id=record.grant_id,
+        )
+    elif isinstance(record, ActionExecutionFinished):
+        _validate_action_execution_finished_fields(record)
+        common.update(
+            occurred_at=record.occurred_at,
+            action_request_id=record.action_request_id,
+            action_digest=record.action_digest,
+            outcome=record.outcome.value,
+            result_code=record.result_code,
             message=record.message,
         )
     elif isinstance(record, SessionResumed):
@@ -645,6 +1092,122 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             failure_kind=_required_field_text(value, "failure_kind", record_type),
             message=_required_field_text(value, "message", record_type, allow_empty=True),
         )
+    if record_type == "action_requested":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "binding",
+            "identity",
+            "permission_mode",
+            "approval_mode",
+        }
+        _closed_fields(value, fields, record_type)
+        try:
+            identity = ActionIdentity.from_mapping(value.get("identity"))
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
+        record = ActionRequested(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            binding=_binding_from_value(value.get("binding")),
+            identity=identity,
+            permission_mode=_enum_field(value, "permission_mode", record_type, PermissionMode),
+            approval_mode=_enum_field(value, "approval_mode", record_type, ApprovalMode),
+        )
+        _validate_action_requested_fields(record)
+        return record
+    if record_type == "permission_decided":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "action_request_id",
+            "action_digest",
+            "decision",
+            "reason",
+        }
+        _closed_fields(value, fields, record_type)
+        record = PermissionDecided(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            action_request_id=_required_field_text(value, "action_request_id", record_type),
+            action_digest=_required_field_text(value, "action_digest", record_type),
+            decision=_enum_field(value, "decision", record_type, PermissionDecision),
+            reason=_enum_field(value, "reason", record_type, PermissionReason),
+        )
+        _validate_permission_decided_fields(record)
+        return record
+    if record_type == "approval_resolved":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "action_request_id",
+            "action_digest",
+            "outcome",
+            "grant_id",
+        }
+        _closed_fields(value, fields, record_type)
+        record = ApprovalResolved(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            action_request_id=_required_field_text(value, "action_request_id", record_type),
+            action_digest=_required_field_text(value, "action_digest", record_type),
+            outcome=_enum_field(value, "outcome", record_type, ApprovalAuditOutcome),
+            grant_id=_nullable_field_text(value, "grant_id", record_type),
+        )
+        _validate_approval_resolved_fields(record)
+        return record
+    if record_type == "action_execution_started":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "action_request_id",
+            "action_digest",
+            "authorization",
+            "grant_id",
+        }
+        _closed_fields(value, fields, record_type)
+        record = ActionExecutionStarted(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            action_request_id=_required_field_text(value, "action_request_id", record_type),
+            action_digest=_required_field_text(value, "action_digest", record_type),
+            authorization=_enum_field(value, "authorization", record_type, ActionAuthorization),
+            grant_id=_nullable_field_text(value, "grant_id", record_type),
+        )
+        _validate_action_execution_started_fields(record)
+        return record
+    if record_type == "action_execution_finished":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "action_request_id",
+            "action_digest",
+            "outcome",
+            "result_code",
+            "message",
+        }
+        _closed_fields(value, fields, record_type)
+        record = ActionExecutionFinished(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            action_request_id=_required_field_text(value, "action_request_id", record_type),
+            action_digest=_required_field_text(value, "action_digest", record_type),
+            outcome=_enum_field(value, "outcome", record_type, ActionExecutionOutcome),
+            result_code=_required_field_text(value, "result_code", record_type),
+            message=_required_field_text(value, "message", record_type, allow_empty=True),
+        )
+        _validate_action_execution_finished_fields(record)
+        return record
     if record_type == "context_compacted":
         fields = {
             "record_type",
@@ -1136,6 +1699,19 @@ def _nullable_field_int(value: dict[str, object], field: str, label: str) -> int
     if result is not None and type(result) is not int:
         raise SessionRecordError(f"{label} {field} must be an integer or null")
     return result
+
+
+def _enum_field(
+    value: dict[str, object],
+    field: str,
+    label: str,
+    enum_type: type[_EnumT],
+) -> _EnumT:
+    raw = _required_field_text(value, field, label)
+    try:
+        return enum_type(raw)
+    except ValueError:
+        raise SessionRecordError(f"{label} {field} is invalid") from None
 
 
 def _nullable_field_number(value: dict[str, object], field: str, label: str) -> float | None:

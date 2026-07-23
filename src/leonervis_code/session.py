@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 import os
 from pathlib import Path
 from threading import RLock
+from uuid import UUID, uuid4
 
 from leonervis_code.agent.loop import AgentLoop, PreparedAgentTurn
+from leonervis_code.core.action_coordinator import (
+    ActionCoordinator,
+    ActionExecutionResult,
+    ApprovalHandler,
+    ApprovalResolution,
+)
+from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
 from leonervis_code.core.compaction import (
     AUTO_COMPACT_HIGH_WATER_PERCENT,
     COMPACT_MAX_OUTPUT_TOKENS,
@@ -30,7 +38,10 @@ from leonervis_code.core.contracts import (
     ConversationItem,
     ConversationProvider,
     ConversationTurn,
+    ToolResult,
+    ToolUse,
 )
+from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
 from leonervis_code.core.effective_context import (
     COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
@@ -55,7 +66,11 @@ from leonervis_code.providers.request_context import (
     rejects_context_transition,
     raise_for_context_fit,
 )
-from leonervis_code.session_records import BindingSnapshot, ContextCompacted
+from leonervis_code.session_records import (
+    ActionExecutionOutcome,
+    BindingSnapshot,
+    ContextCompacted,
+)
 from leonervis_code.session_store import (
     LatestUpdateStatus,
     SessionInfo,
@@ -66,7 +81,16 @@ from leonervis_code.session_store import (
 )
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
-from leonervis_code.tools.read_file import ReadFileTool
+from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
+from leonervis_code.tools.glob import GLOB_TOOL_NAME
+from leonervis_code.tools.grep import GREP_TOOL_NAME
+from leonervis_code.tools.write_file import (
+    WRITE_FILE_TOOL_NAME,
+    PreparedWriteFile,
+    WriteFileOutcome,
+    WriteFilePreparationError,
+    WriteFileTool,
+)
 
 
 class ResumeEffect(StrEnum):
@@ -264,7 +288,12 @@ class ProjectSession:
         read_file: ReadFileTool,
         glob: GlobTool,
         grep: GrepTool,
+        write_file: WriteFileTool | None = None,
         *,
+        permission_mode: PermissionMode = PermissionMode.READ_ONLY,
+        approval_mode: ApprovalMode = ApprovalMode.ASK,
+        approval_handler: ApprovalHandler | None = None,
+        action_uuid_factory: Callable[[], UUID | str] = uuid4,
         loop: AgentLoop | None = None,
         startup_resume_result: SessionResumeResult | None = None,
     ) -> None:
@@ -276,10 +305,23 @@ class ProjectSession:
         self._read_file = read_file
         self._glob = glob
         self._grep = grep
+        self._write_file = write_file or WriteFileTool(workspace)
+        if type(permission_mode) is not PermissionMode:
+            raise ValueError("permission mode is invalid")
+        if type(approval_mode) is not ApprovalMode:
+            raise ValueError("approval mode is invalid")
+        self._permission_mode = permission_mode
+        self._approval_mode = approval_mode
+        self._approval_handler = approval_handler or _cancel_approval
+        self._action_uuid_factory = action_uuid_factory
+        self._active_action_lease: ActionLease | None = None
+        self._active_action_binding: BindingSnapshot | None = None
         self._lock = RLock()
         self._closed = False
         self._active_compaction: _PreparedCompaction | None = None
         self._loop = loop or self._new_loop(writer)
+        if loop is not None:
+            self._loop.install_action_dispatcher(self._dispatch_action)
         self._startup_resume_result = startup_resume_result
 
     @classmethod
@@ -301,6 +343,11 @@ class ProjectSession:
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
         glob_factory: Callable[[Path], GlobTool] = GlobTool,
         grep_factory: Callable[[Path], GrepTool] = GrepTool,
+        write_file_factory: Callable[[Path], WriteFileTool] = WriteFileTool,
+        permission_mode: PermissionMode = PermissionMode.READ_ONLY,
+        approval_mode: ApprovalMode = ApprovalMode.ASK,
+        approval_handler: ApprovalHandler | None = None,
+        action_uuid_factory: Callable[[], UUID | str] = uuid4,
         session_store_factory: Callable[[Path], SessionStore] = SessionStore,
     ) -> ProjectSession:
         """Create or resume durable history while selecting runtime independently."""
@@ -333,6 +380,7 @@ class ProjectSession:
             read_file = read_file_factory(resolved_workspace)
             glob = glob_factory(resolved_workspace)
             grep = grep_factory(resolved_workspace)
+            write_file = write_file_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -346,6 +394,11 @@ class ProjectSession:
                     read_file,
                     glob,
                     grep,
+                    write_file,
+                    permission_mode=permission_mode,
+                    approval_mode=approval_mode,
+                    approval_handler=approval_handler,
+                    action_uuid_factory=action_uuid_factory,
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
@@ -386,6 +439,11 @@ class ProjectSession:
                     read_file,
                     glob,
                     grep,
+                    write_file,
+                    permission_mode=permission_mode,
+                    approval_mode=approval_mode,
+                    approval_handler=approval_handler,
+                    action_uuid_factory=action_uuid_factory,
                     loop=loop,
                     startup_resume_result=result,
                 )
@@ -482,6 +540,7 @@ class ProjectSession:
                     self._grep,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                 )
+                loop.install_action_dispatcher(self._dispatch_action)
                 snapshot = loop.effective_context_snapshot()
                 with self._manager.provider_for_context_transition() as runtime:
                     assessment = runtime.assess_context(snapshot.to_conversation_request())
@@ -517,39 +576,53 @@ class ProjectSession:
                 prepared.abort()
 
     def prompt(self, text: str, *, event_sink: PromptEventSink | None = None) -> str:
-        """Run one preflighted turn with at most one automatic compaction attempt."""
+        """Run one serialized preflighted turn with one exact prepared-action lease."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
             prepared = self._loop.prepare_turn(text)
             loop = self._loop
             binding: BindingSnapshot | None = None
-        try:
-            with self._manager.provider_for_turn() as runtime:
-                binding = binding_from_status(runtime.status)
-                assessment = runtime.assess_context(prepared.initial_request)
-                report = assessment.fit_report
-                if (
-                    report is not None
-                    and report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED
-                ):
-                    raise_for_context_fit(report)
-                decision = decide_auto_compaction(report)
-                if decision.trigger is not None:
-                    prepared = self._auto_compact_turn(
-                        prepared,
-                        loop=loop,
-                        runtime=runtime,
-                        trigger=decision.trigger,
-                        mandatory=decision.mandatory,
-                        source_report=report,
-                        event_sink=event_sink,
+            try:
+                with self._manager.provider_for_turn() as runtime:
+                    binding = binding_from_status(runtime.status)
+                    assessment = runtime.assess_context(prepared.initial_request)
+                    report = assessment.fit_report
+                    if (
+                        report is not None
+                        and report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED
+                    ):
+                        raise_for_context_fit(report)
+                    decision = decide_auto_compaction(report)
+                    if decision.trigger is not None:
+                        prepared = self._auto_compact_turn(
+                            prepared,
+                            loop=loop,
+                            runtime=runtime,
+                            trigger=decision.trigger,
+                            mandatory=decision.mandatory,
+                            source_report=report,
+                            event_sink=event_sink,
+                        )
+                    lease = ActionLease(
+                        session_id=self._writer.session_id,
+                        lease_id=_uuid4_text(self._action_uuid_factory(), "action lease ID"),
+                        runtime_generation=runtime.status.generation,
+                        context_id=prepared.context.context_id,
                     )
-                return loop.run_prepared(prepared, provider=runtime)
-        except Exception as error:
-            with self._lock:
-                self._record_failure(binding or binding_from_status(self._manager.status()), error)
-            raise
+                    prepared = prepared.with_action_lease(lease)
+                    self._active_action_lease = lease
+                    self._active_action_binding = binding
+                    return loop.run_prepared(prepared, provider=runtime)
+            except BaseException as error:
+                self._record_failure(
+                    binding or binding_from_status(self._manager.status()),
+                    error,
+                )
+                raise
+            finally:
+                self._active_action_lease = None
+                self._active_action_binding = None
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
         self._ensure_open()
@@ -894,13 +967,117 @@ class ProjectSession:
         )
 
     def _new_loop(self, writer: SessionWriter) -> AgentLoop:
-        return self._loop_from_state(
+        loop = self._loop_from_state(
             writer.state,
             self._read_file,
             self._glob,
             self._grep,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
         )
+        loop.install_action_dispatcher(self._dispatch_action)
+        return loop
+
+    def _dispatch_action(self, request: ToolUse, lease: ActionLease) -> ToolResult:
+        """Prepare and run one model tool request through the exact Host boundary."""
+        self._assert_action_lease(lease)
+        binding = self._active_action_binding
+        if binding is None:
+            raise RuntimeError("action binding is unavailable")
+
+        prepared_write: PreparedWriteFile | None = None
+        if request.name in {READ_FILE_TOOL_NAME, GLOB_TOOL_NAME, GREP_TOOL_NAME}:
+            action = PermissionAction.WORKSPACE_READ
+            precondition = ActionPrecondition.none()
+        elif request.name == WRITE_FILE_TOOL_NAME:
+            try:
+                prepared_write = self._write_file.prepare(request)
+            except WriteFilePreparationError as error:
+                return ToolResult(request.tool_use_id, str(error), is_error=True)
+            action = prepared_write.action
+            precondition = prepared_write.precondition
+        else:
+            action = PermissionAction.UNKNOWN
+            precondition = ActionPrecondition.none()
+
+        identity = ActionIdentity(
+            request_id=_uuid4_text(self._action_uuid_factory(), "action request ID"),
+            tool_use_id=request.tool_use_id,
+            tool_name=request.name,
+            arguments=request.arguments,
+            action=action,
+            workspace_fingerprint=self._session_store.workspace_fingerprint,
+            lease=lease,
+            precondition=precondition,
+        )
+        coordinator = ActionCoordinator(
+            writer=self._writer,
+            approval_handler=self._approval_handler,
+            uuid_factory=self._action_uuid_factory,
+        )
+
+        def revalidate(current: ActionIdentity) -> ActionIdentity:
+            self._assert_action_lease(lease)
+            if prepared_write is None:
+                return current
+            refreshed = self._write_file.refresh_precondition(prepared_write)
+            return replace(current, precondition=refreshed)
+
+        def execute(current: ActionIdentity) -> ActionExecutionResult:
+            self._assert_action_lease(lease)
+            if request.name == READ_FILE_TOOL_NAME:
+                result = self._read_file.execute(request)
+            elif request.name == GLOB_TOOL_NAME:
+                result = self._glob.execute(request)
+            elif request.name == GREP_TOOL_NAME:
+                result = self._grep.execute(request)
+            elif request.name == WRITE_FILE_TOOL_NAME and prepared_write is not None:
+                write_result = self._write_file.execute_detailed(prepared_write)
+                outcome = {
+                    WriteFileOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    WriteFileOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    WriteFileOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[write_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=write_result.tool_result,
+                    outcome=outcome,
+                    result_code=write_result.result_code,
+                    audit_message=write_result.audit_message,
+                )
+            else:
+                result = ToolResult(
+                    request.tool_use_id, f"unknown tool: {request.name}", is_error=True
+                )
+            outcome = (
+                ActionExecutionOutcome.FAILED
+                if result.is_error
+                else ActionExecutionOutcome.SUCCEEDED
+            )
+            return ActionExecutionResult(
+                tool_result=result,
+                outcome=outcome,
+                result_code="tool_error" if result.is_error else "ok",
+                audit_message=f"{request.name} {'failed' if result.is_error else 'succeeded'}",
+            )
+
+        return coordinator.run(
+            identity=identity,
+            binding=binding,
+            permission_mode=self._permission_mode,
+            approval_mode=self._approval_mode,
+            revalidate=revalidate,
+            execute=execute,
+        ).tool_result
+
+    def _assert_action_lease(self, lease: ActionLease) -> None:
+        active = self._active_action_lease
+        if active != lease:
+            raise RuntimeError("prepared action lease is stale")
+        if (
+            self._writer.session_id != lease.session_id
+            or self._manager.status().generation != lease.runtime_generation
+            or self._loop.effective_context_snapshot().context_id != lease.context_id
+        ):
+            raise RuntimeError("prepared action lease no longer matches runtime context")
 
     def _commit_turn(self, writer: SessionWriter, turn: CommittedTurn) -> None:
         if writer is not self._writer:
@@ -913,7 +1090,7 @@ class ProjectSession:
         except Exception as error:
             raise RuntimeSwitchAuditError(result) from error
 
-    def _record_failure(self, binding: BindingSnapshot, error: Exception) -> None:
+    def _record_failure(self, binding: BindingSnapshot, error: BaseException) -> None:
         try:
             self._writer.turn_failed(
                 binding=binding,
@@ -930,6 +1107,20 @@ class ProjectSession:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("project session is closed")
+
+
+def _cancel_approval(_request) -> ApprovalResolution:
+    return ApprovalResolution.CANCEL
+
+
+def _uuid4_text(value: UUID | str, label: str) -> str:
+    try:
+        parsed = value if isinstance(value, UUID) else UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        raise ValueError(f"{label} must be a canonical UUID4") from None
+    if parsed.version != 4 or str(parsed) != str(value):
+        raise ValueError(f"{label} must be a canonical UUID4")
+    return str(parsed)
 
 
 def _resume_result(
@@ -1004,7 +1195,7 @@ def binding_from_status(status: RuntimeStatus) -> BindingSnapshot:
     )
 
 
-def _safe_failure_message(error: Exception) -> str:
+def _safe_failure_message(error: BaseException) -> str:
     if isinstance(error, ContextPreflightError):
         return str(error)[:4096]
     if isinstance(error, ProviderAdapterError):

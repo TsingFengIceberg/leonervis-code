@@ -19,7 +19,14 @@ from leonervis_code.cli.presentation import (
     render_session_summary,
 )
 from leonervis_code.cli.repl import run_repl
+from leonervis_code.core.action_coordinator import (
+    ActionIdentityChangedError,
+    ApprovalResolution,
+    HumanApprovalRequest,
+)
+from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
+from leonervis_code.core.permissions import ApprovalMode, PermissionMode
 from leonervis_code.core.orchestration import (
     GenerationOptions,
     OrchestrationError,
@@ -59,6 +66,7 @@ from leonervis_code.session_store import (
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import ReadFileTool
+from leonervis_code.tools.write_file import WriteFileTool
 
 
 def nonblank_prompt(value: str) -> str:
@@ -84,6 +92,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-C", "--cwd", dest="workspace", help="workspace directory")
     parser.add_argument("--resume", help="resume latest, a session UUID, or a transcript path")
+    parser.add_argument(
+        "--permission-mode",
+        choices=[mode.value for mode in PermissionMode],
+        default=PermissionMode.READ_ONLY.value,
+        help="Host capability ceiling for model-requested actions (default: read-only)",
+    )
+    parser.add_argument(
+        "--approval",
+        choices=[mode.value for mode in ApprovalMode],
+        default=ApprovalMode.ASK.value,
+        help="whether in-scope controlled actions ask or run automatically (default: ask)",
+    )
     profile_selector = parser.add_mutually_exclusive_group()
     profile_selector.add_argument("--profile", help="named endpoint profile for this invocation")
     profile_selector.add_argument(
@@ -524,6 +544,50 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     return 0
 
 
+def noninteractive_approval(_request: HumanApprovalRequest) -> ApprovalResolution:
+    """Cancel policy asks in one-shot/automation mode instead of reading stdin."""
+    return ApprovalResolution.CANCEL
+
+
+def terminal_approval_handler(stdin: TextIO, stdout: TextIO):
+    """Build the bounded REPL-only human confirmation boundary."""
+
+    def handle(request: HumanApprovalRequest) -> ApprovalResolution:
+        arguments = request.identity.arguments.as_mapping()
+        path = arguments.get("path", "<unknown>")
+        content = arguments.get("content")
+        byte_count = len(content.encode("utf-8")) if isinstance(content, str) else None
+        detail = f" path={path!r}"
+        if byte_count is not None:
+            detail += f" bytes={byte_count}"
+        prompt = (
+            f"Approval required: {request.identity.action.value} "
+            f"{request.identity.tool_name}{detail} [y/N/c]: "
+        )
+        for _ in range(3):
+            try:
+                stdout.write(prompt)
+                stdout.flush()
+                line = stdin.readline()
+            except KeyboardInterrupt:
+                stdout.write("\n")
+                stdout.flush()
+                return ApprovalResolution.CANCEL
+            if line == "":
+                return ApprovalResolution.CANCEL
+            answer = line.strip().lower()
+            if answer in {"y", "yes"}:
+                return ApprovalResolution.ACCEPT
+            if answer in {"", "n", "no"}:
+                return ApprovalResolution.REJECT
+            if answer in {"c", "cancel"}:
+                return ApprovalResolution.CANCEL
+            stdout.write("Please answer y, n, or c.\n")
+        return ApprovalResolution.CANCEL
+
+    return handle
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -661,6 +725,12 @@ def main(
                     file=errors,
                 )
                 return 2
+        input_stream = stdin or sys.stdin
+        approval_handler = (
+            terminal_approval_handler(input_stream, output)
+            if arguments.command is None
+            else noninteractive_approval
+        )
         session = ProjectSession.open(
             workspace,
             resume=arguments.resume,
@@ -676,6 +746,10 @@ def main(
             read_file_factory=ReadFileTool,
             glob_factory=GlobTool,
             grep_factory=GrepTool,
+            write_file_factory=WriteFileTool,
+            permission_mode=PermissionMode(arguments.permission_mode),
+            approval_mode=ApprovalMode(arguments.approval),
+            approval_handler=approval_handler,
         )
         try:
             resume_result = session.startup_resume_result
@@ -695,7 +769,7 @@ def main(
                 return 0
             return run_repl(
                 session,
-                stdin=stdin or sys.stdin,
+                stdin=input_stream,
                 stdout=output,
                 version=__version__,
                 cwd=workspace,
@@ -725,6 +799,9 @@ def main(
         return 2
     except SessionResumeCommitError as error:
         print(f"session resume commit error [{error.stage.value}]: {error}", file=errors)
+        return 2
+    except (ApprovalGrantError, ActionIdentityChangedError) as error:
+        print(f"action authorization error: {error}", file=errors)
         return 2
     except SessionStoreError as error:
         print(f"session error: {error}", file=errors)

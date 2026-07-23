@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from leonervis_code.core.actions import ActionLease
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
     AssistantText,
@@ -34,6 +35,7 @@ from leonervis_code.tools.grep import GREP_TOOL_NAME, GrepTool
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
+ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult]
 
 
 class ToolLoopLimitError(RuntimeError):
@@ -47,6 +49,7 @@ class PreparedAgentTurn:
     user: UserMessage
     context: EffectiveContextSnapshot
     pending_items: tuple[ConversationItem, ...]
+    action_lease: ActionLease | None = None
 
     def __post_init__(self) -> None:
         if self.pending_items != (self.user,):
@@ -57,7 +60,17 @@ class PreparedAgentTurn:
         return self.context.to_conversation_request(pending_items=self.pending_items)
 
     def rebase(self, context: EffectiveContextSnapshot) -> PreparedAgentTurn:
+        if self.action_lease is not None:
+            raise ValueError("a leased prepared turn cannot be rebased")
         return replace(self, context=context)
+
+    def with_action_lease(self, lease: ActionLease) -> PreparedAgentTurn:
+        """Bind one non-recreatable lease after automatic compaction is complete."""
+        if self.action_lease is not None:
+            raise ValueError("prepared turn already has an action lease")
+        if lease.context_id != self.context.context_id:
+            raise ValueError("action lease context does not match prepared turn")
+        return replace(self, action_lease=lease)
 
 
 class AgentLoop:
@@ -76,6 +89,7 @@ class AgentLoop:
         initial_effective_source: str = EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
         commit_turn: TurnCommitter | None = None,
         system_prompt_factory: SystemPromptFactory = build_system_prompt,
+        action_dispatcher: ActionDispatcher | None = None,
     ) -> None:
         """Store a provider, confined tool, validated history, and durable commit hook."""
         self._provider = provider
@@ -108,6 +122,7 @@ class AgentLoop:
         self._turns = restored.display_turns
         self._commit_turn = commit_turn
         self._system_prompt_factory = system_prompt_factory
+        self._action_dispatcher = action_dispatcher
 
     @property
     def history(self) -> tuple[ConversationItem, ...]:
@@ -212,7 +227,13 @@ class AgentLoop:
                 raise ToolLoopLimitError("provider requested a tool after the tool call limit")
 
             tool_calls += 1
-            pending += (self._execute(response),)
+            pending += (self._execute(response, prepared.action_lease),)
+
+    def install_action_dispatcher(self, dispatcher: ActionDispatcher) -> None:
+        """Install the ProjectSession-owned permission/audit dispatch seam exactly once."""
+        if self._action_dispatcher is not None:
+            raise ValueError("action dispatcher is already installed")
+        self._action_dispatcher = dispatcher
 
     def install_compaction(
         self,
@@ -248,8 +269,12 @@ class AgentLoop:
         self._effective_history += items
         self._turns += (ConversationTurn(user=user, assistant=assistant),)
 
-    def _execute(self, request: ToolUse) -> ToolResult:
-        """Dispatch one current read-only tool or return a model-visible error."""
+    def _execute(self, request: ToolUse, lease: ActionLease | None) -> ToolResult:
+        """Dispatch one current tool through the Host action boundary when installed."""
+        if self._action_dispatcher is not None:
+            if lease is None:
+                raise RuntimeError("prepared action lease is required")
+            return self._action_dispatcher(request, lease)
         if request.name == READ_FILE_TOOL_NAME:
             return self._read_file.execute(request)
         if request.name == GLOB_TOOL_NAME:

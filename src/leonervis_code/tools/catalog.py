@@ -1,4 +1,4 @@
-"""Fixed ordered model-tool contract for the current read-only surface."""
+"""Fixed ordered model-tool contract for the current bounded workspace surface."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from leonervis_code.core.effective_context import CanonicalToolDefinition
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, glob_tool_snapshot
 from leonervis_code.tools.grep import GREP_TOOL_NAME, grep_tool_snapshot
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, read_file_tool_snapshot
+from leonervis_code.tools.write_file import WRITE_FILE_TOOL_NAME, write_file_tool_snapshot
 
 MAX_TOOL_EXECUTIONS_PER_TURN = 3
 MAX_TOOL_INPUT_STRING_CHARACTERS = 4096
@@ -16,6 +17,7 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     read_file_tool_snapshot(),
     glob_tool_snapshot(),
     grep_tool_snapshot(),
+    write_file_tool_snapshot(),
 )
 
 
@@ -37,7 +39,8 @@ def tool_use_from_input(
         _validate_input_string(
             tool_input[key],
             label=f"{name} {key}",
-            allow_whitespace=key == "query",
+            allow_whitespace=key in {"query", "content"},
+            allow_empty=key == "content",
         )
     return ToolUse(
         tool_use_id=tool_use_id,
@@ -58,7 +61,8 @@ def tool_input_from_use(request: ToolUse) -> dict[str, object]:
         _validate_input_string(
             tool_input[key],
             label=f"{request.name} {key}",
-            allow_whitespace=key == "query",
+            allow_whitespace=key in {"query", "content"},
+            allow_empty=key == "content",
         )
     return tool_input
 
@@ -70,6 +74,8 @@ def _expected_keys(name: str) -> set[str]:
         return {"pattern"}
     if name == GREP_TOOL_NAME:
         return {"query", "include"}
+    if name == WRITE_FILE_TOOL_NAME:
+        return {"path", "content"}
     raise ValueError(f"unsupported tool: {name}")
 
 
@@ -78,11 +84,12 @@ def _validate_input_string(
     *,
     label: str,
     allow_whitespace: bool = False,
+    allow_empty: bool = False,
 ) -> None:
     if (
         not isinstance(value, str)
-        or not value
-        or (not allow_whitespace and not value.strip())
+        or (not allow_empty and not value)
+        or (not allow_empty and not allow_whitespace and not value.strip())
         or "\x00" in value
     ):
         raise ValueError(f"{label} must be nonblank text")

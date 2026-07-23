@@ -39,6 +39,7 @@ from leonervis_code.providers.openai_compat import (
     parse_response,
     read_file_tool_definition,
     serialize_history,
+    write_file_tool_definition,
 )
 from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.providers.resolver import resolve_runtime_route
@@ -246,6 +247,45 @@ def test_grep_schema_and_parser_preserve_two_arguments() -> None:
         "grep-provider",
         "grep",
         ToolArguments.from_mapping({"query": "ToolUse(", "include": "src/**/*.py"}),
+    )
+
+
+def test_write_file_schema_and_parser_preserve_path_and_content() -> None:
+    definition = write_file_tool_definition()
+    assert definition["function"] == {
+        "name": "write_file",
+        "description": (
+            "Write bounded UTF-8 text to one workspace-relative file. The Host detects whether "
+            "the action creates or overwrites, applies permission and approval policy, rejects "
+            "symlinks, and uses exact target-state conflict checks before atomic installation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Portable workspace-relative destination file path.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Complete UTF-8 file content, at most 4096 bytes.",
+                },
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    }
+    call = tool_call(
+        call_id="write-provider",
+        name="write_file",
+        arguments='{"content":"hello\\n","path":"notes.txt"}',
+    )
+    assert parse_response(
+        completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
+    ) == ToolUse(
+        "write-provider",
+        "write_file",
+        ToolArguments.from_mapping({"path": "notes.txt", "content": "hello\n"}),
     )
 
 

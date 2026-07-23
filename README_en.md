@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded sequential `read_file`/`glob`/literal `grep` loop, provider-owned model limits, target-specific preflight, switch-time screening, provider-neutral Effective Context, manual resumable `/compact`, target-aware startup/REPL resume prepare/screen/commit, and pre-turn automatic compaction triggered by a fixed 80% high-water mark or known overflow are implemented. Foundation 4A now fixes the permission/approval vocabulary, decision matrix, and pure `PermissionGate` policy kernel; CLI/AgentLoop approval flow, write tools, and Bash are not yet implemented.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded sequential `read_file`/`glob`/literal `grep`/`write_file` loop, provider-owned model limits, target-specific preflight, switch-time screening, provider-neutral Effective Context, manual and automatic compaction, and target-aware resume are implemented. Foundation 4A now connects permission policy, exact action identity, single-use approval, durable action audit, CLI/AgentLoop approval flow, and controlled create/overwrite writes end to end; Bash, patch/edit, delete, and mkdir remain unavailable.
 
 ## Contents
 
@@ -75,9 +75,15 @@ uv run leonervis-code session --help
 | Use a named profile | `uv run leonervis-code --profile work prompt "Explain the README"` |
 | Override a profile's model temporarily | `uv run leonervis-code --profile work --model model-v2 prompt "Continue"` |
 | Use a direct model route | `uv run leonervis-code --model anthropic/claude-opus-4-8 prompt "Explain the README"` |
+| Approve workspace writes interactively in the REPL | `uv run leonervis-code --permission-mode workspace-write --approval ask` |
+| Allow automatic workspace writes in one-shot mode | `uv run leonervis-code --permission-mode workspace-write --approval auto prompt "Create note.txt"` |
 | Show the version | `uv run leonervis-code --version` |
 
 Use `prompt` for scripts and one-shot tasks, and the bare command for a stateful multi-turn REPL. Successful turns are automatically saved to the workspace Session transcript.
+
+The default is `read-only + ask`. `--permission-mode` is the capability ceiling, while `--approval` decides whether an in-scope write asks or proceeds automatically; the controls are independent. A one-shot `prompt` fail-safely cancels an `ask` and never reads stdin for approval. Only the REPL presents `workspace-create` or `workspace-overwrite`, the relative path, and the UTF-8 byte count, accepting `y/yes`, `n/no`, or `c/cancel`.
+
+`write_file(path, content)` supplies the **complete** UTF-8 contents of one file; it is not a patch. The model cannot declare create versus overwrite: the Host classifies the observed target and rechecks the approved absent or SHA-256 state before execution. The tool follows no symlinks, creates no parent directories, and caps content at both 4,096 characters and 4,096 UTF-8 bytes. Overwrite accepts only an existing UTF-8 regular file of at most 1 MiB, preserves its mode, and rejects stale or conflicting targets. Permission or automatic approval never bypasses these hard bounds.
 
 ### Configure providers
 
@@ -214,8 +220,10 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 ## Detailed documentation
 
-- [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, context capability, automatic context compaction, and permission policy.
+- [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, context capability, compaction, permission/approval, and controlled writes.
 - [Architecture decision records](./docs/decisions/): complete problem statements, trade-offs, boundaries, and verification records for each learning slice.
+- [Approval Coordination and Controlled `write_file`](./docs/decisions/0024-foundation-4a-approval-coordination-and-controlled-write.md): coordinator ordering, prepared-turn leases, CLI approval UX, create/overwrite hard bounds, and partial-outcome semantics.
+- [Exact Action Identity and Durable Action Audit](./docs/decisions/0023-foundation-4a-exact-action-identity-and-durable-audit.md): the exact manifest/digest, prepared-turn lease, single-use grant, append-only lifecycle, and crash/recovery semantics.
 - [Permission Policy Contract](./docs/decisions/0022-foundation-4a-permission-policy-contract.md): orthogonal permission/approval semantics, action classes, the deterministic decision matrix, stable reasons, and the pure policy boundary.
 - [Bounded Literal Grep](./docs/decisions/0021-foundation-1d-bounded-literal-grep.md): literal/include semantics, JSONL line results, content/file bounds, generic arguments, and mixed turn-schema replay.
 - [Bounded Workspace Glob](./docs/decisions/0020-foundation-1c-bounded-workspace-glob.md): portable patterns, hidden/symlink policy, deterministic bounds, the shared tool budget, and the legacy schema-v1 seam.
@@ -233,6 +241,6 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 ## Current scope and next step
 
-The current model-visible surface still consists only of bounded workspace read-only `read_file`, `glob`, and literal `grep`. There is no regex/index/ignore-aware search, write/edit, Bash/test, network tool, CLI/AgentLoop approval, streaming, automatic retry/fallback, parallel-tool, multi-agent, or remote-service capability yet. The Host now has a pure no-I/O `PermissionGate` policy kernel, but it does not yet affect any runtime action.
+The current model-visible surface has the fixed order `read_file`, `glob`, literal `grep`, and complete-content `write_file`; all four share at most three sequential calls per user turn. Regex/index/ignore-aware search, patch/edit, delete, mkdir, Bash/test, network tools, streaming, automatic retry/fallback, parallel tools, multi-agent operation, and remote services remain unavailable.
 
-Foundation 4A accepts the permission policy contract and implements its pure kernel: the `read-only | workspace-write | danger-full-access` capability ceiling remains orthogonal to `ask | auto` interaction policy, and every result is `allow | ask | deny` with a stable reason. The three current read tools classify as `workspace-read` and are allowed in every mode; future create, overwrite, and dangerous actions follow a closed matrix, while unknown actions fail closed. The kernel is not yet connected to AgentLoop, CLI, Sessions, or providers, so system prompt v4, adapter contract v5, ToolArguments v1, Session schemas, and Effective Context identity remain unchanged. Exact action identity and a single-use approval grant are next; write and Bash remain deferred. The tracked ADRs and implemented-foundations documents record the complete scope, principles, and roadmap.
+Foundation 4A has now completed Slices 1–9. The pure `PermissionGate` fixes orthogonal `read-only | workspace-write | danger-full-access` and `ask | auto` controls. ActionIdentity, a prepared-turn lease, single-use grants, and five append-only action records connect request, approval, durable start, and outcome into a resumable audit chain. The CLI offers minimal confirmation in the REPL and fail-safely cancels one-shot asks. The Host classifies writes as create or controlled overwrite, binds `path-absent` or expected SHA-256 state, and executes with a same-directory temporary file, atomic target installation, conflict rechecks, and directory fsync. Visible effects with incomplete cleanup or durability are recorded as `partial` and must not be retried automatically. The canonical system prompt is now v5 and the adapter contract is v6; ToolArguments v1, new `turn_committed` schema v2, action-audit schema v1, `context_compacted` v2/v3 replay, and `ctx-v1`/`ctx-v2` representations remain unchanged. The next independent slice should improve write ergonomics/observability or design controlled edit in another small step rather than adding Bash directly. The tracked ADRs and implemented-foundations documents are authoritative for the full boundaries.

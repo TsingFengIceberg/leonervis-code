@@ -8,6 +8,8 @@ import sys
 from typing import TextIO
 
 from leonervis_code.cli.brand import render_banner
+from leonervis_code.core.action_coordinator import ActionIdentityChangedError
+from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.cli.presentation import (
     render_message,
     render_prompt,
@@ -145,6 +147,10 @@ def run_repl(
             stdout.write(f"{render_message(message, 'error', color=color)}\n")
         except (ProviderProfileError, RuntimeProviderStateError) as error:
             stdout.write(f"{render_message(f'Runtime error: {error}', 'error', color=color)}\n")
+        except (ApprovalGrantError, ActionIdentityChangedError) as error:
+            stdout.write(
+                f"{render_message(f'Action authorization error: {error}', 'error', color=color)}\n"
+            )
         stdout.flush()
 
 

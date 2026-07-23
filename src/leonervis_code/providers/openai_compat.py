@@ -150,6 +150,11 @@ def grep_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[2])
 
 
+def write_file_tool_definition() -> dict[str, object]:
+    """Wrap the canonical controlled write contract as one compatible function tool."""
+    return _compatible_tool_definition(model_tool_definitions()[3])
+
+
 def model_tool_definitions_for_openai() -> tuple[dict[str, object], ...]:
     """Wrap every canonical tool in its fixed provider-visible order."""
     return tuple(_compatible_tool_definition(item) for item in model_tool_definitions())
