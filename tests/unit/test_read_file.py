@@ -55,8 +55,35 @@ def test_read_file_rejects_absolute_and_symlink_escape_paths(tmp_path) -> None:
     intermediate_symlink = tool.execute(request("linked/outside.txt"))
 
     assert "must be relative" in absolute.content
-    assert "escapes the workspace" in final_symlink.content
-    assert "escapes the workspace" in intermediate_symlink.content
+    assert final_symlink.content == "read_file path must not contain symbolic links"
+    assert intermediate_symlink.content == "read_file path must not contain symbolic links"
+
+
+def test_read_file_rejects_symlinks_that_remain_inside_the_workspace(tmp_path) -> None:
+    nested = tmp_path / "real"
+    nested.mkdir()
+    target = nested / "note.txt"
+    target.write_text("inside", encoding="utf-8")
+    (tmp_path / "file-link.txt").symlink_to(target)
+    (tmp_path / "dir-link").symlink_to(nested, target_is_directory=True)
+    tool = ReadFileTool(tmp_path)
+
+    final_symlink = tool.execute(request("file-link.txt"))
+    intermediate_symlink = tool.execute(request("dir-link/note.txt"))
+
+    assert final_symlink.is_error
+    assert final_symlink.content == "read_file path must not contain symbolic links"
+    assert intermediate_symlink.is_error
+    assert intermediate_symlink.content == "read_file path must not contain symbolic links"
+
+
+def test_read_file_rejects_broken_symlinks(tmp_path) -> None:
+    (tmp_path / "broken.txt").symlink_to(tmp_path / "missing.txt")
+
+    result = ReadFileTool(tmp_path).execute(request("broken.txt"))
+
+    assert result.is_error
+    assert result.content == "read_file path must not contain symbolic links"
 
 
 def test_read_file_rejects_invalid_utf8(tmp_path) -> None:

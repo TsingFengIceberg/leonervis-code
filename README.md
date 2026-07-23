@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动且可恢复的 `/compact`、target-aware startup/REPL resume prepare/screen/commit，以及固定 80% high-water 与 known overflow 触发的 pre-turn automatic compact。尚未实现写工具、Bash 或审批流程。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动且可恢复的 `/compact`、target-aware startup/REPL resume prepare/screen/commit，以及固定 80% high-water 与 known overflow 触发的 pre-turn automatic compact。Foundation 4A 已固定 permission/approval vocabulary、decision matrix 与纯 `PermissionGate` policy kernel；尚未接入 CLI/AgentLoop 审批流程，也未实现写工具或 Bash。
 
 ## 目录
 
@@ -214,8 +214,9 @@ git diff --check
 
 ## 详细文档
 
-- [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability与automatic context compaction的集中说明。
+- [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、automatic context compaction与permission policy的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
+- [Permission Policy Contract](./docs/decisions/0022-foundation-4a-permission-policy-contract.md)：permission/approval正交语义、action classes、deterministic decision matrix、stable reasons与纯policy边界。
 - [Bounded Literal Grep](./docs/decisions/0021-foundation-1d-bounded-literal-grep.md)：literal/include语义、JSONL line结果、content/file bounds、generic arguments与mixed turn schema replay。
 - [Bounded Workspace Glob](./docs/decisions/0020-foundation-1c-bounded-workspace-glob.md)：portable pattern、hidden/symlink policy、stable bounds、共享tool budget与legacy schema-v1 seam。
 - [Pre-turn Automatic Context Compaction](./docs/decisions/0019-pre-turn-automatic-context-compaction.md)：80% high-water、pending-turn隔离、一次尝试、共享runtime lease与schema-v3 trigger provenance。
@@ -232,6 +233,6 @@ git diff --check
 
 ## 当前范围与下一步
 
-当前提供workspace-bound、只读且有界的`read_file`、`glob`与literal `grep`；尚无regex/index/ignore-aware search、写/编辑、Bash/test、网络工具、审批、streaming、自动retry/fallback、并行工具、多Agent或远程服务。
+当前model-visible surface仍只有workspace-bound、只读且有界的`read_file`、`glob`与literal `grep`；尚无regex/index/ignore-aware search、写/编辑、Bash/test、网络工具、CLI/AgentLoop审批、streaming、自动retry/fallback、并行工具、多Agent或远程服务。Host侧已经实现无I/O的纯`PermissionGate` policy kernel，但尚不影响任何runtime action。
 
-Foundation 1D已补齐最小内容发现能力：模型可先用portable bounded glob找路径，或用`grep(query, include)`在明确file set内定位literal matching lines，再按需用`read_file`读取上下文。三个工具共享三次顺序预算并保留structured causality、workspace硬边界与failure-atomic durable commit；新turn使用record-local schema v2 generic arguments，旧schema-v1 read/glob transcript无需重写即可mixed replay。下一步建议进入写能力前先独立规划permission/approval边界；write/Bash仍继续延后。完整范围、开发原则和路线记录在 [CLAUDE.md](./CLAUDE.md) 与各 ADR 中。
+Foundation 4A已接受permission policy contract并实现纯策略内核：`read-only | workspace-write | danger-full-access`能力上限与`ask | auto`交互模式保持正交，结果固定为`allow | ask | deny`并附stable reason。当前三个读取工具归类为`workspace-read`并在全部模式下allow；未来create、overwrite与dangerous action按closed matrix裁决，unknown fail closed。该kernel尚未接入AgentLoop、CLI、Session或provider，因此system prompt v4、adapter contract v5、ToolArguments v1、Session schema与Effective Context identity均保持不变。下一步是exact action identity与single-use approval grant；write/Bash继续延后。完整范围、开发原则和路线以tracked ADR与已实现Foundation文档为准。

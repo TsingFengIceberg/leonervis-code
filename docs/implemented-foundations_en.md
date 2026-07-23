@@ -11,6 +11,7 @@
 - [Foundation 3C: named provider profiles and a real multi-turn REPL](#foundation-3c-named-provider-profiles-and-a-real-multi-turn-repl)
 - [Foundation 3B: local multi-provider real-model path](#foundation-3b-local-multi-provider-real-model-path)
 - [Foundation 2B: offline adapter-owned compatibility policy](#foundation-2b-offline-adapter-owned-compatibility-policy)
+- [Foundation 4A: Permission Policy Contract](#foundation-4a-permission-policy-contract)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -252,6 +253,18 @@ The Foundation 2B form of `route` is completely offline: it constructs no provid
 
 See [0005: provider-neutral model routing](./decisions/0005-foundation-2a-provider-neutral-model-routing.md) and [0006: adapter-owned compatibility policy](./decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md) for the detailed decisions.
 
+## Foundation 4A: Permission Policy Contract
+
+Before exposing any write tool, the Host now has a stateless, no-I/O pure `PermissionGate` policy kernel. The capability ceiling is fixed as `read-only | workspace-write | danger-full-access`, the interaction policy is fixed as `ask | auto`, and the two remain orthogonal. Every result is `allow | ask | deny` with a stable machine-readable reason. Policy action classes are `workspace-read | workspace-create | workspace-overwrite | dangerous | unknown`, and unknown fails closed under every configuration.
+
+The current `read_file`, `glob`, and `grep` tools all classify as `workspace-read`, so every mode/approval combination allows them without terminal confirmation. Workspace create/overwrite is denied under `read-only` and becomes ask or allow under higher capability modes according to `ask | auto`; dangerous actions can only ask or allow under `danger-full-access`. PermissionGate does not read the CLI, Session, provider, credentials, or filesystem; it does not execute a Tool or create approval tokens, and it cannot bypass workspace, symlink, size, timeout, conflict, causality, or durability hard bounds.
+
+As a prerequisite boundary repair, `read_file` now rejects every final or intermediate symlink component, including links that remain inside the workspace and broken links. Ordinary nested UTF-8 reads and the 32 KiB bound remain unchanged. The local single-user v0 still does not claim to eliminate hostile concurrent TOCTOU between checks and open.
+
+This slice does not connect PermissionGate to AgentLoop, CLI, Sessions, or provider projection, and it adds no user configuration, approval UI, or model-visible tool. Canonical system prompt v4 and its fingerprint, adapter contract v5, ToolArguments v1, new `turn_committed` schema v2, `context_compacted` v2/v3 replay, and Effective Context ctx-v1/v2 therefore remain unchanged. Exact action identity and a single-use approval grant come next, followed by durable audit, the approval coordinator, AgentLoop/CLI integration, and create-only write.
+
+See [0022: Foundation 4A Permission Policy Contract](./decisions/0022-foundation-4a-permission-policy-contract.md) for the complete decision.
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -439,3 +452,4 @@ This slice establishes capacity facts only. It does not count current request to
 19. [0019: Pre-turn Automatic Context Compaction](./decisions/0019-pre-turn-automatic-context-compaction.md)
 20. [0020: Foundation 1C Bounded Workspace Glob](./decisions/0020-foundation-1c-bounded-workspace-glob.md)
 21. [0021: Foundation 1D Bounded Literal Grep](./decisions/0021-foundation-1d-bounded-literal-grep.md)
+22. [0022: Foundation 4A Permission Policy Contract](./decisions/0022-foundation-4a-permission-policy-contract.md)

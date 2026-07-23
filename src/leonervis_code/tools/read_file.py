@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import stat
 
 from leonervis_code.core.contracts import ToolResult, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
@@ -61,16 +62,9 @@ class ReadFileTool:
             return self._error(request, "read_file path must be relative to the workspace")
 
         try:
-            target = (self._workspace / path).resolve()
-        except (OSError, RuntimeError, ValueError):
-            return self._error(request, "read_file could not resolve path")
-
-        if not target.is_relative_to(self._workspace):
-            return self._error(request, "read_file path escapes the workspace")
-        if not target.exists():
-            return self._error(request, "read_file path does not exist")
-        if not target.is_file():
-            return self._error(request, "read_file path is not a file")
+            target = _resolve_without_symlinks(self._workspace, path)
+        except _ReadPathFailure as error:
+            return self._error(request, str(error))
 
         try:
             with target.open("rb") as file:
@@ -110,3 +104,45 @@ class ReadFileTool:
     def _error(request: ToolUse, content: str) -> ToolResult:
         """Create one model-visible read failure for ``request``."""
         return ToolResult(tool_use_id=request.tool_use_id, content=content, is_error=True)
+
+
+class _ReadPathFailure(ValueError):
+    """One safe model-visible path validation failure."""
+
+
+def _resolve_without_symlinks(workspace: Path, path: Path) -> Path:
+    """Resolve a contained lexical path while rejecting every symbolic-link component."""
+    depth = 0
+    for component in path.parts:
+        if component in ("", "."):
+            continue
+        if component == "..":
+            depth -= 1
+            if depth < 0:
+                raise _ReadPathFailure("read_file path escapes the workspace")
+        else:
+            depth += 1
+
+    target = workspace
+    final_status = None
+    for component in path.parts:
+        if component in ("", "."):
+            continue
+        if component == "..":
+            target = target.parent
+            continue
+        target = target / component
+        try:
+            final_status = target.lstat()
+        except FileNotFoundError:
+            raise _ReadPathFailure("read_file path does not exist") from None
+        except PermissionError:
+            raise _ReadPathFailure("read_file path is not readable") from None
+        except OSError:
+            raise _ReadPathFailure("read_file could not resolve path") from None
+        if stat.S_ISLNK(final_status.st_mode):
+            raise _ReadPathFailure("read_file path must not contain symbolic links")
+
+    if final_status is None or not stat.S_ISREG(final_status.st_mode):
+        raise _ReadPathFailure("read_file path is not a file")
+    return target

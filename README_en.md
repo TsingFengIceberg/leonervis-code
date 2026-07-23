@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded sequential `read_file`/`glob`/literal `grep` loop, provider-owned model limits, target-specific preflight, switch-time screening, provider-neutral Effective Context, manual resumable `/compact`, target-aware startup/REPL resume prepare/screen/commit, and pre-turn automatic compaction triggered by a fixed 80% high-water mark or known overflow are implemented. Write tools, Bash, and approval flows are not yet implemented.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, a bounded sequential `read_file`/`glob`/literal `grep` loop, provider-owned model limits, target-specific preflight, switch-time screening, provider-neutral Effective Context, manual resumable `/compact`, target-aware startup/REPL resume prepare/screen/commit, and pre-turn automatic compaction triggered by a fixed 80% high-water mark or known overflow are implemented. Foundation 4A now fixes the permission/approval vocabulary, decision matrix, and pure `PermissionGate` policy kernel; CLI/AgentLoop approval flow, write tools, and Bash are not yet implemented.
 
 ## Contents
 
@@ -214,8 +214,9 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 ## Detailed documentation
 
-- [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, context capability, and automatic context compaction.
+- [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, context capability, automatic context compaction, and permission policy.
 - [Architecture decision records](./docs/decisions/): complete problem statements, trade-offs, boundaries, and verification records for each learning slice.
+- [Permission Policy Contract](./docs/decisions/0022-foundation-4a-permission-policy-contract.md): orthogonal permission/approval semantics, action classes, the deterministic decision matrix, stable reasons, and the pure policy boundary.
 - [Bounded Literal Grep](./docs/decisions/0021-foundation-1d-bounded-literal-grep.md): literal/include semantics, JSONL line results, content/file bounds, generic arguments, and mixed turn-schema replay.
 - [Bounded Workspace Glob](./docs/decisions/0020-foundation-1c-bounded-workspace-glob.md): portable patterns, hidden/symlink policy, deterministic bounds, the shared tool budget, and the legacy schema-v1 seam.
 - [Pre-turn Automatic Context Compaction](./docs/decisions/0019-pre-turn-automatic-context-compaction.md): the 80% high-water mark, pending-turn isolation, one-attempt policy, shared runtime lease, and schema-v3 trigger provenance.
@@ -232,6 +233,6 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 ## Current scope and next step
 
-The current workspace-bound surface consists of bounded read-only `read_file`, `glob`, and literal `grep`. There is no regex/index/ignore-aware search, write/edit, Bash/test, network, approval, streaming, automatic retry/fallback, parallel-tool, multi-agent, or remote-service capability yet.
+The current model-visible surface still consists only of bounded workspace read-only `read_file`, `glob`, and literal `grep`. There is no regex/index/ignore-aware search, write/edit, Bash/test, network tool, CLI/AgentLoop approval, streaming, automatic retry/fallback, parallel-tool, multi-agent, or remote-service capability yet. The Host now has a pure no-I/O `PermissionGate` policy kernel, but it does not yet affect any runtime action.
 
-Foundation 1D completes the minimum content-discovery path: the model can use portable bounded glob for paths, or `grep(query, include)` to locate literal matching lines in an explicit file set, then use `read_file` for broader context. The three tools share a three-call sequential budget while preserving structured causality, workspace hard boundaries, and failure-atomic durable commit; new turns use record-local schema-v2 generic arguments while legacy schema-v1 read/glob transcripts replay without rewriting. The recommended next independent slice is to design permission and approval boundaries before write capabilities; write and Bash remain deferred. [CLAUDE.md](./CLAUDE.md) and the ADRs record the complete scope, principles, and roadmap.
+Foundation 4A accepts the permission policy contract and implements its pure kernel: the `read-only | workspace-write | danger-full-access` capability ceiling remains orthogonal to `ask | auto` interaction policy, and every result is `allow | ask | deny` with a stable reason. The three current read tools classify as `workspace-read` and are allowed in every mode; future create, overwrite, and dangerous actions follow a closed matrix, while unknown actions fail closed. The kernel is not yet connected to AgentLoop, CLI, Sessions, or providers, so system prompt v4, adapter contract v5, ToolArguments v1, Session schemas, and Effective Context identity remain unchanged. Exact action identity and a single-use approval grant are next; write and Bash remain deferred. The tracked ADRs and implemented-foundations documents record the complete scope, principles, and roadmap.
