@@ -18,6 +18,7 @@ from leonervis_code.core.compaction import (
     build_compact_prompt,
 )
 from leonervis_code.core.contracts import (
+    ToolArguments,
     AssistantText,
     ConversationRequest,
     ToolResult,
@@ -33,6 +34,7 @@ from leonervis_code.providers.openai_compat import (
     build_request,
     create_openai_compatible_provider,
     glob_tool_definition,
+    grep_tool_definition,
     parse_compact_summary_response,
     parse_response,
     read_file_tool_definition,
@@ -42,6 +44,7 @@ from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.providers.resolver import resolve_runtime_route
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
+from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -150,7 +153,11 @@ def test_production_client_uses_route_base_url_and_disables_redirects(monkeypatc
 def test_serializer_preserves_tool_call_and_result_pairing() -> None:
     history = (
         UserMessage(text="Read"),
-        ToolUse(tool_use_id="call_provider", name="read_file", path="README.md"),
+        ToolUse(
+            tool_use_id="call_provider",
+            name="read_file",
+            arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        ),
         ToolResult(tool_use_id="call_provider", content="notes\n", is_error=False),
     )
 
@@ -174,7 +181,7 @@ def test_serializer_preserves_tool_call_and_result_pairing() -> None:
 def test_serializer_preserves_glob_pattern_as_native_arguments() -> None:
     history = (
         UserMessage("Find"),
-        ToolUse("glob-provider", "glob", "src/**/*.py"),
+        ToolUse("glob-provider", "glob", ToolArguments.from_mapping({"pattern": "src/**/*.py"})),
         ToolResult("glob-provider", "src/app.py\n"),
     )
 
@@ -221,7 +228,25 @@ def test_glob_schema_and_parser_use_pattern_key() -> None:
     )
     assert parse_response(
         completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
-    ) == ToolUse("glob-provider", "glob", "src/**/*.py")
+    ) == ToolUse("glob-provider", "glob", ToolArguments.from_mapping({"pattern": "src/**/*.py"}))
+
+
+def test_grep_schema_and_parser_preserve_two_arguments() -> None:
+    definition = grep_tool_definition()
+    assert definition["function"]["name"] == "grep"
+    assert definition["function"]["parameters"]["required"] == ["query", "include"]
+    call = tool_call(
+        call_id="grep-provider",
+        name="grep",
+        arguments='{"include":"src/**/*.py","query":"ToolUse("}',
+    )
+    assert parse_response(
+        completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
+    ) == ToolUse(
+        "grep-provider",
+        "grep",
+        ToolArguments.from_mapping({"query": "ToolUse(", "include": "src/**/*.py"}),
+    )
 
 
 def test_parser_decodes_complete_text_and_one_read_file_call() -> None:
@@ -229,7 +254,11 @@ def test_parser_decodes_complete_text_and_one_read_file_call() -> None:
     assert parse_response(
         completion(finish_reason="tool_calls", tool_calls=[tool_call(call_id="call_provider")]),
         route=route(),
-    ) == ToolUse(tool_use_id="call_provider", name="read_file", path="README.md")
+    ) == ToolUse(
+        tool_use_id="call_provider",
+        name="read_file",
+        arguments=ToolArguments.from_mapping({"path": "README.md"}),
+    )
 
 
 @pytest.mark.parametrize(
@@ -372,6 +401,7 @@ def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:
         OpenAICompatibleConversationProvider(route(), client),
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
+        GrepTool(tmp_path),
     )
 
     assert loop.run("Read README") == "I read it."

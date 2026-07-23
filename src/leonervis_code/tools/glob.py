@@ -2,27 +2,28 @@
 
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
-import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 from leonervis_code.core.contracts import ToolResult, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
+from leonervis_code.tools import file_selector
+from leonervis_code.tools.file_selector import (
+    FileSelectionFailure,
+    SelectorFailureKind,
+    SelectorLimits,
+    select_files,
+)
 
 GLOB_TOOL_NAME = "glob"
-MAX_GLOB_PATTERN_CHARACTERS = 4096
-MAX_GLOB_PATTERN_BYTES = 4096
-MAX_GLOB_PATTERN_COMPONENTS = 64
+MAX_GLOB_PATTERN_CHARACTERS = file_selector.MAX_PATTERN_CHARACTERS
+MAX_GLOB_PATTERN_BYTES = file_selector.MAX_PATTERN_BYTES
+MAX_GLOB_PATTERN_COMPONENTS = file_selector.MAX_PATTERN_COMPONENTS
 MAX_GLOB_MATCHES = 200
 MAX_GLOB_OUTPUT_BYTES = 32 * 1024
-MAX_GLOB_SCANNED_ENTRIES = 10_000
-MAX_GLOB_SCANNED_DIRECTORIES = 1_000
-MAX_GLOB_DEPTH = 32
+MAX_GLOB_SCANNED_ENTRIES = file_selector.MAX_SCANNED_ENTRIES
+MAX_GLOB_SCANNED_DIRECTORIES = file_selector.MAX_SCANNED_DIRECTORIES
+MAX_GLOB_DEPTH = file_selector.MAX_DEPTH
 GLOB_TRUNCATION_MARKER = "[truncated]\n"
-
-
-class _GlobFailure(RuntimeError):
-    """One stable model-visible search failure."""
 
 
 def glob_model_definition() -> dict[str, object]:
@@ -67,144 +68,65 @@ class GlobTool:
             raise ValueError("workspace must be an existing directory")
 
     def execute(self, request: ToolUse) -> ToolResult:
-        """Return bounded stable matches for the request's single pattern operand."""
+        """Return bounded stable matches for the request's pattern argument."""
         try:
-            components = _validate_pattern(request.path)
-            matches = self._collect_matches(components)
+            arguments = request.arguments.as_mapping()
+            if set(arguments) != {"pattern"} or not isinstance(arguments["pattern"], str):
+                return self._error(request, "glob input is malformed")
+            matches = [
+                selected.relative_path
+                for selected in select_files(
+                    self._workspace,
+                    arguments["pattern"],
+                    limits=SelectorLimits(
+                        max_pattern_characters=MAX_GLOB_PATTERN_CHARACTERS,
+                        max_pattern_bytes=MAX_GLOB_PATTERN_BYTES,
+                        max_pattern_components=MAX_GLOB_PATTERN_COMPONENTS,
+                        max_scanned_entries=MAX_GLOB_SCANNED_ENTRIES,
+                        max_scanned_directories=MAX_GLOB_SCANNED_DIRECTORIES,
+                        max_depth=MAX_GLOB_DEPTH,
+                    ),
+                )
+            ]
             content, truncated = _format_matches(matches)
-        except _GlobFailure as error:
-            return self._error(request, str(error))
+        except (AttributeError, ValueError):
+            return self._error(request, "glob input is malformed")
+        except FileSelectionFailure as error:
+            return self._error(request, _glob_failure_message(error.kind))
         return ToolResult(
             tool_use_id=request.tool_use_id,
             content=content,
             truncated=truncated,
         )
 
-    def _collect_matches(self, components: tuple[str, ...]) -> list[str]:
-        matches: set[str] = set()
-        scanned_entries = 0
-        scanned_directories = 0
-
-        def walk(directory: Path, relative: tuple[str, ...], depth: int) -> None:
-            nonlocal scanned_entries, scanned_directories
-            scanned_directories += 1
-            if scanned_directories > MAX_GLOB_SCANNED_DIRECTORIES:
-                raise _GlobFailure("glob directory limit reached; use a narrower pattern")
-            try:
-                with os.scandir(directory) as iterator:
-                    entries = list(iterator)
-            except PermissionError:
-                raise _GlobFailure("glob encountered an unreadable directory") from None
-            except OSError:
-                raise _GlobFailure("glob could not scan the workspace") from None
-
-            try:
-                entries.sort(key=lambda entry: entry.name.encode("utf-8"))
-            except UnicodeEncodeError:
-                raise _GlobFailure("glob encountered a path that is not valid UTF-8") from None
-
-            for entry in entries:
-                scanned_entries += 1
-                if scanned_entries > MAX_GLOB_SCANNED_ENTRIES:
-                    raise _GlobFailure("glob traversal entry limit reached; use a narrower pattern")
-                name = entry.name
-                try:
-                    name.encode("utf-8")
-                except UnicodeEncodeError:
-                    raise _GlobFailure("glob encountered a path that is not valid UTF-8") from None
-                candidate = relative + (name,)
-                try:
-                    is_file = entry.is_file(follow_symlinks=False)
-                    is_directory = entry.is_dir(follow_symlinks=False)
-                except PermissionError:
-                    raise _GlobFailure("glob encountered an unreadable directory") from None
-                except OSError:
-                    raise _GlobFailure("glob could not scan the workspace") from None
-
-                if is_file and _matches(components, candidate):
-                    matches.add("/".join(candidate))
-                if not is_directory or not _can_match_descendant(components, candidate):
-                    continue
-                child_depth = depth + 1
-                if child_depth > MAX_GLOB_DEPTH:
-                    raise _GlobFailure("glob depth limit reached; use a narrower pattern")
-                walk(Path(entry.path), candidate, child_depth)
-
-        walk(self._workspace, (), 0)
-        return sorted(matches, key=lambda path: path.encode("utf-8"))
-
     @staticmethod
     def _error(request: ToolUse, content: str) -> ToolResult:
         return ToolResult(tool_use_id=request.tool_use_id, content=content, is_error=True)
 
 
-def _validate_pattern(pattern: str) -> tuple[str, ...]:
-    if not isinstance(pattern, str) or not pattern.strip():
-        raise _GlobFailure("glob pattern must not be blank")
-    if "\x00" in pattern:
-        raise _GlobFailure("glob pattern contains an unsupported path component")
-    try:
-        encoded = pattern.encode("utf-8")
-    except UnicodeEncodeError:
-        raise _GlobFailure("glob pattern contains an unsupported path component") from None
-    if len(pattern) > MAX_GLOB_PATTERN_CHARACTERS or len(encoded) > MAX_GLOB_PATTERN_BYTES:
-        raise _GlobFailure("glob pattern exceeds the supported size")
-    if pattern.startswith("/") or "\\" in pattern or PureWindowsPath(pattern).drive:
-        raise _GlobFailure("glob pattern must be workspace-relative and use '/' separators")
-
-    components = tuple(pattern.split("/"))
-    if len(components) > MAX_GLOB_PATTERN_COMPONENTS:
-        raise _GlobFailure("glob pattern exceeds the supported size")
-    if any(
-        component in {"", ".", ".."} or ("**" in component and component != "**")
-        for component in components
-    ):
-        raise _GlobFailure("glob pattern contains an unsupported path component")
-    return components
-
-
-def _matches(pattern: tuple[str, ...], candidate: tuple[str, ...]) -> bool:
-    return len(pattern) in _states_after(pattern, candidate)
-
-
-def _can_match_descendant(pattern: tuple[str, ...], directory: tuple[str, ...]) -> bool:
-    return any(state < len(pattern) for state in _states_after(pattern, directory))
-
-
-def _states_after(pattern: tuple[str, ...], candidate: tuple[str, ...]) -> frozenset[int]:
-    states = _epsilon_closure(pattern, {0})
-    for name in candidate:
-        next_states: set[int] = set()
-        for state in states:
-            if state == len(pattern):
-                continue
-            component = pattern[state]
-            if component == "**":
-                if not name.startswith("."):
-                    next_states.add(state)
-            elif _component_matches(component, name):
-                next_states.add(state + 1)
-        states = _epsilon_closure(pattern, next_states)
-        if not states:
-            break
-    return frozenset(states)
-
-
-def _epsilon_closure(pattern: tuple[str, ...], states: set[int]) -> set[int]:
-    closed = set(states)
-    pending = list(states)
-    while pending:
-        state = pending.pop()
-        if state < len(pattern) and pattern[state] == "**" and state + 1 not in closed:
-            closed.add(state + 1)
-            pending.append(state + 1)
-    return closed
-
-
-def _component_matches(pattern: str, candidate: str) -> bool:
-    if candidate.startswith(".") and not pattern.startswith("."):
-        return False
-    return fnmatchcase(candidate, pattern)
+def _glob_failure_message(kind: SelectorFailureKind) -> str:
+    messages = {
+        SelectorFailureKind.BLANK_PATTERN: "glob pattern must not be blank",
+        SelectorFailureKind.INVALID_COMPONENT: (
+            "glob pattern contains an unsupported path component"
+        ),
+        SelectorFailureKind.OVERSIZED_PATTERN: "glob pattern exceeds the supported size",
+        SelectorFailureKind.NONPORTABLE_PATTERN: (
+            "glob pattern must be workspace-relative and use '/' separators"
+        ),
+        SelectorFailureKind.DIRECTORY_LIMIT: (
+            "glob directory limit reached; use a narrower pattern"
+        ),
+        SelectorFailureKind.UNREADABLE_DIRECTORY: ("glob encountered an unreadable directory"),
+        SelectorFailureKind.SCAN_FAILED: "glob could not scan the workspace",
+        SelectorFailureKind.INVALID_UTF8_PATH: ("glob encountered a path that is not valid UTF-8"),
+        SelectorFailureKind.ENTRY_LIMIT: (
+            "glob traversal entry limit reached; use a narrower pattern"
+        ),
+        SelectorFailureKind.DEPTH_LIMIT: "glob depth limit reached; use a narrower pattern",
+        SelectorFailureKind.FILE_LIMIT: "glob file limit reached; use a narrower pattern",
+    }
+    return messages[kind]
 
 
 def _format_matches(matches: list[str]) -> tuple[str, bool]:

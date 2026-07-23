@@ -10,6 +10,7 @@ from leonervis_code.core.compaction import (
     build_compact_prompt,
 )
 from leonervis_code.core.contracts import (
+    ToolArguments,
     AssistantText,
     ConversationRequest,
     ToolResult,
@@ -39,6 +40,7 @@ from leonervis_code.providers.request_context import (
 from leonervis_code.session import ProjectSession
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
+from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -663,7 +665,7 @@ def test_fake_runtime_has_explicit_empty_provenance(tmp_path) -> None:
     assert status.model_override is None
 
 
-def test_project_session_constructs_both_tools_from_the_resolved_workspace(tmp_path) -> None:
+def test_project_session_constructs_all_tools_from_the_resolved_workspace(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     seen: list[tuple[str, object]] = []
@@ -676,6 +678,10 @@ def test_project_session_constructs_both_tools_from_the_resolved_workspace(tmp_p
         seen.append(("glob", path))
         return GlobTool(path)
 
+    def grep_factory(path):
+        seen.append(("grep", path))
+        return GrepTool(path)
+
     session = ProjectSession.open(
         workspace / ".",
         environment={},
@@ -683,10 +689,15 @@ def test_project_session_constructs_both_tools_from_the_resolved_workspace(tmp_p
         project_profile_path=tmp_path / "project.json",
         read_file_factory=read_factory,
         glob_factory=glob_factory,
+        grep_factory=grep_factory,
     )
     session.close()
 
-    assert seen == [("read_file", workspace.resolve()), ("glob", workspace.resolve())]
+    assert seen == [
+        ("read_file", workspace.resolve()),
+        ("glob", workspace.resolve()),
+        ("grep", workspace.resolve()),
+    ]
 
 
 def test_session_closes_provider_when_tool_construction_fails(tmp_path) -> None:
@@ -720,7 +731,9 @@ def test_project_session_pins_provider_for_tool_continuation(tmp_path) -> None:
             self.calls += 1
             self.requests.append(request)
             if self.calls == 1:
-                return ToolUse("call-1", "read_file", "README.md")
+                return ToolUse(
+                    "call-1", "read_file", ToolArguments.from_mapping({"path": "README.md"})
+                )
             assert request.history[-1] == ToolResult("call-1", "notes\n")
             return AssistantText("done")
 

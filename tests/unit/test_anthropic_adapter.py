@@ -15,6 +15,7 @@ from leonervis_code.core.compaction import (
     build_compact_prompt,
 )
 from leonervis_code.core.contracts import (
+    ToolArguments,
     AssistantText,
     ConversationRequest,
     ToolResult,
@@ -27,6 +28,7 @@ from leonervis_code.providers.anthropic import (
     AnthropicProviderConfig,
     create_anthropic_provider,
     glob_tool_definition,
+    grep_tool_definition,
     normalize_sdk_error,
     parse_compact_summary_response,
     parse_response,
@@ -37,6 +39,7 @@ from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
+from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -182,7 +185,11 @@ def test_production_client_uses_explicit_route_and_disables_redirects(monkeypatc
 def test_serializer_preserves_every_current_causal_item_and_tool_id() -> None:
     history = (
         UserMessage(text="Read the file"),
-        ToolUse(tool_use_id="toolu_1", name="read_file", path="README.md"),
+        ToolUse(
+            tool_use_id="toolu_1",
+            name="read_file",
+            arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        ),
         ToolResult(tool_use_id="toolu_1", content="notes\n", is_error=False),
         AssistantText(text="Done"),
         UserMessage(text="Continue"),
@@ -220,7 +227,7 @@ def test_serializer_preserves_every_current_causal_item_and_tool_id() -> None:
 def test_serializer_preserves_glob_operand_with_its_native_key() -> None:
     history = (
         UserMessage("Find Python"),
-        ToolUse("glob-1", "glob", "src/**/*.py"),
+        ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "src/**/*.py"})),
         ToolResult("glob-1", "src/app.py\n"),
     )
 
@@ -239,7 +246,11 @@ def test_serializer_rejects_unknown_tools_and_broken_causality() -> None:
         serialize_history(
             (
                 UserMessage(text="Search"),
-                ToolUse(tool_use_id="toolu_1", name="search", path="README.md"),
+                ToolUse(
+                    tool_use_id="toolu_1",
+                    name="search",
+                    arguments=ToolArguments.from_mapping({"path": "README.md"}),
+                ),
                 ToolResult(tool_use_id="toolu_1", content="result"),
             ),
             config=config(),
@@ -250,7 +261,11 @@ def test_serializer_rejects_unknown_tools_and_broken_causality() -> None:
         serialize_history(
             (
                 UserMessage(text="Read"),
-                ToolUse(tool_use_id="toolu_1", name="read_file", path="README.md"),
+                ToolUse(
+                    tool_use_id="toolu_1",
+                    name="read_file",
+                    arguments=ToolArguments.from_mapping({"path": "README.md"}),
+                ),
                 ToolResult(tool_use_id="other", content="result"),
             ),
             config=config(),
@@ -293,7 +308,29 @@ def test_glob_schema_is_exact_and_parser_maps_pattern_to_neutral_operand() -> No
             )
         ),
         config=config(),
-    ) == ToolUse("glob-provider", "glob", "src/**/*.py")
+    ) == ToolUse("glob-provider", "glob", ToolArguments.from_mapping({"pattern": "src/**/*.py"}))
+
+
+def test_grep_schema_is_exact_and_parser_preserves_two_arguments() -> None:
+    definition = grep_tool_definition()
+    assert definition["name"] == "grep"
+    assert definition["input_schema"]["required"] == ["query", "include"]
+    assert definition["input_schema"]["additionalProperties"] is False
+    assert parse_response(
+        message(
+            ToolUseBlock(
+                id="grep-provider",
+                name="grep",
+                input={"include": "src/**/*.py", "query": "ToolUse("},
+                type="tool_use",
+            )
+        ),
+        config=config(),
+    ) == ToolUse(
+        "grep-provider",
+        "grep",
+        ToolArguments.from_mapping({"query": "ToolUse(", "include": "src/**/*.py"}),
+    )
 
 
 def test_parser_concatenates_text_and_preserves_valid_tool_use() -> None:
@@ -311,7 +348,11 @@ def test_parser_concatenates_text_and_preserves_valid_tool_use() -> None:
             )
         ),
         config=config(),
-    ) == ToolUse(tool_use_id="toolu_provider", name="read_file", path="README.md")
+    ) == ToolUse(
+        tool_use_id="toolu_provider",
+        name="read_file",
+        arguments=ToolArguments.from_mapping({"path": "README.md"}),
+    )
 
 
 @pytest.mark.parametrize(
@@ -376,7 +417,11 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
             "max_tokens": 64,
             "system": build_system_prompt().text,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
-            "tools": [read_file_tool_definition(), glob_tool_definition()],
+            "tools": [
+                read_file_tool_definition(),
+                glob_tool_definition(),
+                grep_tool_definition(),
+            ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
         }
@@ -593,6 +638,7 @@ def test_adapter_backed_loop_preserves_atomic_commit_after_failure(tmp_path) -> 
         AnthropicConversationProvider(config(), client),
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
+        GrepTool(tmp_path),
     )
 
     with pytest.raises(ProviderAdapterError):

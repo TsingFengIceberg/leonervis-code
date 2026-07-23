@@ -11,7 +11,13 @@ from leonervis_code.core.compaction import (
     EffectiveContextSummary,
     build_compact_prompt,
 )
-from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ToolArguments,
+    ToolResult,
+    ToolUse,
+    UserMessage,
+)
 from leonervis_code.session_records import (
     BindingSnapshot,
     ContextCompacted,
@@ -21,6 +27,8 @@ from leonervis_code.session_records import (
     SessionHeader,
     SessionRecordError,
     SessionResumed,
+    TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+    TURN_COMMITTED_SCHEMA_VERSION,
     TurnCommitted,
     decode_record,
     encode_record,
@@ -57,7 +65,7 @@ def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> No
             binding=second_binding,
             items=(
                 UserMessage("read it"),
-                ToolUse("tool-1", "read_file", "README.md"),
+                ToolUse("tool-1", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
                 ToolResult("tool-1", "contents"),
                 AssistantText("done"),
             ),
@@ -80,16 +88,22 @@ def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> No
     assert state.next_sequence == 3
 
 
-def test_schema_v1_round_trips_mixed_read_and_glob_tool_pairs() -> None:
+def test_turn_schema_v2_round_trips_structured_read_glob_and_grep_arguments() -> None:
     turn = TurnCommitted(
         sequence=1,
         committed_at=NOW,
         binding=BindingSnapshot.fake(),
         items=(
             UserMessage("find and read"),
-            ToolUse("glob-1", "glob", "src/**/*.py"),
+            ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "src/**/*.py"})),
             ToolResult("glob-1", "src/app.py\n", truncated=True),
-            ToolUse("read-1", "read_file", "src/app.py"),
+            ToolUse(
+                "grep-1",
+                "grep",
+                ToolArguments.from_mapping({"query": "ToolUse(", "include": "src/**/*.py"}),
+            ),
+            ToolResult("grep-1", '{"path":"src/app.py","line":1,"text":"ToolUse("}\n'),
+            ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "src/app.py"})),
             ToolResult("read-1", "contents"),
             AssistantText("done"),
         ),
@@ -99,8 +113,47 @@ def test_schema_v1_round_trips_mixed_read_and_glob_tool_pairs() -> None:
     decoded = decode_record(encoded)
 
     assert decoded == turn
+    assert f'"schema_version":{TURN_COMMITTED_SCHEMA_VERSION}'.encode() in encoded
+    assert b'"arguments":{"pattern":"src/**/*.py"},"arguments_version":1' in encoded
+    assert b'"arguments":{"include":"src/**/*.py","query":"ToolUse("}' in encoded
+
+
+def test_turn_schema_v1_decodes_to_generic_arguments_without_rewriting_shape() -> None:
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("find and read"),
+            ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "src/**/*.py"})),
+            ToolResult("glob-1", "src/app.py\n"),
+            ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "src/app.py"})),
+            ToolResult("read-1", "contents"),
+            AssistantText("done"),
+        ),
+        schema_version=TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+    )
+
+    encoded = encode_record(turn)
+    decoded = decode_record(encoded)
+
+    assert decoded == turn
     assert b'"schema_version":1' in encoded
     assert b'"name":"glob","path":"src/**/*.py"' in encoded
+    assert b'"arguments"' not in encoded
+
+
+def test_tool_arguments_are_canonical_immutable_and_bounded() -> None:
+    arguments = ToolArguments.from_mapping({"query": "x", "include": "**/*.py"})
+    first = arguments.as_mapping()
+    first["query"] = "changed"
+
+    assert arguments.as_mapping() == {"include": "**/*.py", "query": "x"}
+    assert arguments.canonical_json == '{"include":"**/*.py","query":"x"}'
+    with pytest.raises(ValueError, match="version"):
+        ToolArguments.from_mapping({"path": "x"}, version=2)
+    with pytest.raises(ValueError, match="bytes"):
+        ToolArguments.from_mapping({"path": "x" * (16 * 1024)})
 
 
 def test_codec_restores_conversation_payloads_larger_than_metadata_limit() -> None:
@@ -113,7 +166,7 @@ def test_codec_restores_conversation_payloads_larger_than_metadata_limit() -> No
         binding=BindingSnapshot.fake(),
         items=(
             UserMessage(long_user),
-            ToolUse("tool-long", "read_file", "README.md"),
+            ToolUse("tool-long", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
             ToolResult("tool-long", long_result),
             AssistantText(long_assistant),
         ),
@@ -264,20 +317,24 @@ def test_replay_requires_closed_turns_and_strict_tool_causality(tmp_path: Path) 
     )
 
     cases = [
-        (UserMessage("u"), ToolUse("one", "read_file", "x"), AssistantText("a")),
+        (
+            UserMessage("u"),
+            ToolUse("one", "read_file", ToolArguments.from_mapping({"path": "x"})),
+            AssistantText("a"),
+        ),
         (UserMessage("u"), ToolResult("one", "x"), AssistantText("a")),
         (
             UserMessage("u"),
-            ToolUse("one", "read_file", "x"),
+            ToolUse("one", "read_file", ToolArguments.from_mapping({"path": "x"})),
             ToolResult("one", "x"),
-            ToolUse("one", "read_file", "y"),
+            ToolUse("one", "read_file", ToolArguments.from_mapping({"path": "y"})),
             ToolResult("one", "y"),
             AssistantText("a"),
         ),
         (
             UserMessage("u"),
-            ToolUse("one", "read_file", "x"),
-            ToolUse("two", "read_file", "y"),
+            ToolUse("one", "read_file", ToolArguments.from_mapping({"path": "x"})),
+            ToolUse("two", "read_file", ToolArguments.from_mapping({"path": "y"})),
             ToolResult("two", "y"),
             ToolResult("one", "x"),
             AssistantText("a"),

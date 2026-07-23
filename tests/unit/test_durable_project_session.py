@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 
 from leonervis_code.core.contracts import (
+    ToolArguments,
     AssistantText,
     ToolResult,
     ToolUse,
@@ -100,11 +101,13 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     second.close()
 
 
-def test_project_session_persists_and_resumes_glob_causality(tmp_path: Path) -> None:
+def test_project_session_persists_and_resumes_grep_causality(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "app.py").write_text("app", encoding="utf-8")
+    (tmp_path / "src" / "app.py").write_text("needle\n", encoding="utf-8")
+    arguments = ToolArguments.from_mapping({"query": "needle", "include": "src/*.py"})
+    result = '{"path":"src/app.py","line":1,"text":"needle"}\n'
 
-    class GlobProvider:
+    class GrepProvider:
         def __init__(self, *, continue_history=False):
             self.calls = 0
             self.continue_history = continue_history
@@ -117,14 +120,14 @@ def test_project_session_persists_and_resumes_glob_causality(tmp_path: Path) -> 
             self.calls += 1
             self.requests.append(request)
             if self.continue_history:
-                assert ToolUse("glob-1", "glob", "src/*.py") in request.history
-                assert ToolResult("glob-1", "src/app.py\n") in request.history
+                assert ToolUse("grep-1", "grep", arguments) in request.history
+                assert ToolResult("grep-1", result) in request.history
                 return AssistantText("resumed")
             if self.calls == 1:
-                return ToolUse("glob-1", "glob", "src/*.py")
+                return ToolUse("grep-1", "grep", arguments)
             return AssistantText("found")
 
-    first_provider = GlobProvider()
+    first_provider = GrepProvider()
     first = ProjectSession.open(
         tmp_path,
         model="custom/model",
@@ -137,7 +140,7 @@ def test_project_session_persists_and_resumes_glob_causality(tmp_path: Path) -> 
     assert first.prompt("find") == "found"
     first.close()
 
-    resumed_provider = GlobProvider(continue_history=True)
+    resumed_provider = GrepProvider(continue_history=True)
     second = ProjectSession.open(
         tmp_path,
         resume=SESSION_ONE,

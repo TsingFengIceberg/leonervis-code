@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from leonervis_code.core.contracts import ToolUse
+from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.tools import glob as glob_module
 from leonervis_code.tools.glob import (
     GLOB_TRUNCATION_MARKER,
@@ -14,7 +14,7 @@ from leonervis_code.tools.glob import (
 
 
 def request(pattern: str) -> ToolUse:
-    return ToolUse("glob-1", "glob", pattern)
+    return ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": pattern}))
 
 
 def paths(result) -> list[str]:

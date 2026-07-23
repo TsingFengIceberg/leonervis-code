@@ -5,6 +5,7 @@ import pytest
 from leonervis_code.agent.loop import AgentLoop, ToolLoopLimitError
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
+    ToolArguments,
     AssistantText,
     CommittedTurn,
     ConversationTurn,
@@ -14,27 +15,40 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.tools.glob import GlobTool
+from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
-def test_loop_commits_mixed_glob_and_read_causality(tmp_path) -> None:
+def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
     provider = ScriptedFakeProvider(
         [
-            ToolUse("glob-1", "glob", "src/*.py"),
-            ToolUse("read-1", "read_file", "src/app.py"),
+            ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "src/*.py"})),
+            ToolUse(
+                "grep-1",
+                "grep",
+                ToolArguments.from_mapping({"query": "print", "include": "src/*.py"}),
+            ),
+            ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "src/app.py"})),
             AssistantText("found and read"),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
 
     assert loop.run("find code") == "found and read"
+    grep_result = '{"path":"src/app.py","line":1,"text":"print(\'ok\')"}\n'
     assert loop.history == (
         UserMessage("find code"),
-        ToolUse("glob-1", "glob", "src/*.py"),
+        ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "src/*.py"})),
         ToolResult("glob-1", "src/app.py\n"),
-        ToolUse("read-1", "read_file", "src/app.py"),
+        ToolUse(
+            "grep-1",
+            "grep",
+            ToolArguments.from_mapping({"query": "print", "include": "src/*.py"}),
+        ),
+        ToolResult("grep-1", grep_result),
+        ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "src/app.py"})),
         ToolResult("read-1", "print('ok')\n"),
         AssistantText("found and read"),
     )
@@ -43,23 +57,25 @@ def test_loop_commits_mixed_glob_and_read_causality(tmp_path) -> None:
     ] == [
         "read_file",
         "glob",
+        "grep",
     ]
     assert provider.received_requests[1].history[-1] == ToolResult("glob-1", "src/app.py\n")
-    assert provider.received_requests[2].history[-1] == ToolResult("read-1", "print('ok')\n")
+    assert provider.received_requests[2].history[-1] == ToolResult("grep-1", grep_result)
+    assert provider.received_requests[3].history[-1] == ToolResult("read-1", "print('ok')\n")
 
 
 def test_loop_counts_glob_and_read_against_one_shared_budget(tmp_path) -> None:
     (tmp_path / "a.py").write_text("a", encoding="utf-8")
     provider = ScriptedFakeProvider(
         [
-            ToolUse("glob-1", "glob", "*.py"),
-            ToolUse("read-1", "read_file", "a.py"),
-            ToolUse("glob-2", "glob", "*.py"),
-            ToolUse("read-2", "read_file", "a.py"),
+            ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "*.py"})),
+            ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "a.py"})),
+            ToolUse("glob-2", "glob", ToolArguments.from_mapping({"pattern": "*.py"})),
+            ToolUse("read-2", "read_file", ToolArguments.from_mapping({"path": "a.py"})),
             AssistantText("bounded"),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
 
     assert loop.run("inspect") == "bounded"
     results = [item for item in loop.history if isinstance(item, ToolResult)]
@@ -73,17 +89,25 @@ def test_loop_commits_structured_tool_causality_after_final_text(tmp_path) -> No
     (tmp_path / "README.md").write_text("Project notes\n", encoding="utf-8")
     provider = ScriptedFakeProvider(
         [
-            ToolUse(tool_use_id="read-1", name="read_file", path="README.md"),
+            ToolUse(
+                tool_use_id="read-1",
+                name="read_file",
+                arguments=ToolArguments.from_mapping({"path": "README.md"}),
+            ),
             AssistantText(text="I read the project notes."),
             AssistantText(text="Second reply"),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
 
     assert loop.run("Read README") == "I read the project notes."
     assert loop.history == (
         UserMessage(text="Read README"),
-        ToolUse(tool_use_id="read-1", name="read_file", path="README.md"),
+        ToolUse(
+            tool_use_id="read-1",
+            name="read_file",
+            arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        ),
         ToolResult(tool_use_id="read-1", content="Project notes\n"),
         AssistantText(text="I read the project notes."),
     )
@@ -100,7 +124,7 @@ def test_loop_commits_structured_tool_causality_after_final_text(tmp_path) -> No
 
 def test_prepared_turn_is_read_only_and_rebases_the_same_pending_user(tmp_path) -> None:
     provider = ScriptedFakeProvider([AssistantText("done")])
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
 
     prepared = loop.prepare_turn("pending")
 
@@ -120,11 +144,15 @@ def test_prepared_turn_is_read_only_and_rebases_the_same_pending_user(tmp_path) 
 
     provider = ScriptedFakeProvider(
         [
-            ToolUse(tool_use_id="unknown-1", name="search", path="README.md"),
+            ToolUse(
+                tool_use_id="unknown-1",
+                name="search",
+                arguments=ToolArguments.from_mapping({"path": "README.md"}),
+            ),
             AssistantText(text="The requested tool is unavailable."),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
 
     assert loop.run("Search") == "The requested tool is unavailable."
     assert provider.received_requests[1].history[-1] == ToolResult(
@@ -136,12 +164,16 @@ def test_loop_does_not_commit_candidate_when_provider_fails_after_a_tool(tmp_pat
     (tmp_path / "README.md").write_text("contents", encoding="utf-8")
     provider = ScriptedFakeProvider(
         [
-            ToolUse(tool_use_id="read-1", name="read_file", path="README.md"),
+            ToolUse(
+                tool_use_id="read-1",
+                name="read_file",
+                arguments=ToolArguments.from_mapping({"path": "README.md"}),
+            ),
             RuntimeError("provider failed"),
             AssistantText(text="retry reply"),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
 
     with pytest.raises(RuntimeError, match="provider failed"):
         loop.run("failed prompt")
@@ -156,11 +188,15 @@ def test_loop_does_not_commit_candidate_when_provider_fails_after_a_tool(tmp_pat
 def test_loop_bounds_tool_requests_and_returns_budget_error_before_final_text(tmp_path) -> None:
     (tmp_path / "README.md").write_text("contents", encoding="utf-8")
     requests = [
-        ToolUse(tool_use_id=f"read-{number}", name="read_file", path="README.md")
+        ToolUse(
+            tool_use_id=f"read-{number}",
+            name="read_file",
+            arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        )
         for number in range(1, 5)
     ]
     provider = ScriptedFakeProvider([*requests, AssistantText(text="Finished after the limit.")])
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
 
     assert loop.run("Read repeatedly") == "Finished after the limit."
     results = [item for item in loop.history if isinstance(item, ToolResult)]
@@ -177,12 +213,16 @@ def test_loop_rejects_another_tool_after_the_limit_without_committing(tmp_path) 
     provider = ScriptedFakeProvider(
         [
             *[
-                ToolUse(tool_use_id=f"read-{number}", name="read_file", path="README.md")
+                ToolUse(
+                    tool_use_id=f"read-{number}",
+                    name="read_file",
+                    arguments=ToolArguments.from_mapping({"path": "README.md"}),
+                )
                 for number in range(1, 6)
             ]
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
 
     with pytest.raises(ToolLoopLimitError, match="tool call limit"):
         loop.run("Read repeatedly")
@@ -199,6 +239,7 @@ def test_loop_persists_complete_turn_before_memory_commit(tmp_path) -> None:
         provider,
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
+        GrepTool(tmp_path),
         commit_turn=committed.append,
     )
 
@@ -219,7 +260,9 @@ def test_loop_does_not_commit_memory_when_durable_commit_fails(tmp_path) -> None
     def fail(_: CommittedTurn) -> None:
         raise OSError("disk full")
 
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), commit_turn=fail)
+    loop = AgentLoop(
+        provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path), commit_turn=fail
+    )
 
     with pytest.raises(OSError, match="disk full"):
         loop.run("persist")
@@ -232,11 +275,17 @@ def test_loop_does_not_commit_memory_when_durable_commit_fails(tmp_path) -> None
 def test_loop_restores_validated_history_and_rejects_broken_causality(tmp_path) -> None:
     restored = (
         UserMessage("read"),
-        ToolUse("call-1", "read_file", "README.md"),
+        ToolUse("call-1", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
         ToolResult("call-1", "notes"),
         AssistantText("done"),
     )
-    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path), initial_history=restored)
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        initial_history=restored,
+    )
 
     assert loop.history == restored
     assert loop.effective_history == restored
@@ -247,9 +296,10 @@ def test_loop_restores_validated_history_and_rejects_broken_causality(tmp_path) 
             None,
             ReadFileTool(tmp_path),
             GlobTool(tmp_path),
+            GrepTool(tmp_path),
             initial_history=(
                 UserMessage("read"),
-                ToolUse("call-1", "read_file", "README.md"),
+                ToolUse("call-1", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
                 ToolResult("other", "notes"),
                 AssistantText("done"),
             ),
@@ -260,7 +310,7 @@ def test_history_snapshots_cannot_be_mutated_by_later_turns(tmp_path) -> None:
     provider = ScriptedFakeProvider(
         [AssistantText(text="first reply"), AssistantText(text="second reply")]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
     loop.run("first prompt")
     first_request = provider.received_requests[0].history
 
@@ -273,7 +323,7 @@ def test_history_snapshots_cannot_be_mutated_by_later_turns(tmp_path) -> None:
 def test_committed_context_snapshot_is_exact_read_only_and_independent(tmp_path) -> None:
     history = (
         UserMessage("read"),
-        ToolUse("call-1", "read_file", "README.md"),
+        ToolUse("call-1", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
         ToolResult("call-1", "notes"),
         AssistantText("done"),
     )
@@ -290,6 +340,7 @@ def test_committed_context_snapshot_is_exact_read_only_and_independent(tmp_path)
         None,
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
+        GrepTool(tmp_path),
         initial_history=history,
         system_prompt_factory=build_snapshot,
     )
@@ -305,7 +356,7 @@ def test_committed_context_snapshot_is_exact_read_only_and_independent(tmp_path)
 
 
 def test_empty_committed_context_has_no_synthetic_user_message(tmp_path) -> None:
-    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path))
+    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
 
     request = loop.committed_context_request()
 
@@ -319,7 +370,7 @@ def test_loop_pins_one_system_prompt_snapshot_across_tool_continuations(tmp_path
     (tmp_path / "README.md").write_text("notes\n", encoding="utf-8")
     provider = ScriptedFakeProvider(
         [
-            ToolUse("call-1", "read_file", "README.md"),
+            ToolUse("call-1", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
             AssistantText("done"),
         ]
     )
@@ -336,6 +387,7 @@ def test_loop_pins_one_system_prompt_snapshot_across_tool_continuations(tmp_path
         provider,
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
+        GrepTool(tmp_path),
         system_prompt_factory=build_snapshot,
     )
 

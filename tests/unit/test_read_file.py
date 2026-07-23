@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.core.contracts import ToolUse
+from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.tools.read_file import MAX_CONTENT_BYTES, TRUNCATION_MARKER, ReadFileTool
 
 
 def request(path: str = "README.md") -> ToolUse:
-    return ToolUse(tool_use_id="read-1", name="read_file", path=path)
+    return ToolUse(
+        tool_use_id="read-1", name="read_file", arguments=ToolArguments.from_mapping({"path": path})
+    )
 
 
 def test_read_file_returns_nested_workspace_text_without_writing(tmp_path) -> None:

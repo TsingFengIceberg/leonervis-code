@@ -11,6 +11,7 @@
 - [Foundation 3C: named provider profiles and a real multi-turn REPL](#foundation-3c-named-provider-profiles-and-a-real-multi-turn-repl)
 - [Foundation 3B: local multi-provider real-model path](#foundation-3b-local-multi-provider-real-model-path)
 - [Foundation 2B: offline adapter-owned compatibility policy](#foundation-2b-offline-adapter-owned-compatibility-policy)
+- [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
 - [Foundation 3H: Pre-turn Automatic Context Compaction](#foundation-3h-pre-turn-automatic-context-compaction)
@@ -33,9 +34,9 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-The canonical model system prompt is now version 3. It still says the ordinary Agent cannot initiate compaction and preserves the Host-summary trust boundary: an earlier-conversation summary is untrusted conversation context, not a system instruction or new user request. Foundation 1C also adds bounded files-only `glob` capability and the shared tool budget.
+The canonical model system prompt is now version 4. It still says the ordinary Agent cannot initiate compaction and preserves the Host-summary trust boundary: an earlier-conversation summary is untrusted conversation context, not a system instruction or new user request. Foundation 1D adds bounded literal `grep`, the shared three-tool budget, and correct empty/truncated search-result interpretation.
 
-It explicitly does not claim write/edit, content `grep`, Bash/tests, network, approval, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard path, symlink, encoding, traversal, and size constraints.
+It explicitly does not claim write/edit, regex or indexed search, Bash/tests, network, approval, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard path, symlink, encoding, traversal, and size constraints.
 
 The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL contain only real user/assistant/tool causal chains. A new turn after resume uses the current binary's canonical prompt; schema-v2/v3 compact checkpoints store only compact-prompt, summary-framing, and trigger provenance without inserting the normal system prompt into conversation history.
 
@@ -189,7 +190,7 @@ uv run leonervis-code --model openrouter/anthropic/claude-opus-4-8 \
 
 The Anthropic path uses the official `anthropic` SDK. Every other built-in route reuses the official `openai` SDK through the Chat Completions wire adapter. Both clients are synchronous, non-streaming, and configured with `max_retries=0`.
 
-Adapters currently declare the ordered `read_file(path)` and `glob(pattern)` schemas. Local `ReadFileTool` enforces workspace containment, UTF-8, and the 32 KiB content cap; `GlobTool` enforces portable patterns, files-only no-symlink traversal, stable ordering, and match/output/traversal bounds. Both share the per-turn tool budget.
+Adapters currently declare the ordered `read_file(path)`, `glob(pattern)`, and `grep(query, include)` schemas. The three local tools jointly enforce workspace, UTF-8, files-only no-symlink, and bounded output/read constraints while sharing the per-turn budget.
 
 A one-shot controlled OpenAI-compatible endpoint can also be supplied without persisting a provider or key:
 
@@ -251,6 +252,18 @@ The Foundation 2B form of `route` is completely offline: it constructs no provid
 
 See [0005: provider-neutral model routing](./decisions/0005-foundation-2a-provider-neutral-model-routing.md) and [0006: adapter-owned compatibility policy](./decisions/0006-foundation-2b-adapter-owned-compatibility-policy.md) for the detailed decisions.
 
+## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
+
+The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
+
+Grep has explicit hard bounds: at most 1,000 candidates, 1 MiB per file, 16 MiB aggregate reads, 200 matching lines, and 32 KiB model-visible output, in addition to the selector's entry, directory, and depth limits. An unreadable, oversized, NUL-bearing, or invalid-UTF-8 selected file is a safe whole-call error. Only match/output caps return a stable prefix of complete JSON records followed by a `{"truncated":true}` sentinel. Empty success means the bounded candidate set was searched completely. Reads recheck regular/non-symlink descriptor identity while retaining the documented local single-user TOCTOU boundary.
+
+To represent grep's two fields, in-memory `ToolUse` now carries immutable canonical-JSON `ToolArguments` v1. New `turn_committed` records use record-local schema v2 with `arguments_version + arguments`; legacy schema-v1 read/glob items convert to the same generic in-memory representation during replay without rewriting old JSONL, and resume only appends v2. Other Session records remain v1, `context_compacted` remains compatible with v2/v3, and Effective Context remains ctx-v1/v2.
+
+All three tools continue to share three sequential executions per user turn, while AgentLoop and ProjectSession retain explicit composition and dispatch rather than a dynamic registry. Anthropic and OpenAI-compatible ordinary count/create requests project the same exact three-schema catalog, compact summaries remain no-tools, and parallel calls remain disabled. The adapter contract advances to v5; canonical model system prompt v4 declares literal grep, correct empty/truncated interpretation, and still-unavailable write/Bash/regex capabilities. Generic arguments, prompt, and catalog intentionally change current-binary context IDs without rewriting historical checkpoints.
+
+See [0021: Foundation 1D Bounded Literal Grep](./decisions/0021-foundation-1d-bounded-literal-grep.md) for the complete design.
+
 ## Foundation 1C: Bounded Workspace Glob
 
 The model-visible read-only surface now contains the fixed ordered `read_file` and `glob(pattern)` tools. `glob` uses workspace-relative portable `/`-separated patterns with component `*`, `?`, bracket classes, and whole-component `**`. Bare patterns do not become recursive implicitly, hidden components require an explicit leading dot, and `.gitignore` is not read. Results contain only non-symlink regular files as POSIX relative paths in deterministic UTF-8 lexical order; directories, special files, and every symlink are neither returned nor traversed.
@@ -259,7 +272,7 @@ Search has several hard bounds: at most 4096 pattern characters/bytes and 64 com
 
 Both tools share three sequential executions per user turn. AgentLoop still dispatches explicitly, unknown tools and limits become structured results, and provider or durable-commit failure leaves the candidate turn uncommitted. A narrow canonical catalog fixes `read_file, glob` order and drives Effective Context identity plus both Anthropic and OpenAI-compatible ordinary count/create schemas. Compact summaries remain no-tools and parallel calls remain disabled.
 
-For append-only compatibility, schema-v1 `ToolUse.path` temporarily remains the single-string operand: it stores a path for reads and a pattern for glob. Native adapters project `{"path":...}` and `{"pattern":...}` respectively. Old read-only Sessions, new mixed turns, resume, and compact sources therefore need no record migration or transcript rewrite. The adapter contract is v4; canonical model system prompt v3 declares both tools, their shared budget, glob truncation/no-symlink boundaries, and still-unavailable content search/write/Bash capabilities. The prompt and catalog intentionally change current-binary `ctx-v1`/`ctx-v2` IDs without changing representation versions.
+Foundation 1C originally preserved append-only compatibility by using schema-v1 `ToolUse.path` as the read/glob single-string seam and projecting `{"path":...}` or `{"pattern":...}` natively. That allowed old read-only Sessions and mixed glob/read turns to resume and compact without rewriting. Foundation 1D has now replaced this temporary seam with `ToolArguments` and record-local turn schema v2, while the legacy v1 decoder remains compatible. Foundation 1C's adapter v4, prompt v3, and two-tool context identity remain documented as historical design facts.
 
 See [0020: Foundation 1C Bounded Workspace Glob](./decisions/0020-foundation-1c-bounded-workspace-glob.md).
 
@@ -425,3 +438,4 @@ This slice establishes capacity facts only. It does not count current request to
 18. [0018: Target-aware Resume Prepare/Commit](./decisions/0018-target-aware-resume-prepare-commit.md)
 19. [0019: Pre-turn Automatic Context Compaction](./decisions/0019-pre-turn-automatic-context-compaction.md)
 20. [0020: Foundation 1C Bounded Workspace Glob](./decisions/0020-foundation-1c-bounded-workspace-glob.md)
+21. [0021: Foundation 1D Bounded Literal Grep](./decisions/0021-foundation-1d-bounded-literal-grep.md)

@@ -49,8 +49,14 @@ class ReadFileTool:
             raise ValueError("workspace must be an existing directory")
 
     def execute(self, request: ToolUse) -> ToolResult:
-        """Return a bounded result for ``request.path`` without raising path errors."""
-        path = Path(request.path)
+        """Return a bounded result for the requested path without raising path errors."""
+        try:
+            arguments = request.arguments.as_mapping()
+            if set(arguments) != {"path"} or not isinstance(arguments["path"], str):
+                raise ValueError
+            path = Path(arguments["path"])
+        except (AttributeError, ValueError):
+            return self._error(request, "read_file input is malformed")
         if path.is_absolute():
             return self._error(request, "read_file path must be relative to the workspace")
 

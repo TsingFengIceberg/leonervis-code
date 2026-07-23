@@ -19,7 +19,7 @@ from leonervis_code.cli.presentation import (
     render_session_summary,
 )
 from leonervis_code.cli.repl import run_repl
-from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse
+from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
 from leonervis_code.core.orchestration import (
     GenerationOptions,
     OrchestrationError,
@@ -57,6 +57,7 @@ from leonervis_code.session_store import (
     SessionStoreError,
 )
 from leonervis_code.tools.glob import GlobTool
+from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -200,11 +201,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def render_demo_read(workspace: Path, path: str, stdout: TextIO) -> int:
     """Run and visibly report one scripted ``read_file`` tool demonstration."""
-    tool_use = ToolUse(tool_use_id="demo-read-1", name="read_file", path=path)
+    tool_use = ToolUse(
+        tool_use_id="demo-read-1",
+        name="read_file",
+        arguments=ToolArguments.from_mapping({"path": path}),
+    )
     provider = ScriptedFakeProvider(
         [tool_use, AssistantText("Demo final response: provider received the read_file result.")]
     )
-    demo_loop = AgentLoop(provider, ReadFileTool(workspace), GlobTool(workspace))
+    demo_loop = AgentLoop(
+        provider,
+        ReadFileTool(workspace),
+        GlobTool(workspace),
+        GrepTool(workspace),
+    )
     stdout.write(f"[demo] provider requested read_file: {path}\n")
     response = demo_loop.run(f"Demo read {path}")
     result = provider.received_requests[1].history[-1]
@@ -665,6 +675,7 @@ def main(
             provider_factory=factory,
             read_file_factory=ReadFileTool,
             glob_factory=GlobTool,
+            grep_factory=GrepTool,
         )
         try:
             resume_result = session.startup_resume_result

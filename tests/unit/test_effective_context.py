@@ -8,6 +8,7 @@ from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
     AssistantText,
     SystemPromptSnapshot,
+    ToolArguments,
     ToolResult,
     ToolUse,
     UserMessage,
@@ -45,7 +46,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v1-2f2a2891390a71ac67b7ff5646558152484e9e8d963bca65f4b88ac7a21bb820"
+        == "ctx-v1-0d8ecf37122888c4bdc22d3a8e3cf9c3922da9c834b8f789d67cb3d9aa2ad730"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -55,7 +56,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
 def test_complete_tool_turn_is_atomic_and_identity_covers_flags() -> None:
     history = (
         UserMessage("read"),
-        ToolUse("call-1", "read_file", "README.md"),
+        ToolUse("call-1", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
         ToolResult("call-1", "notes", is_error=False, truncated=False),
         AssistantText("done"),
     )
@@ -71,6 +72,13 @@ def test_complete_tool_turn_is_atomic_and_identity_covers_flags() -> None:
     assert context.full_item_count == 4
     assert context.effective_turns[0].items == history
     assert context.context_id != changed.context_id
+    changed_arguments = snapshot(
+        history[0],
+        ToolUse("call-1", "read_file", ToolArguments.from_mapping({"path": "other.md"})),
+        history[2],
+        history[3],
+    )
+    assert context.context_id != changed_arguments.context_id
 
 
 @pytest.mark.parametrize(
@@ -79,14 +87,18 @@ def test_complete_tool_turn_is_atomic_and_identity_covers_flags() -> None:
         ((AssistantText("bad"),), "start with a user"),
         ((UserMessage("bad"),), "end with assistant"),
         (
-            (UserMessage("x"), ToolUse("one", "read_file", "x"), AssistantText("bad")),
+            (
+                UserMessage("x"),
+                ToolUse("one", "read_file", ToolArguments.from_mapping({"path": "x"})),
+                AssistantText("bad"),
+            ),
             "does not match",
         ),
         (
             (
                 UserMessage("x"),
-                ToolUse("one", "read_file", "x"),
-                ToolUse("two", "read_file", "y"),
+                ToolUse("one", "read_file", ToolArguments.from_mapping({"path": "x"})),
+                ToolUse("two", "read_file", ToolArguments.from_mapping({"path": "y"})),
                 ToolResult("two", "y"),
                 ToolResult("one", "x"),
                 AssistantText("bad"),
@@ -96,11 +108,11 @@ def test_complete_tool_turn_is_atomic_and_identity_covers_flags() -> None:
         (
             (
                 UserMessage("x"),
-                ToolUse("one", "read_file", "x"),
+                ToolUse("one", "read_file", ToolArguments.from_mapping({"path": "x"})),
                 ToolResult("one", "x"),
                 AssistantText("one"),
                 UserMessage("y"),
-                ToolUse("one", "read_file", "y"),
+                ToolUse("one", "read_file", ToolArguments.from_mapping({"path": "y"})),
                 ToolResult("one", "y"),
                 AssistantText("two"),
             ),
@@ -129,7 +141,10 @@ def test_context_identity_includes_prompt_and_tool_contract() -> None:
     tool["description"] = "different"
     altered_tool = replace(
         context,
-        tool_definitions=(CanonicalToolDefinition.from_mapping(tool), TOOL_CATALOG[1]),
+        tool_definitions=(
+            CanonicalToolDefinition.from_mapping(tool),
+            *TOOL_CATALOG[1:],
+        ),
     )
     assert altered_tool.context_id != context.context_id
     assert (

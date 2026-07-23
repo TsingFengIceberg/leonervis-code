@@ -13,6 +13,7 @@ from leonervis_code.core.contracts import (
     ConversationRequest,
     ConversationTurn,
     SystemPromptSnapshot,
+    ToolArguments,
     ToolResult,
     ToolUse,
     UserMessage,
@@ -276,8 +277,12 @@ def _validate_item(item: object) -> None:
             raise ValueError("tool use ID must not be blank")
         if not isinstance(item.name, str) or not item.name:
             raise ValueError("tool use name must not be blank")
-        if not isinstance(item.path, str) or not item.path:
-            raise ValueError("tool use path must not be blank")
+        if not isinstance(item.arguments, ToolArguments):
+            raise ValueError("tool use arguments are invalid")
+        try:
+            item.arguments.as_mapping()
+        except (AttributeError, ValueError):
+            raise ValueError("tool use arguments are invalid") from None
         return
     if isinstance(item, ToolResult):
         if not isinstance(item.tool_use_id, str) or not item.tool_use_id:
@@ -301,7 +306,8 @@ def _item_identity(item: ConversationItem) -> dict[str, object]:
             "item_type": "tool_use",
             "tool_use_id": item.tool_use_id,
             "name": item.name,
-            "path": item.path,
+            "arguments_version": item.arguments.version,
+            "arguments": item.arguments.as_mapping(),
         }
     assert isinstance(item, ToolResult)
     return {

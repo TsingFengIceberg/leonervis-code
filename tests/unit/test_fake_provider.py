@@ -3,6 +3,7 @@ import pytest
 from leonervis_code.core.contracts import (
     AssistantText,
     ConversationRequest,
+    ToolArguments,
     ToolUse,
     UserMessage,
 )
@@ -29,18 +30,28 @@ def test_default_fake_provider_uses_the_latest_user_text() -> None:
 def test_fake_provider_returns_scripted_outcomes_in_order() -> None:
     provider = ScriptedFakeProvider(
         [
-            ToolUse(tool_use_id="read-1", name="read_file", path="README.md"),
+            ToolUse(
+                tool_use_id="read-1",
+                name="read_file",
+                arguments=ToolArguments.from_mapping({"path": "README.md"}),
+            ),
             AssistantText(text="summary"),
         ]
     )
     first_request = request(UserMessage(text="Read README"))
     second_request = request(
         UserMessage(text="Read README"),
-        ToolUse(tool_use_id="read-1", name="read_file", path="README.md"),
+        ToolUse(
+            tool_use_id="read-1",
+            name="read_file",
+            arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        ),
     )
 
     assert provider.respond(first_request) == ToolUse(
-        tool_use_id="read-1", name="read_file", path="README.md"
+        tool_use_id="read-1",
+        name="read_file",
+        arguments=ToolArguments.from_mapping({"path": "README.md"}),
     )
     assert provider.respond(second_request) == AssistantText(text="summary")
     assert provider.received_requests == (first_request, second_request)

@@ -65,6 +65,7 @@ from leonervis_code.session_store import (
     SessionWriter,
 )
 from leonervis_code.tools.glob import GlobTool
+from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -262,6 +263,7 @@ class ProjectSession:
         writer: SessionWriter,
         read_file: ReadFileTool,
         glob: GlobTool,
+        grep: GrepTool,
         *,
         loop: AgentLoop | None = None,
         startup_resume_result: SessionResumeResult | None = None,
@@ -273,6 +275,7 @@ class ProjectSession:
         self._writer = writer
         self._read_file = read_file
         self._glob = glob
+        self._grep = grep
         self._lock = RLock()
         self._closed = False
         self._active_compaction: _PreparedCompaction | None = None
@@ -297,6 +300,7 @@ class ProjectSession:
         provider_factory: Callable[..., ConversationProvider] | None = None,
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
         glob_factory: Callable[[Path], GlobTool] = GlobTool,
+        grep_factory: Callable[[Path], GrepTool] = GrepTool,
         session_store_factory: Callable[[Path], SessionStore] = SessionStore,
     ) -> ProjectSession:
         """Create or resume durable history while selecting runtime independently."""
@@ -328,6 +332,7 @@ class ProjectSession:
         try:
             read_file = read_file_factory(resolved_workspace)
             glob = glob_factory(resolved_workspace)
+            grep = grep_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -340,6 +345,7 @@ class ProjectSession:
                     writer,
                     read_file,
                     glob,
+                    grep,
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
@@ -348,6 +354,7 @@ class ProjectSession:
                     prepared.state,
                     read_file,
                     glob,
+                    grep,
                     commit_turn=lambda turn: writer_holder["writer"].append_turn(
                         turn.items,
                         binding=binding_from_status(manager.status()),
@@ -378,6 +385,7 @@ class ProjectSession:
                     writer,
                     read_file,
                     glob,
+                    grep,
                     loop=loop,
                     startup_resume_result=result,
                 )
@@ -471,6 +479,7 @@ class ProjectSession:
                     prepared.state,
                     self._read_file,
                     self._glob,
+                    self._grep,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                 )
                 snapshot = loop.effective_context_snapshot()
@@ -871,11 +880,12 @@ class ProjectSession:
         self.close()
 
     @staticmethod
-    def _loop_from_state(state, read_file, glob, *, commit_turn) -> AgentLoop:
+    def _loop_from_state(state, read_file, glob, grep, *, commit_turn) -> AgentLoop:
         return AgentLoop(
             None,
             read_file,
             glob,
+            grep,
             initial_history=state.history,
             initial_effective_history=state.effective_history,
             initial_effective_summary=state.effective_summary,
@@ -888,6 +898,7 @@ class ProjectSession:
             writer.state,
             self._read_file,
             self._glob,
+            self._grep,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
         )
 

@@ -232,9 +232,10 @@ def _compact_item(item: ConversationItem) -> dict[str, object]:
         return {"item_type": "assistant_text", "text": item.text}
     if isinstance(item, ToolUse):
         return {
+            "arguments": item.arguments.as_mapping(),
+            "arguments_version": item.arguments.version,
             "item_type": "tool_use",
             "name": item.name,
-            "path": item.path,
             "tool_use_id": item.tool_use_id,
         }
     assert isinstance(item, ToolResult)

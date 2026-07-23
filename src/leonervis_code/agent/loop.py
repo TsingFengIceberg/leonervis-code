@@ -30,6 +30,7 @@ from leonervis_code.core.effective_context import (
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.catalog import MAX_TOOL_EXECUTIONS_PER_TURN, TOOL_CATALOG
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, GlobTool
+from leonervis_code.tools.grep import GREP_TOOL_NAME, GrepTool
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
@@ -67,6 +68,7 @@ class AgentLoop:
         provider: ConversationProvider | None,
         read_file: ReadFileTool,
         glob: GlobTool,
+        grep: GrepTool,
         *,
         initial_history: tuple[ConversationItem, ...] = (),
         initial_effective_history: tuple[ConversationItem, ...] | None = None,
@@ -79,6 +81,7 @@ class AgentLoop:
         self._provider = provider
         self._read_file = read_file
         self._glob = glob
+        self._grep = grep
         restored = validate_complete_history(initial_history)
         effective_items = (
             restored.history if initial_effective_history is None else initial_effective_history
@@ -251,6 +254,8 @@ class AgentLoop:
             return self._read_file.execute(request)
         if request.name == GLOB_TOOL_NAME:
             return self._glob.execute(request)
+        if request.name == GREP_TOOL_NAME:
+            return self._grep.execute(request)
         return ToolResult(
             tool_use_id=request.tool_use_id,
             content=f"unknown tool: {request.name}",

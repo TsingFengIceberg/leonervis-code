@@ -1,4 +1,4 @@
-"""Closed schema-v1 records for durable Leonervis Code sessions.
+"""Closed versioned records for durable Leonervis Code sessions.
 
 This module owns only the typed transcript format and replay invariants. Filesystem
 safety, locking, and durability live in :mod:`leonervis_code.session_store`.
@@ -31,6 +31,7 @@ from leonervis_code.core.contracts import (
     AssistantText,
     ConversationItem,
     ConversationTurn,
+    ToolArguments,
     ToolResult,
     ToolUse,
     UserMessage,
@@ -43,6 +44,8 @@ from leonervis_code.core.effective_context import (
 )
 
 SCHEMA_VERSION = 1
+TURN_COMMITTED_LEGACY_SCHEMA_VERSION = 1
+TURN_COMMITTED_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_SCHEMA_VERSION = 3
 WORKSPACE_FINGERPRINT_VERSION = "v1"
@@ -174,7 +177,7 @@ class TurnCommitted:
     binding: BindingSnapshot
     items: tuple[ConversationItem, ...]
     record_type: str = "turn_committed"
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = TURN_COMMITTED_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -473,7 +476,9 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
         common.update(
             committed_at=record.committed_at,
             binding=_binding_to_dict(record.binding),
-            items=[_item_to_dict(item) for item in record.items],
+            items=[
+                _item_to_dict(item, schema_version=record.schema_version) for item in record.items
+            ],
         )
     elif isinstance(record, RuntimeChanged):
         _validate_timestamp(record.occurred_at, "runtime_changed occurred_at")
@@ -541,6 +546,11 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION,
             CONTEXT_COMPACTED_SCHEMA_VERSION,
         }
+    elif record_type == "turn_committed":
+        allowed_versions = {
+            TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+            TURN_COMMITTED_SCHEMA_VERSION,
+        }
     else:
         allowed_versions = {SCHEMA_VERSION}
     if type(version) is not int or version not in allowed_versions:
@@ -590,12 +600,13 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
         raw_items = value.get("items")
         if not isinstance(raw_items, list):
             raise SessionRecordError("turn_committed items must be an array")
-        items = tuple(_item_from_value(item) for item in raw_items)
+        items = tuple(_item_from_value(item, schema_version=version) for item in raw_items)
         record = TurnCommitted(
             sequence=sequence,
             committed_at=_required_field_text(value, "committed_at", record_type),
             binding=_binding_from_value(value.get("binding")),
             items=items,
+            schema_version=version,
         )
         _validate_timestamp(record.committed_at, "turn committed_at")
         _validate_turn(record.items, set())
@@ -801,7 +812,16 @@ def _binding_from_value(value: object) -> BindingSnapshot:
     )
 
 
-def _item_to_dict(item: ConversationItem) -> dict[str, object]:
+def _item_to_dict(
+    item: ConversationItem,
+    *,
+    schema_version: int = TURN_COMMITTED_SCHEMA_VERSION,
+) -> dict[str, object]:
+    if schema_version not in {
+        TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+        TURN_COMMITTED_SCHEMA_VERSION,
+    }:
+        raise SessionRecordError("unsupported turn_committed schema version")
     if isinstance(item, UserMessage):
         _text_payload(item.text, "user message text")
         return {"item_type": "user_message", "text": item.text}
@@ -811,12 +831,31 @@ def _item_to_dict(item: ConversationItem) -> dict[str, object]:
     if isinstance(item, ToolUse):
         _required_text(item.tool_use_id, "tool_use ID")
         _required_text(item.name, "tool_use name")
-        _required_text(item.path, "tool_use path")
+        if not isinstance(item.arguments, ToolArguments):
+            raise SessionRecordError("tool_use arguments are invalid")
+        arguments = item.arguments.as_mapping()
+        if schema_version == TURN_COMMITTED_LEGACY_SCHEMA_VERSION:
+            if item.name == "read_file" and set(arguments) == {"path"}:
+                path = arguments["path"]
+            elif item.name == "glob" and set(arguments) == {"pattern"}:
+                path = arguments["pattern"]
+            elif item.name not in {"read_file", "glob", "grep"} and set(arguments) == {"path"}:
+                path = arguments["path"]
+            else:
+                raise SessionRecordError("tool_use cannot be represented by schema version 1")
+            _required_text(path, "tool_use path")
+            return {
+                "item_type": "tool_use",
+                "tool_use_id": item.tool_use_id,
+                "name": item.name,
+                "path": path,
+            }
         return {
             "item_type": "tool_use",
             "tool_use_id": item.tool_use_id,
             "name": item.name,
-            "path": item.path,
+            "arguments_version": item.arguments.version,
+            "arguments": arguments,
         }
     if isinstance(item, ToolResult):
         _required_text(item.tool_use_id, "tool_result ID")
@@ -833,7 +872,7 @@ def _item_to_dict(item: ConversationItem) -> dict[str, object]:
     raise SessionRecordError("turn contains an unsupported conversation item")
 
 
-def _item_from_value(value: object) -> ConversationItem:
+def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
     if not isinstance(value, dict):
         raise SessionRecordError("turn item must be a JSON object")
     item_type = _required_field_text(value, "item_type", "turn item")
@@ -842,11 +881,47 @@ def _item_from_value(value: object) -> ConversationItem:
         text = _required_field_payload_text(value, "text", item_type)
         return UserMessage(text) if item_type == "user_message" else AssistantText(text)
     if item_type == "tool_use":
-        _closed_fields(value, {"item_type", "tool_use_id", "name", "path"}, item_type)
+        if schema_version == TURN_COMMITTED_LEGACY_SCHEMA_VERSION:
+            _closed_fields(value, {"item_type", "tool_use_id", "name", "path"}, item_type)
+            name = _required_field_text(value, "name", item_type)
+            path = _required_field_text(value, "path", item_type)
+            if name == "glob":
+                arguments = {"pattern": path}
+            else:
+                arguments = {"path": path}
+            return ToolUse(
+                tool_use_id=_required_field_text(value, "tool_use_id", item_type),
+                name=name,
+                arguments=ToolArguments.from_mapping(arguments),
+            )
+        _closed_fields(
+            value,
+            {
+                "item_type",
+                "tool_use_id",
+                "name",
+                "arguments_version",
+                "arguments",
+            },
+            item_type,
+        )
+        arguments_version = value.get("arguments_version")
+        if type(arguments_version) is not int:
+            raise SessionRecordError("tool_use arguments_version must be an integer")
+        raw_arguments = value.get("arguments")
+        if not isinstance(raw_arguments, dict):
+            raise SessionRecordError("tool_use arguments must be a JSON object")
+        try:
+            arguments = ToolArguments.from_mapping(
+                raw_arguments,
+                version=arguments_version,
+            )
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
         return ToolUse(
             tool_use_id=_required_field_text(value, "tool_use_id", item_type),
             name=_required_field_text(value, "name", item_type),
-            path=_required_field_text(value, "path", item_type),
+            arguments=arguments,
         )
     if item_type == "tool_result":
         _closed_fields(
@@ -883,7 +958,7 @@ def _validate_header(header: SessionHeader) -> None:
 
 def _validate_turn(items: tuple[ConversationItem, ...], seen_tool_ids: set[str]) -> None:
     for item in items:
-        _item_to_dict(item)
+        _item_to_dict(item, schema_version=TURN_COMMITTED_SCHEMA_VERSION)
     try:
         validated = validate_complete_history(
             items,
@@ -897,6 +972,13 @@ def _validate_turn(items: tuple[ConversationItem, ...], seen_tool_ids: set[str])
 
 
 def _validate_record_version(record: SessionRecord) -> None:
+    if isinstance(record, TurnCommitted):
+        if record.schema_version not in {
+            TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+            TURN_COMMITTED_SCHEMA_VERSION,
+        }:
+            raise SessionRecordError("unsupported session record schema version")
+        return
     if isinstance(record, ContextCompacted):
         expected = {
             CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION,

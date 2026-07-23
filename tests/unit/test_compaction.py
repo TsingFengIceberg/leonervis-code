@@ -20,6 +20,7 @@ from leonervis_code.core.compaction import (
     summary_continuation_fingerprint,
 )
 from leonervis_code.core.contracts import (
+    ToolArguments,
     AssistantText,
     ConversationTurn,
     ToolResult,
@@ -68,7 +69,7 @@ def test_effective_summary_is_bounded_and_has_canonical_untrusted_framing() -> N
 def test_compact_source_serializes_complete_tool_turns_and_previous_summary() -> None:
     history = (
         UserMessage("read"),
-        ToolUse("call-1", "read_file", "README.md"),
+        ToolUse("call-1", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
         ToolResult("call-1", "notes", truncated=True),
         AssistantText("done"),
     )
@@ -85,17 +86,36 @@ def test_compact_source_serializes_complete_tool_turns_and_previous_summary() ->
         previous_summary=None,
         summarized_history=(
             UserMessage("find"),
-            ToolUse("glob-1", "glob", "src/**/*.py"),
+            ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "src/**/*.py"})),
             ToolResult("glob-1", "src/app.py\n"),
             AssistantText("done"),
         ),
     )
     assert '"name":"glob"' in glob_source
-    assert '"path":"src/**/*.py"' in glob_source
+    assert '"arguments":{"pattern":"src/**/*.py"}' in glob_source
+    assert '"arguments_version":1' in glob_source
+    grep_source = build_compact_source_text(
+        previous_summary=None,
+        summarized_history=(
+            UserMessage("search"),
+            ToolUse(
+                "grep-1",
+                "grep",
+                ToolArguments.from_mapping({"query": "ToolUse(", "include": "src/**/*.py"}),
+            ),
+            ToolResult("grep-1", '{"path":"src/app.py","line":1,"text":"ToolUse("}\n'),
+            AssistantText("done"),
+        ),
+    )
+    assert '"name":"grep"' in grep_source
+    assert '"arguments":{"include":"src/**/*.py","query":"ToolUse("}' in grep_source
     with pytest.raises(ValueError, match="unmatched tool use"):
         build_compact_source_text(
             previous_summary=None,
-            summarized_history=(UserMessage("x"), ToolUse("id", "read_file", "x")),
+            summarized_history=(
+                UserMessage("x"),
+                ToolUse("id", "read_file", ToolArguments.from_mapping({"path": "x"})),
+            ),
         )
 
 

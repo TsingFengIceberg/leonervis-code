@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from typing import TYPE_CHECKING, Callable, Protocol, TypeAlias
 
 if TYPE_CHECKING:
     from leonervis_code.core.compaction import EffectiveContextSummary
 
 _SYSTEM_PROMPT_FINGERPRINT_DOMAIN = b"leonervis-code-system-prompt\0"
+TOOL_ARGUMENTS_VERSION = 1
+MAX_TOOL_ARGUMENTS_BYTES = 16 * 1024
 
 
 def system_prompt_fingerprint(version: int, text: str) -> str:
@@ -51,16 +54,71 @@ class AssistantText:
 
 
 @dataclass(frozen=True)
-class ToolUse:
-    """One provider-requested tool with one neutral string operand.
+class ToolArguments:
+    """Immutable versioned provider-neutral arguments for one tool use."""
 
-    ``path`` remains the schema-v1 compatibility field: it is a file path for
-    ``read_file`` and a file-pattern operand for ``glob``.
-    """
+    version: int
+    canonical_json: str
+
+    def __post_init__(self) -> None:
+        if self.version != TOOL_ARGUMENTS_VERSION:
+            raise ValueError("unsupported tool arguments version")
+        if not isinstance(self.canonical_json, str):
+            raise ValueError("tool arguments canonical JSON must be text")
+        try:
+            decoded = json.loads(self.canonical_json)
+        except json.JSONDecodeError:
+            raise ValueError("tool arguments canonical JSON is invalid") from None
+        if not isinstance(decoded, dict):
+            raise ValueError("tool arguments must be a JSON object")
+        canonical = self._canonicalize(decoded)
+        if canonical != self.canonical_json:
+            raise ValueError("tool arguments canonical JSON is not canonical")
+
+    @classmethod
+    def from_mapping(
+        cls,
+        arguments: dict[str, object],
+        *,
+        version: int = TOOL_ARGUMENTS_VERSION,
+    ) -> ToolArguments:
+        """Validate and freeze one JSON object in deterministic canonical form."""
+        if not isinstance(arguments, dict):
+            raise ValueError("tool arguments must be a JSON object")
+        return cls(version=version, canonical_json=cls._canonicalize(arguments))
+
+    def as_mapping(self) -> dict[str, object]:
+        """Return a fresh mutable projection of the frozen argument object."""
+        value = json.loads(self.canonical_json)
+        if not isinstance(value, dict):
+            raise ValueError("tool arguments must decode to a JSON object")
+        return value
+
+    @staticmethod
+    def _canonicalize(arguments: dict[str, object]) -> str:
+        try:
+            canonical = json.dumps(
+                arguments,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            encoded = canonical.encode("utf-8")
+        except (TypeError, ValueError, OverflowError, UnicodeEncodeError):
+            raise ValueError("tool arguments are not canonical JSON") from None
+        if len(encoded) > MAX_TOOL_ARGUMENTS_BYTES:
+            raise ValueError(f"tool arguments exceed {MAX_TOOL_ARGUMENTS_BYTES} bytes")
+        return canonical
+
+
+@dataclass(frozen=True)
+class ToolUse:
+    """One provider-requested tool with immutable provider-neutral arguments."""
 
     tool_use_id: str
     name: str
-    path: str
+    arguments: ToolArguments
 
 
 @dataclass(frozen=True)

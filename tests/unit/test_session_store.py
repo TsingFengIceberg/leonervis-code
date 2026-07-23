@@ -10,8 +10,19 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.core.contracts import AssistantText, ToolResult, ToolUse, UserMessage
-from leonervis_code.session_records import BindingSnapshot
+from leonervis_code.core.contracts import (
+    ToolArguments,
+    AssistantText,
+    ToolResult,
+    ToolUse,
+    UserMessage,
+)
+from leonervis_code.session_records import (
+    TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+    BindingSnapshot,
+    TurnCommitted,
+    encode_record,
+)
 from leonervis_code.session_store import (
     AtomicJsonWriteError,
     SessionLockedError,
@@ -36,7 +47,7 @@ def store(workspace: Path, session_id: str = SESSION_ONE) -> SessionStore:
 def committed_items(tool_id: str = "tool-1"):
     return (
         UserMessage("read"),
-        ToolUse(tool_id, "read_file", "README.md"),
+        ToolUse(tool_id, "read_file", ToolArguments.from_mapping({"path": "README.md"})),
         ToolResult(tool_id, "content"),
         AssistantText("done"),
     )
@@ -52,6 +63,10 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
         tmp_path / ".leonervis-code" / "sessions" / session_store.workspace_fingerprint
     )
     writer.append_turn(committed_items(), binding=binding)
+    persisted_turn = writer.path.read_text(encoding="utf-8").splitlines()[-1]
+    assert '"record_type":"turn_committed"' in persisted_turn
+    assert '"schema_version":2' in persisted_turn
+    assert '"arguments":{"path":"README.md"}' in persisted_turn
     writer.turn_failed(binding=binding, failure_kind="cancelled", message="user cancelled")
     assert len(writer.state.history) == 4
     assert len(writer.state.turns) == 1
@@ -72,6 +87,34 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
     assert resumed_after_clean_close.state.closed is False
     assert resumed_after_clean_close.state.history == committed_items()
     resumed_after_clean_close.release()
+
+
+def test_resume_appends_v2_turn_without_rewriting_legacy_v1_prefix(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    legacy = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=committed_items("legacy-tool"),
+        schema_version=TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+    )
+    writer.path.write_bytes(writer.path.read_bytes() + encode_record(legacy))
+    writer.release()
+    prefix = writer.path.read_bytes()
+
+    resumed = session_store.open(SESSION_ONE)
+    assert resumed.state.history == committed_items("legacy-tool")
+    resumed.append_turn(committed_items("current-tool"), binding=BindingSnapshot.fake())
+    after = resumed.path.read_bytes()
+    resumed.release()
+
+    assert after.startswith(prefix)
+    appended = after[len(prefix) :]
+    assert b'"record_type":"session_resumed"' in appended
+    assert b'"record_type":"turn_committed"' in appended
+    assert b'"schema_version":2' in appended
+    assert b'"arguments":{"path":"README.md"}' in appended
 
 
 def test_prepare_resume_is_read_only_and_abort_releases_target_lock(tmp_path: Path) -> None:

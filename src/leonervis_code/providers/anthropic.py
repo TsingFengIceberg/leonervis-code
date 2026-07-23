@@ -37,7 +37,7 @@ from leonervis_code.providers.request_context import (
 from leonervis_code.tools.catalog import (
     model_tool_definitions,
     tool_input_from_use,
-    tool_operand_key,
+    tool_use_from_input,
 )
 
 PROVIDER_ID = "anthropic"
@@ -298,6 +298,11 @@ def glob_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[1]
 
 
+def grep_tool_definition() -> dict[str, object]:
+    """Return the canonical Anthropic grep contract."""
+    return model_tool_definitions()[2]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,
@@ -340,8 +345,6 @@ def serialize_history(
                 ) from None
             if not isinstance(item.tool_use_id, str) or not item.tool_use_id:
                 raise _invalid_history(config, "tool use ID must not be blank")
-            if not isinstance(item.path, str) or not item.path:
-                raise _invalid_history(config, "tool operand must be nonblank text")
             messages.append(
                 {
                     "role": "assistant",
@@ -495,21 +498,14 @@ def parse_response(response: object, *, config: AnthropicProviderConfig) -> Prov
     tool_input = getattr(block, "input", None)
     if not isinstance(tool_use_id, str) or not tool_use_id:
         raise _invalid_response(config, "Anthropic tool use ID was malformed")
-    try:
-        operand_key = tool_operand_key(name)
-    except ValueError:
-        raise _invalid_response(config, "Anthropic requested an unsupported tool") from None
-    if not isinstance(tool_input, dict) or set(tool_input) != {operand_key}:
+    if not isinstance(name, str):
+        raise _invalid_response(config, "Anthropic requested an unsupported tool")
+    if not isinstance(tool_input, dict):
         raise _invalid_response(config, f"Anthropic {name} input was malformed")
-    operand = tool_input[operand_key]
-    if (
-        not isinstance(operand, str)
-        or not operand.strip()
-        or "\x00" in operand
-        or len(operand) > 4096
-    ):
-        raise _invalid_response(config, f"Anthropic {name} operand was malformed")
-    return ToolUse(tool_use_id=tool_use_id, name=name, path=operand)
+    try:
+        return tool_use_from_input(tool_use_id, name, tool_input)
+    except ValueError:
+        raise _invalid_response(config, f"Anthropic {name} input was malformed") from None
 
 
 def normalize_sdk_error(

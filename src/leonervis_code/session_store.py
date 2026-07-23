@@ -1,4 +1,4 @@
-"""Secure append-only storage for schema-v1 Leonervis Code sessions."""
+"""Secure append-only storage for versioned Leonervis Code sessions."""
 
 from __future__ import annotations
 

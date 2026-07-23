@@ -32,7 +32,7 @@ from leonervis_code.providers.request_context import (
 from leonervis_code.tools.catalog import (
     model_tool_definitions,
     tool_input_from_use,
-    tool_operand_key,
+    tool_use_from_input,
 )
 
 
@@ -143,6 +143,11 @@ def read_file_tool_definition() -> dict[str, object]:
 def glob_tool_definition() -> dict[str, object]:
     """Wrap the canonical glob contract as one compatible function tool."""
     return _compatible_tool_definition(model_tool_definitions()[1])
+
+
+def grep_tool_definition() -> dict[str, object]:
+    """Wrap the canonical grep contract as one compatible function tool."""
+    return _compatible_tool_definition(model_tool_definitions()[2])
 
 
 def model_tool_definitions_for_openai() -> tuple[dict[str, object], ...]:
@@ -257,8 +262,6 @@ def serialize_history(
                 raise _invalid_history(route, f"unsupported tool in history: {item.name}") from None
             if not item.tool_use_id:
                 raise _invalid_history(route, "tool use ID must not be blank")
-            if not isinstance(item.path, str) or not item.path:
-                raise _invalid_history(route, "tool operand must be nonblank text")
             messages.append(
                 {
                     "role": "assistant",
@@ -270,7 +273,10 @@ def serialize_history(
                             "function": {
                                 "name": item.name,
                                 "arguments": json.dumps(
-                                    tool_input, separators=(",", ":"), ensure_ascii=False
+                                    tool_input,
+                                    separators=(",", ":"),
+                                    ensure_ascii=False,
+                                    sort_keys=True,
                                 ),
                             },
                         }
@@ -413,27 +419,20 @@ def parse_response(response: object, *, route: RuntimeProviderRoute) -> Provider
     arguments = getattr(function, "arguments", None)
     if not isinstance(tool_use_id, str) or not tool_use_id:
         raise _invalid_response(route, "provider tool call ID was malformed")
-    try:
-        operand_key = tool_operand_key(name)
-    except ValueError:
-        raise _invalid_response(route, "provider requested an unsupported tool") from None
+    if not isinstance(name, str):
+        raise _invalid_response(route, "provider requested an unsupported tool")
     if not isinstance(arguments, str):
         raise _invalid_response(route, "provider tool arguments were not JSON text")
     try:
         tool_input = json.loads(arguments)
     except (TypeError, json.JSONDecodeError):
         raise _invalid_response(route, "provider tool arguments were invalid JSON") from None
-    if not isinstance(tool_input, dict) or set(tool_input) != {operand_key}:
+    if not isinstance(tool_input, dict):
         raise _invalid_response(route, f"provider {name} arguments were malformed")
-    operand = tool_input[operand_key]
-    if (
-        not isinstance(operand, str)
-        or not operand.strip()
-        or "\x00" in operand
-        or len(operand) > 4096
-    ):
-        raise _invalid_response(route, f"provider {name} operand was malformed")
-    return ToolUse(tool_use_id=tool_use_id, name=name, path=operand)
+    try:
+        return tool_use_from_input(tool_use_id, name, tool_input)
+    except ValueError:
+        raise _invalid_response(route, f"provider {name} arguments were malformed") from None
 
 
 def token_limit_field(model: str) -> str:
