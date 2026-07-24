@@ -89,6 +89,13 @@ from leonervis_code.tools.edit_file import (
 )
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.mkdir import (
+    MKDIR_TOOL_NAME,
+    MkdirOutcome,
+    MkdirPreparationError,
+    MkdirTool,
+    PreparedMkdir,
+)
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
 from leonervis_code.tools.glob import GLOB_TOOL_NAME
 from leonervis_code.tools.grep import GREP_TOOL_NAME
@@ -306,6 +313,7 @@ class ProjectSession:
         write_file: WriteFileTool | None = None,
         edit_file: EditFileTool | None = None,
         run_command: RunCommandTool | None = None,
+        mkdir: MkdirTool | None = None,
         *,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
@@ -325,6 +333,7 @@ class ProjectSession:
         self._write_file = write_file or WriteFileTool(workspace)
         self._edit_file = edit_file or EditFileTool(workspace)
         self._run_command = run_command or RunCommandTool(workspace)
+        self._mkdir = mkdir or MkdirTool(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -365,6 +374,7 @@ class ProjectSession:
         write_file_factory: Callable[[Path], WriteFileTool] = WriteFileTool,
         edit_file_factory: Callable[[Path], EditFileTool] = EditFileTool,
         run_command_factory: Callable[[Path, Mapping[str, str]], RunCommandTool] = RunCommandTool,
+        mkdir_factory: Callable[[Path], MkdirTool] = MkdirTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -404,6 +414,7 @@ class ProjectSession:
             write_file = write_file_factory(resolved_workspace)
             edit_file = edit_file_factory(resolved_workspace)
             run_command = run_command_factory(resolved_workspace, resolved_environment)
+            mkdir = mkdir_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -420,6 +431,7 @@ class ProjectSession:
                     write_file,
                     edit_file,
                     run_command,
+                    mkdir,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -467,6 +479,7 @@ class ProjectSession:
                     write_file,
                     edit_file,
                     run_command,
+                    mkdir,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -1020,6 +1033,7 @@ class ProjectSession:
         prepared_write: PreparedWriteFile | None = None
         prepared_edit: PreparedEditFile | None = None
         prepared_command: PreparedRunCommand | None = None
+        prepared_mkdir: PreparedMkdir | None = None
         if request.name in {READ_FILE_TOOL_NAME, GLOB_TOOL_NAME, GREP_TOOL_NAME}:
             action = PermissionAction.WORKSPACE_READ
             precondition = ActionPrecondition.none()
@@ -1044,6 +1058,13 @@ class ProjectSession:
                 return ToolResult(request.tool_use_id, str(error), is_error=True)
             action = prepared_command.action
             precondition = prepared_command.precondition
+        elif request.name == MKDIR_TOOL_NAME:
+            try:
+                prepared_mkdir = self._mkdir.prepare(request)
+            except MkdirPreparationError as error:
+                return ToolResult(request.tool_use_id, str(error), is_error=True)
+            action = prepared_mkdir.action
+            precondition = prepared_mkdir.precondition
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
@@ -1074,6 +1095,9 @@ class ProjectSession:
                 return replace(current, precondition=refreshed)
             if prepared_command is not None:
                 refreshed = self._run_command.revalidate(prepared_command)
+                return replace(current, precondition=refreshed)
+            if prepared_mkdir is not None:
+                refreshed = self._mkdir.refresh_precondition(prepared_mkdir)
                 return replace(current, precondition=refreshed)
             return current
 
@@ -1123,6 +1147,19 @@ class ProjectSession:
                     outcome=outcome,
                     result_code=command_result.result_code,
                     audit_message=command_result.audit_message,
+                )
+            elif request.name == MKDIR_TOOL_NAME and prepared_mkdir is not None:
+                mkdir_result = self._mkdir.execute_detailed(prepared_mkdir)
+                outcome = {
+                    MkdirOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    MkdirOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    MkdirOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[mkdir_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=mkdir_result.tool_result,
+                    outcome=outcome,
+                    result_code=mkdir_result.result_code,
+                    audit_message=mkdir_result.audit_message,
                 )
             else:
                 result = ToolResult(

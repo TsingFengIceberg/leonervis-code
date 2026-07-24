@@ -569,3 +569,31 @@ def test_action_audit_renders_redacted_command_summary() -> None:
     assert "timeout: 60s" in rendered
     assert "--token=secret" not in rendered
     assert "result: succeeded (command_succeeded)" in rendered
+
+
+def test_action_audit_renders_mkdir_relative_path_and_result() -> None:
+    audit = SimpleNamespace(
+        identity=SimpleNamespace(
+            tool_name="mkdir",
+            action=PermissionAction.WORKSPACE_CREATE,
+            arguments=ToolArguments.from_mapping({"path": "src/pkg"}),
+        ),
+        permission_result=PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_CREATE,
+        ),
+        approval_outcome=ApprovalAuditOutcome.ACCEPTED,
+        status=ActionAuditStatus.SUCCEEDED,
+        result_code="directory_created",
+        requested_sequence=8,
+    )
+
+    rendered = render_action_audits((audit,), 20)
+
+    assert "Action #8: mkdir" in rendered
+    assert "class: workspace-create" in rendered
+    assert "path: 'src/pkg'" in rendered
+    assert "permission: ask (approval_required_workspace_create)" in rendered
+    assert "approval: accepted" in rendered
+    assert "result: succeeded (directory_created)" in rendered
+    assert "/root/" not in rendered

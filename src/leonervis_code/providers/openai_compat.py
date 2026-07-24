@@ -165,6 +165,11 @@ def run_command_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[5])
 
 
+def mkdir_tool_definition() -> dict[str, object]:
+    """Wrap the canonical controlled directory contract as one compatible function tool."""
+    return _compatible_tool_definition(model_tool_definitions()[6])
+
+
 def model_tool_definitions_for_openai() -> tuple[dict[str, object], ...]:
     """Wrap every canonical tool in its fixed provider-visible order."""
     return tuple(_compatible_tool_definition(item) for item in model_tool_definitions())

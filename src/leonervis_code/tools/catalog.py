@@ -7,6 +7,7 @@ from leonervis_code.core.effective_context import CanonicalToolDefinition
 from leonervis_code.tools.edit_file import EDIT_FILE_TOOL_NAME, edit_file_tool_snapshot
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, glob_tool_snapshot
 from leonervis_code.tools.grep import GREP_TOOL_NAME, grep_tool_snapshot
+from leonervis_code.tools.mkdir import MKDIR_TOOL_NAME, mkdir_tool_snapshot
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, read_file_tool_snapshot
 from leonervis_code.tools.run_command import (
     MAX_COMMAND_ARGUMENTS,
@@ -33,6 +34,7 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     write_file_tool_snapshot(),
     edit_file_tool_snapshot(),
     run_command_tool_snapshot(),
+    mkdir_tool_snapshot(),
 )
 
 
@@ -83,6 +85,8 @@ def _expected_keys(name: str) -> set[str]:
         return {"path", "old_text", "new_text"}
     if name == RUN_COMMAND_TOOL_NAME:
         return {"argv", "cwd", "timeout_seconds"}
+    if name == MKDIR_TOOL_NAME:
+        return {"path"}
     raise ValueError(f"unsupported tool: {name}")
 
 

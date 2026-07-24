@@ -36,6 +36,7 @@ from leonervis_code.providers.openai_compat import (
     edit_file_tool_definition,
     glob_tool_definition,
     grep_tool_definition,
+    mkdir_tool_definition,
     parse_compact_summary_response,
     parse_response,
     read_file_tool_definition,
@@ -531,4 +532,23 @@ def test_run_command_schema_and_parser_preserve_array_and_integer_arguments() ->
         ToolArguments.from_mapping(
             {"argv": ["uv", "run", "pytest"], "cwd": ".", "timeout_seconds": 60}
         ),
+    )
+
+
+def test_mkdir_schema_and_parser_preserve_exact_path_argument() -> None:
+    definition = mkdir_tool_definition()
+    assert definition["function"]["name"] == "mkdir"
+    assert definition["function"]["parameters"]["required"] == ["path"]
+    assert definition["function"]["parameters"]["additionalProperties"] is False
+    call = tool_call(
+        call_id="mkdir-provider",
+        name="mkdir",
+        arguments='{ "path": "src/pkg" }',
+    )
+    assert parse_response(
+        completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
+    ) == ToolUse(
+        "mkdir-provider",
+        "mkdir",
+        ToolArguments.from_mapping({"path": "src/pkg"}),
     )

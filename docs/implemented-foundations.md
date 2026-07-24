@@ -20,6 +20,7 @@
 - [Foundation 4C Slice 0–3：Controlled Command Contract与Side-effect-free Preparation](#foundation-4c-slice-03controlled-command-contract与side-effect-free-preparation)
 - [Foundation 4C Slice 4–6：Bounded Command Execution与Process-group Cleanup](#foundation-4c-slice-46bounded-command-execution与process-group-cleanup)
 - [Foundation 4C Slice 7–9：Durable Model-visible Command Integration](#foundation-4c-slice-79durable-model-visible-command-integration)
+- [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -43,9 +44,9 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 7。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C再加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义。六个model-visible tools共享三次顺序预算。
+Canonical model system prompt当前为version 8。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义；Foundation 4D再加入只创建一个目录、parent必须存在且不得递归创建的`mkdir`。七个model-visible tools共享三次顺序预算。
 
-它明确不声称具备regex/fuzzy/multi-edit patch、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
+它明确不声称具备regex/fuzzy/multi-edit patch、delete/rename、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
 
 System prompt 不属于 `ConversationItem`，所以 `/history`、`ProjectSession.history` 和 append-only Session JSONL 只保存真实 user/assistant/tool 因果链。恢复旧 Session 后，新 turn 使用当前 binary 的 canonical prompt；schema-v2/v3 compact checkpoint只保存compact prompt、summary-framing与trigger provenance，不把正常system prompt写进conversation history。
 
@@ -366,6 +367,16 @@ Canonical tool order现为`read_file, glob, grep, write_file, edit_file, run_com
 
 ToolArguments保持v1，new `turn_committed`保持schema v2，ActionIdentity与Action Audit保持v1，普通Session records保持v1，`context_compacted`继续v2/v3 replay，Effective Context representation继续`ctx-v1`/`ctx-v2`；旧transcript/checkpoint不重写，resume和compaction也不会重跑command。完整决策见[0030：Foundation 4C Durable Model-visible Command Integration](./decisions/0030-foundation-4c-durable-model-visible-command-integration.md)。
 
+## Foundation 4D Slice 0–4：Controlled Single-directory Creation
+
+新增第七个model-visible工具`mkdir(path)`，用于创建一个缺失的workspace相对目录。Path采用portable `/`分隔格式并同时限制character、UTF-8 byte、component数量和单component bytes；绝对路径、Windows drive、反斜杠、空组件、`.`、`..`、NUL、缺失parent、非目录parent和任何已观察到的symlink都会在permission之前拒绝。目标若已经是任何filesystem entry也属于hard rejection，不生成Action Audit；prepare只返回immutable path、`workspace-create`分类和`path_absent`前置条件，不产生副作用。
+
+`read-only`拒绝mkdir；`workspace-write`与`danger-full-access`按现有ask/auto策略处理。Approval绑定exact ActionIdentity与目标absence，等待期间目标若出现会以stale拒绝。只有`action_execution_started`成功append+fsync后才执行一次非递归目录创建；executor再次验证路径和目标，成功后fsync新目录与parent。创建前失败记录`failed / directory_not_created`，目录已可见但durability无法确认则记录`partial / directory_created_durability_unknown`，系统不自动重试或声称回滚。
+
+Provider continuation或turn commit失败不会删除已创建目录；durable Action Audit保留真实结果，candidate turn仍保持未提交。CLI approval显示`workspace-create mkdir path='...'`，`session actions`与`/actions`只显示相对路径、permission/approval和result。普通路径API仍不构成OS sandbox或敌对并发下的完整portable filesystem transaction；本工具与现有本地单用户workspace边界一致，不授权workspace外副作用。
+
+Canonical tool order现在是`read_file, glob, grep, write_file, edit_file, run_command, mkdir`，七个工具继续共享每个user turn三次顺序预算。Anthropic与OpenAI-compatible ordinary count/create投影相同closed schema，compact-summary不暴露工具。Provider adapter contract升级为v9，canonical system prompt升级为v8，empty full-context golden更新为`ctx-v1-12b7d8f648ac4909132c0176de74297f8d00805b887e190d51767b6fc1e2c986`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay和`ctx-v1`/`ctx-v2`representation均不升级。详见[0031：Foundation 4D Controlled Single-directory Creation](./decisions/0031-foundation-4d-controlled-single-directory-creation.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -562,3 +573,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 28. [0028：Foundation 4C Controlled Command Contract与Side-effect-free Preparation](./decisions/0028-foundation-4c-controlled-command-contract-and-preparation.md)
 29. [0029：Foundation 4C Bounded Command Execution与Process-group Cleanup](./decisions/0029-foundation-4c-bounded-command-execution-and-process-cleanup.md)
 30. [0030：Foundation 4C Durable Model-visible Command Integration](./decisions/0030-foundation-4c-durable-model-visible-command-integration.md)
+31. [0031：Foundation 4D Controlled Single-directory Creation](./decisions/0031-foundation-4d-controlled-single-directory-creation.md)

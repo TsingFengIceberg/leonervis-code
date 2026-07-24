@@ -10,7 +10,7 @@ from leonervis_code.tools.catalog import (
 )
 
 
-def test_catalog_exposes_run_command_last_with_shared_closed_schema() -> None:
+def test_catalog_exposes_mkdir_last_with_shared_closed_schema() -> None:
     assert [definition.name for definition in TOOL_CATALOG] == [
         "read_file",
         "glob",
@@ -18,6 +18,7 @@ def test_catalog_exposes_run_command_last_with_shared_closed_schema() -> None:
         "write_file",
         "edit_file",
         "run_command",
+        "mkdir",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -83,3 +84,27 @@ def test_catalog_validates_closed_run_command_array_and_integer_input() -> None:
 def test_catalog_rejects_malformed_run_command_inputs(tool_input: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="run_command"):
         tool_use_from_input("command-1", "run_command", tool_input)
+
+
+def test_catalog_validates_closed_mkdir_input() -> None:
+    call = tool_use_from_input("mkdir-1", "mkdir", {"path": "src/pkg"})
+    assert call == ToolUse(
+        "mkdir-1",
+        "mkdir",
+        ToolArguments.from_mapping({"path": "src/pkg"}),
+    )
+    assert tool_input_from_use(call) == {"path": "src/pkg"}
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {},
+        {"path": "src", "extra": "x"},
+        {"path": 1},
+        {"path": ""},
+    ],
+)
+def test_catalog_rejects_malformed_mkdir_inputs(tool_input: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="mkdir"):
+        tool_use_from_input("mkdir-1", "mkdir", tool_input)

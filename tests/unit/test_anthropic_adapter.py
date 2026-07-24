@@ -30,6 +30,7 @@ from leonervis_code.providers.anthropic import (
     edit_file_tool_definition,
     glob_tool_definition,
     grep_tool_definition,
+    mkdir_tool_definition,
     normalize_sdk_error,
     parse_compact_summary_response,
     parse_response,
@@ -521,6 +522,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 write_file_tool_definition(),
                 edit_file_tool_definition(),
                 run_command_tool_definition(),
+                mkdir_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -775,4 +777,22 @@ def test_run_command_schema_and_parser_preserve_array_and_integer_arguments() ->
         ToolArguments.from_mapping(
             {"argv": ["uv", "run", "pytest"], "cwd": ".", "timeout_seconds": 60}
         ),
+    )
+
+
+def test_mkdir_schema_and_parser_preserve_exact_path_argument() -> None:
+    definition = mkdir_tool_definition()
+    assert definition["name"] == "mkdir"
+    assert definition["input_schema"]["required"] == ["path"]
+    assert definition["input_schema"]["additionalProperties"] is False
+    block = ToolUseBlock(
+        id="mkdir-provider",
+        name="mkdir",
+        input={"path": "src/pkg"},
+        type="tool_use",
+    )
+    assert parse_response(message(block, stop_reason="tool_use"), config=config()) == ToolUse(
+        "mkdir-provider",
+        "mkdir",
+        ToolArguments.from_mapping({"path": "src/pkg"}),
     )

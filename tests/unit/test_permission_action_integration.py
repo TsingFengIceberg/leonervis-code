@@ -556,3 +556,274 @@ def test_model_visible_command_ask_accept_binds_exact_request(tmp_path: Path) ->
         assert session.action_audits()[-1].approval_outcome.value == "accepted"
     finally:
         session.close()
+
+
+def mkdir_call(path: str = "src", *, tool_use_id: str = "mkdir-1") -> ToolUse:
+    return ToolUse(
+        tool_use_id,
+        "mkdir",
+        ToolArguments.from_mapping({"path": path}),
+    )
+
+
+def test_model_visible_mkdir_read_only_denial_is_audited_and_does_not_create(
+    tmp_path: Path,
+) -> None:
+    call = mkdir_call()
+    provider = ToolProvider([call, AssistantText("denied")])
+    session = open_session(tmp_path, provider)
+    try:
+        assert session.prompt("create src") == "denied"
+
+        denied = ToolResult(
+            "mkdir-1",
+            "permission denied: denied_read_only_mode",
+            is_error=True,
+        )
+        assert provider.requests[1].history[-2:] == (call, denied)
+        assert not (tmp_path / "src").exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.DENIED
+        assert audit.identity.action.value == "workspace-create"
+    finally:
+        session.close()
+
+
+def test_model_visible_mkdir_auto_creates_and_commits_exact_causality(tmp_path: Path) -> None:
+    call = mkdir_call("src")
+    provider = ToolProvider([call, AssistantText("created")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("create src") == "created"
+
+        result = ToolResult("mkdir-1", '{"operation":"created","path":"src"}\n')
+        assert provider.requests[1].history[-2:] == (call, result)
+        assert session.history == (
+            UserMessage("create src"),
+            call,
+            result,
+            AssistantText("created"),
+        )
+        assert (tmp_path / "src").is_dir()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.SUCCEEDED
+        assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert audit.result_code == "directory_created"
+    finally:
+        session.close()
+
+
+def test_model_visible_mkdir_ask_accept_binds_exact_request(tmp_path: Path) -> None:
+    call = mkdir_call("src/pkg")
+    (tmp_path / "src").mkdir()
+    provider = ToolProvider([call, AssistantText("created")])
+    approvals: list[HumanApprovalRequest] = []
+
+    def approve(request: HumanApprovalRequest) -> ApprovalResolution:
+        approvals.append(request)
+        assert not (tmp_path / "src" / "pkg").exists()
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=approve,
+    )
+    try:
+        assert session.prompt("create package directory") == "created"
+        assert (tmp_path / "src" / "pkg").is_dir()
+        assert len(approvals) == 1
+        assert approvals[0].identity.tool_name == "mkdir"
+        assert approvals[0].identity.arguments == call.arguments
+        assert session.action_audits()[-1].approval_outcome.value == "accepted"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("resolution", "expected_status", "message"),
+    [
+        (ApprovalResolution.REJECT, ActionAuditStatus.REJECTED, "action approval rejected"),
+        (ApprovalResolution.CANCEL, ActionAuditStatus.CANCELLED, "action approval cancelled"),
+    ],
+)
+def test_model_visible_mkdir_reject_or_cancel_never_creates(
+    tmp_path: Path,
+    resolution: ApprovalResolution,
+    expected_status: ActionAuditStatus,
+    message: str,
+) -> None:
+    provider = ToolProvider([mkdir_call(), AssistantText("stopped")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=lambda _request: resolution,
+    )
+    try:
+        assert session.prompt("create src") == "stopped"
+        assert provider.requests[1].history[-1] == ToolResult("mkdir-1", message, is_error=True)
+        assert not (tmp_path / "src").exists()
+        assert session.action_audits()[-1].status == expected_status
+    finally:
+        session.close()
+
+
+def test_model_visible_mkdir_hard_rejection_has_no_action_audit(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    call = mkdir_call("src")
+    provider = ToolProvider([call, AssistantText("already exists")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("create src") == "already exists"
+        assert provider.requests[1].history[-1] == ToolResult(
+            "mkdir-1", "mkdir target already exists", is_error=True
+        )
+        assert session.action_audits() == ()
+    finally:
+        session.close()
+
+
+def test_model_visible_mkdir_accepted_approval_rejects_stale_target(tmp_path: Path) -> None:
+    provider = ToolProvider([mkdir_call(), AssistantText("must not be reached")])
+
+    def mutate_then_accept(_request: HumanApprovalRequest) -> ApprovalResolution:
+        (tmp_path / "src").mkdir()
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=mutate_then_accept,
+    )
+    try:
+        with pytest.raises(ApprovalGrantError) as caught:
+            session.prompt("create src")
+
+        assert caught.value.code == ApprovalGrantRejection.STALE_PRECONDITION
+        assert len(provider.requests) == 1
+        assert session.history == ()
+        assert (tmp_path / "src").is_dir()
+        assert session.action_audits()[-1].status == ActionAuditStatus.ABANDONED
+    finally:
+        session.close()
+
+
+def test_provider_continuation_failure_after_mkdir_preserves_effect_and_audit(
+    tmp_path: Path,
+) -> None:
+    provider = ToolProvider([mkdir_call(), RuntimeError("provider continuation failed")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="provider continuation failed"):
+            session.prompt("create src")
+
+        assert (tmp_path / "src").is_dir()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+        assert session._writer.state.records[-1].record_type == "turn_failed"
+    finally:
+        session.close()
+
+
+def test_turn_commit_failure_after_mkdir_preserves_effect_and_action_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider = ToolProvider([mkdir_call(), AssistantText("done")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+
+    def fail_commit(*_args, **_kwargs) -> None:
+        raise SessionStoreError("injected turn commit failure")
+
+    monkeypatch.setattr(session._writer, "append_turn", fail_commit)
+    try:
+        with pytest.raises(SessionStoreError, match="injected turn commit failure"):
+            session.prompt("create src")
+
+        assert (tmp_path / "src").is_dir()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+        assert session._writer.state.records[-1].record_type == "turn_failed"
+    finally:
+        session.close()
+
+
+def test_model_visible_mkdir_partial_durability_is_audited_truthfully(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider = ToolProvider([mkdir_call(), AssistantText("inspect before retry")])
+
+    def fail_fsync(_directory: Path) -> None:
+        raise OSError("injected")
+
+    monkeypatch.setattr("leonervis_code.tools.mkdir._fsync_directory", fail_fsync)
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("create src") == "inspect before retry"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult)
+        assert result.is_error
+        assert "do not retry automatically" in result.content
+        assert (tmp_path / "src").is_dir()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.PARTIAL
+        assert audit.execution_outcome == ActionExecutionOutcome.PARTIAL
+        assert audit.result_code == "directory_created_durability_unknown"
+    finally:
+        session.close()
+
+
+def test_mkdir_execution_start_audit_failure_prevents_directory_creation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider = ToolProvider([mkdir_call(), AssistantText("must not be reached")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+
+    def fail_start(*_args, **_kwargs) -> None:
+        raise SessionStoreError("injected action_execution_started failure")
+
+    monkeypatch.setattr(session._writer, "action_execution_started", fail_start)
+    try:
+        with pytest.raises(SessionStoreError, match="action_execution_started"):
+            session.prompt("create src")
+
+        assert not (tmp_path / "src").exists()
+        assert session.history == ()
+        assert len(provider.requests) == 1
+    finally:
+        session.close()

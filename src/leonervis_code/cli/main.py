@@ -68,6 +68,7 @@ from leonervis_code.session_store import (
 )
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.mkdir import MkdirTool
 from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.run_command import RunCommandTool
 from leonervis_code.tools.edit_file import EditFileTool
@@ -788,6 +789,7 @@ def main(
             write_file_factory=WriteFileTool,
             edit_file_factory=EditFileTool,
             run_command_factory=RunCommandTool,
+            mkdir_factory=MkdirTool,
             permission_mode=PermissionMode(arguments.permission_mode),
             approval_mode=ApprovalMode(arguments.approval),
             approval_handler=approval_handler,

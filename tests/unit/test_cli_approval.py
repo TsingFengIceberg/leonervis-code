@@ -290,3 +290,37 @@ def test_terminal_command_approval_shows_exact_argv_cwd_and_timeout() -> None:
     assert "cwd='.'" in rendered
     assert "timeout=60s" in rendered
     assert "PWD" not in rendered
+
+
+def test_terminal_mkdir_approval_shows_only_relative_path() -> None:
+    identity = ActionIdentity(
+        request_id="12345678-1234-4234-9234-123456789abc",
+        tool_use_id="mkdir-1",
+        tool_name="mkdir",
+        arguments=ToolArguments.from_mapping({"path": "src/pkg"}),
+        action=PermissionAction.WORKSPACE_CREATE,
+        workspace_fingerprint=f"v1-{'1' * 64}",
+        lease=ActionLease(
+            "22345678-1234-4234-9234-123456789abc",
+            "32345678-1234-4234-9234-123456789abc",
+            0,
+            f"ctx-v1-{'2' * 64}",
+        ),
+        precondition=ActionPrecondition.path_absent(),
+    )
+    request = HumanApprovalRequest(
+        identity,
+        PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_CREATE,
+        ),
+    )
+    stdout = io.StringIO()
+
+    assert (
+        terminal_approval_handler(io.StringIO("y\n"), stdout)(request) == ApprovalResolution.ACCEPT
+    )
+    rendered = stdout.getvalue()
+    assert "Approval required: workspace-create mkdir path='src/pkg'" in rendered
+    assert "bytes=" not in rendered
+    assert "/root/" not in rendered

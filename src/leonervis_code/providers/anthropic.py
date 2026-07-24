@@ -318,6 +318,11 @@ def run_command_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[5]
 
 
+def mkdir_tool_definition() -> dict[str, object]:
+    """Return the canonical Anthropic controlled directory contract."""
+    return model_tool_definitions()[6]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

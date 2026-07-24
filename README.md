@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file`/`run_command` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A 已贯通 permission、approval、durable Action Audit 与受控写入，Foundation 4B 加入唯一exact edit，Foundation 4C 现已加入受控本地命令执行。Shell source string、interactive PTY、OS sandbox、regex/fuzzy patch、delete 与 mkdir 仍未实现。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file`/`run_command`/`mkdir` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A 已贯通 permission、approval、durable Action Audit 与受控写入，Foundation 4B 加入唯一exact edit，Foundation 4C 加入受控本地命令执行，Foundation 4D 现已加入受控单目录创建。Shell source string、interactive PTY、OS sandbox、regex/fuzzy patch、delete 与 rename 仍未实现。
 
 ## 目录
 
@@ -83,13 +83,15 @@ uv run leonervis-code session --help
 
 `prompt` 用于脚本和一次性任务；裸命令用于有状态多轮 REPL。成功 turn 会自动保存到 workspace Session transcript。
 
-权限默认是`read-only + ask`。`--permission-mode`是能力上限，`--approval`决定范围内动作逐次询问还是自动继续，两者相互独立。One-shot `prompt`遇到`ask`会安全取消且不会读取stdin；只有REPL会展示写入的相对路径/byte count，或命令的argv/cwd/timeout，并接受`y/yes`、`n/no`或`c/cancel`。`run_command`固定属于`dangerous`，因此`read-only`和`workspace-write`都会拒绝，只有`danger-full-access`能够按ask/auto继续。
+权限默认是`read-only + ask`。`--permission-mode`是能力上限，`--approval`决定范围内动作逐次询问还是自动继续，两者相互独立。One-shot `prompt`遇到`ask`会安全取消且不会读取stdin；只有REPL会展示写入或目录创建的相对路径、写入byte count，或命令的argv/cwd/timeout，并接受`y/yes`、`n/no`或`c/cancel`。`run_command`固定属于`dangerous`，因此`read-only`和`workspace-write`都会拒绝，只有`danger-full-access`能够按ask/auto继续。
 
 `write_file(path, content)`写入一个文件的**完整**UTF-8内容，不是patch。模型不能自报create/overwrite：Host根据目标是否存在分类，并在执行前重新检查审批绑定的absent或SHA-256状态。工具不跟随symlink、不创建parent directory，content上限为4096 characters且4096 UTF-8 bytes；overwrite只接受最多1 MiB的现有UTF-8普通文件、保留mode并拒绝stale/conflicting target。Permission或auto approval都不能绕过这些hard bounds。
 
 `edit_file(path, old_text, new_text)`现已是第五个model-visible工具，用于对现有UTF-8文件做一次唯一exact replacement。它复用`workspace-overwrite`审批、源SHA-256复查、原子replace与durable Action Audit，并拒绝零匹配、多匹配（含重叠匹配）、no-op、symlink和stale source。`new_text`可为空以做精确删除；它不会创建文件或parent directory，也不支持regex、模糊匹配或一次替换多处。
 
 `run_command(argv, cwd, timeout_seconds)`是第六个model-visible工具，用于运行测试、lint和build verification。Host直接执行argv而不解析shell source，stdin关闭，cwd必须是已存在且无symlink的workspace相对目录，timeout为1–300秒，stdout/stderr各最多保留32 KiB。命令只继承Host固定allowlist环境，并在timeout、取消或残留process group时执行有界TERM→KILL清理；但它没有OS、filesystem、network或credential sandbox，也不能回滚已发生副作用。
+
+`mkdir(path)`是第七个model-visible工具，只创建一个缺失的workspace相对目录。它固定属于`workspace-create`：`read-only`拒绝，`workspace-write`或`danger-full-access`按ask/auto继续。Parent directory必须已存在且整条路径不能含symlink；工具不递归创建parent，也不把已存在目录当作成功。Approval后目标若已出现会以stale拒绝；创建成功会fsync新目录和parent，若目录已可见但durability确认失败则返回partial并要求不要自动重试。
 
 ### 配置 Provider
 
@@ -230,6 +232,7 @@ git diff --check
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、compaction、permission/approval与controlled write的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
+- [Controlled Single-directory Creation](./docs/decisions/0031-foundation-4d-controlled-single-directory-creation.md)：单目录path合同、workspace-create审批、stale检查、fsync与partial durability。
 - [Durable Model-visible Command Integration](./docs/decisions/0030-foundation-4c-durable-model-visible-command-integration.md)：spawn前durable commit point、CLI approval/audit、六工具顺序、provider adapter v8、system prompt v7与兼容性。
 - [Bounded Command Execution与Process-group Cleanup](./docs/decisions/0029-foundation-4c-bounded-command-execution-and-process-cleanup.md)：direct argv、closed environment、有界output、UTF-8/base64、timeout/cancel与TERM→KILL清理。
 - [Controlled Command Contract与Side-effect-free Preparation](./docs/decisions/0028-foundation-4c-controlled-command-contract-and-preparation.md)：argv/cwd/timeout边界、`dangerous`权限绑定、environment allowlist与exact approval identity。
@@ -255,6 +258,6 @@ git diff --check
 
 ## 当前范围与下一步
 
-当前model-visible surface按固定顺序包含`read_file`、`glob`、literal `grep`、完整内容`write_file`、唯一exact `edit_file`与direct-argv `run_command`；六者共享每个user turn最多三次顺序调用。Command要求`danger-full-access`，支持ask/auto approval、1–300秒timeout、分别32 KiB的stdout/stderr capture、non-UTF-8 base64与process-group cleanup，并进入同一durable Action Audit。它不是shell source、PTY或sandbox：测试代码仍可能访问workspace外、联网、读取filesystem credential或启动子进程，副作用不可保证回滚。
+当前model-visible surface按固定顺序包含`read_file`、`glob`、literal `grep`、完整内容`write_file`、唯一exact `edit_file`、direct-argv `run_command`与单目录`mkdir`；七者共享每个user turn最多三次顺序调用。Command仍要求`danger-full-access`；mkdir属于`workspace-create`，要求parent已存在、拒绝symlink与stale target、不递归创建parent，并与写入和命令共用PermissionGate、approval及durable Action Audit。
 
-Foundation 4C现已完成。Canonical system prompt为v7，provider adapter contract为v8；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Regex/index/ignore-aware search、fuzzy或multi-edit patch、delete、mkdir、shell source string、interactive PTY、network tool、streaming、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。下一独立方向应先设计受控`mkdir`/delete/rename的路径、审批和failure-atomicity边界，而不是把任意Bash文本塞进现有command合同；完整决策见[ADR 0028](./docs/decisions/0028-foundation-4c-controlled-command-contract-and-preparation.md)、[ADR 0029](./docs/decisions/0029-foundation-4c-bounded-command-execution-and-process-cleanup.md)与[ADR 0030](./docs/decisions/0030-foundation-4c-durable-model-visible-command-integration.md)。
+Foundation 4D现已完成。Canonical system prompt为v8，provider adapter contract为v9；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Regex/index/ignore-aware search、fuzzy或multi-edit patch、delete、rename、recursive mkdir、shell source string、interactive PTY、network tool、streaming、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。下一独立方向建议设计受控non-overwrite rename，再分别设计file-only delete与empty-directory removal，不直接加入递归删除；完整决策见[ADR 0031](./docs/decisions/0031-foundation-4d-controlled-single-directory-creation.md)。
