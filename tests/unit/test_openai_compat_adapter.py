@@ -33,6 +33,7 @@ from leonervis_code.providers.openai_compat import (
     build_compact_summary_request,
     build_request,
     create_openai_compatible_provider,
+    edit_file_tool_definition,
     glob_tool_definition,
     grep_tool_definition,
     parse_compact_summary_response,
@@ -286,6 +287,57 @@ def test_write_file_schema_and_parser_preserve_path_and_content() -> None:
         "write-provider",
         "write_file",
         ToolArguments.from_mapping({"path": "notes.txt", "content": "hello\n"}),
+    )
+
+
+def test_edit_file_schema_and_parser_preserve_all_arguments() -> None:
+    definition = edit_file_tool_definition()
+    assert definition["function"] == {
+        "name": "edit_file",
+        "description": (
+            "Replace one uniquely matching exact text fragment in one existing bounded UTF-8 "
+            "workspace file. The Host applies overwrite permission and approval policy, rejects "
+            "zero or multiple matches and symlinks, and rechecks the exact source state before "
+            "atomic replacement."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Portable workspace-relative path of an existing text file.",
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": (
+                        "Non-empty exact UTF-8 text that must occur exactly once, at most "
+                        "4096 bytes."
+                    ),
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": (
+                        "Exact replacement UTF-8 text, which may be empty, at most 4096 bytes."
+                    ),
+                },
+            },
+            "required": ["path", "old_text", "new_text"],
+            "additionalProperties": False,
+        },
+    }
+    call = tool_call(
+        call_id="edit-provider",
+        name="edit_file",
+        arguments='{"new_text":"after","path":"notes.txt","old_text":"before"}',
+    )
+    assert parse_response(
+        completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
+    ) == ToolUse(
+        "edit-provider",
+        "edit_file",
+        ToolArguments.from_mapping(
+            {"path": "notes.txt", "old_text": "before", "new_text": "after"}
+        ),
     )
 
 

@@ -69,6 +69,7 @@ from leonervis_code.session_store import (
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import ReadFileTool
+from leonervis_code.tools.edit_file import EditFileTool
 from leonervis_code.tools.write_file import WriteFileTool
 
 
@@ -777,6 +778,7 @@ def main(
             glob_factory=GlobTool,
             grep_factory=GrepTool,
             write_file_factory=WriteFileTool,
+            edit_file_factory=EditFileTool,
             permission_mode=PermissionMode(arguments.permission_mode),
             approval_mode=ApprovalMode(arguments.approval),
             approval_handler=approval_handler,

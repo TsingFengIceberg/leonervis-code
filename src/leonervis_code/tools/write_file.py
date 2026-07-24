@@ -237,6 +237,7 @@ class WriteFileTool:
                 "write_file existing content is not valid UTF-8"
             ) from None
         return _ObservedFile(
+            content=data,
             digest=hashlib.sha256(data).hexdigest(),
             device=opened.st_dev,
             inode=opened.st_ino,
@@ -370,6 +371,7 @@ class WriteFileTool:
 
 @dataclass(frozen=True)
 class _ObservedFile:
+    content: bytes
     digest: str
     device: int
     inode: int

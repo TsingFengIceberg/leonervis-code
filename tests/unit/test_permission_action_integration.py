@@ -333,3 +333,127 @@ def test_turn_commit_failure_after_write_preserves_truthful_effect_and_action_au
         assert session._writer.state.records[-1].record_type == "turn_failed"
     finally:
         session.close()
+
+
+def edit_call(
+    *,
+    old_text: str = "before",
+    new_text: str = "after",
+    tool_use_id: str = "edit-1",
+) -> ToolUse:
+    return ToolUse(
+        tool_use_id,
+        "edit_file",
+        ToolArguments.from_mapping(
+            {"path": "note.txt", "old_text": old_text, "new_text": new_text}
+        ),
+    )
+
+
+def test_model_visible_edit_ask_accept_edits_and_commits_exact_causality(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("before\n", encoding="utf-8")
+    call = edit_call()
+    provider = ToolProvider([call, AssistantText("edited")])
+    approval_requests: list[HumanApprovalRequest] = []
+
+    def approve(request: HumanApprovalRequest) -> ApprovalResolution:
+        approval_requests.append(request)
+        assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "before\n"
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=approve,
+    )
+    try:
+        assert session.prompt("change before to after") == "edited"
+
+        result = ToolResult(
+            "edit-1",
+            '{"bytes_written":6,"operation":"edited","path":"note.txt","replacements":1}\n',
+        )
+        assert provider.requests[1].history[-2:] == (call, result)
+        assert session.history == (
+            UserMessage("change before to after"),
+            call,
+            result,
+            AssistantText("edited"),
+        )
+        assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "after\n"
+        assert len(approval_requests) == 1
+        identity = approval_requests[0].identity
+        assert identity.tool_name == "edit_file"
+        assert identity.arguments == call.arguments
+        assert identity.action.value == "workspace-overwrite"
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.SUCCEEDED
+        assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert audit.result_code == "edited"
+    finally:
+        session.close()
+
+
+def test_model_visible_edit_read_only_denial_is_audited_and_keeps_source(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("before\n", encoding="utf-8")
+    call = edit_call()
+    provider = ToolProvider([call, AssistantText("not edited")])
+    session = open_session(tmp_path, provider)
+    try:
+        assert session.prompt("edit it") == "not edited"
+        denied = ToolResult("edit-1", "permission denied: denied_read_only_mode", is_error=True)
+        assert provider.requests[1].history[-2:] == (call, denied)
+        assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "before\n"
+        assert session.action_audits()[-1].status == ActionAuditStatus.DENIED
+    finally:
+        session.close()
+
+
+def test_model_visible_edit_hard_match_rejection_has_no_action_audit(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("before before\n", encoding="utf-8")
+    call = edit_call()
+    provider = ToolProvider([call, AssistantText("ambiguous")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("edit one occurrence") == "ambiguous"
+        rejected = ToolResult("edit-1", "edit_file old_text matches more than once", is_error=True)
+        assert provider.requests[1].history[-2:] == (call, rejected)
+        assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "before before\n"
+        assert session.action_audits() == ()
+    finally:
+        session.close()
+
+
+def test_model_visible_edit_accepted_approval_rejects_stale_source(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("before\n", encoding="utf-8")
+    provider = ToolProvider([edit_call(), AssistantText("must not be reached")])
+
+    def mutate_then_accept(_request: HumanApprovalRequest) -> ApprovalResolution:
+        (tmp_path / "note.txt").write_text("external\n", encoding="utf-8")
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=mutate_then_accept,
+    )
+    try:
+        with pytest.raises(ApprovalGrantError) as caught:
+            session.prompt("edit it")
+
+        assert caught.value.code == ApprovalGrantRejection.STALE_PRECONDITION
+        assert len(provider.requests) == 1
+        assert session.history == ()
+        assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "external\n"
+        assert session.action_audits()[-1].status == ActionAuditStatus.ABANDONED
+    finally:
+        session.close()

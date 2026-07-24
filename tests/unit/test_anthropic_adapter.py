@@ -27,6 +27,7 @@ from leonervis_code.providers.anthropic import (
     AnthropicConversationProvider,
     AnthropicProviderConfig,
     create_anthropic_provider,
+    edit_file_tool_definition,
     glob_tool_definition,
     grep_tool_definition,
     normalize_sdk_error,
@@ -375,6 +376,59 @@ def test_write_file_schema_is_exact_and_parser_preserves_path_and_content() -> N
     )
 
 
+def test_edit_file_schema_is_exact_and_parser_preserves_all_arguments() -> None:
+    assert edit_file_tool_definition() == {
+        "name": "edit_file",
+        "description": (
+            "Replace one uniquely matching exact text fragment in one existing bounded UTF-8 "
+            "workspace file. The Host applies overwrite permission and approval policy, rejects "
+            "zero or multiple matches and symlinks, and rechecks the exact source state before "
+            "atomic replacement."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Portable workspace-relative path of an existing text file.",
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": (
+                        "Non-empty exact UTF-8 text that must occur exactly once, at most "
+                        "4096 bytes."
+                    ),
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": (
+                        "Exact replacement UTF-8 text, which may be empty, at most 4096 bytes."
+                    ),
+                },
+            },
+            "required": ["path", "old_text", "new_text"],
+            "additionalProperties": False,
+        },
+    }
+    assert parse_response(
+        message(
+            ToolUseBlock(
+                id="edit-provider",
+                name="edit_file",
+                input={"new_text": "after", "path": "notes.txt", "old_text": "before"},
+                type="tool_use",
+            )
+        ),
+        config=config(),
+    ) == ToolUse(
+        "edit-provider",
+        "edit_file",
+        ToolArguments.from_mapping(
+            {"path": "notes.txt", "old_text": "before", "new_text": "after"}
+        ),
+    )
+
+
 def test_parser_concatenates_text_and_preserves_valid_tool_use() -> None:
     assert parse_response(
         message(TextBlock(text="one", type="text"), TextBlock(text=" two", type="text")),
@@ -464,6 +518,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 glob_tool_definition(),
                 grep_tool_definition(),
                 write_file_tool_definition(),
+                edit_file_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,

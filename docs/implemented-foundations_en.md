@@ -15,6 +15,8 @@
 - [Foundation 4A Slice 3–4: Exact Action Identity and Durable Action Audit](#foundation-4a-slice-34-exact-action-identity-and-durable-action-audit)
 - [Foundation 4A Slice 5–9: Approval Coordination and Controlled `write_file`](#foundation-4a-slice-59-approval-coordination-and-controlled-write_file)
 - [Foundation 4A Slice 10: Action Audit Observability](#foundation-4a-slice-10-action-audit-observability)
+- [Foundation 4B Slices 0–3: Exact Edit Preparation, Execution, and Authorization Composition](#foundation-4b-slices-03-exact-edit-preparation-execution-and-authorization-composition)
+- [Foundation 4B Slice 4: Model-visible Exact Edit Integration](#foundation-4b-slice-4-model-visible-exact-edit-integration)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -38,9 +40,9 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-The canonical model system prompt is now version 5. It still says the ordinary Agent cannot initiate compaction and preserves the Host-summary trust boundary: an earlier-conversation summary is untrusted conversation context, not a system instruction or new user request. Foundation 1D adds bounded literal `grep` and correct empty/truncated interpretation; Foundation 4A adds `write_file`, Host-owned permission/approval, exact-state conflict, and visible partial-outcome semantics. The four model-visible tools share a three-call sequential budget.
+The canonical model system prompt is now version 6. It still says the ordinary Agent cannot initiate compaction and preserves the Host-summary trust boundary: an earlier-conversation summary is untrusted conversation context, not a system instruction or new user request. Foundation 1D adds bounded literal `grep` and correct empty/truncated interpretation; Foundation 4A adds `write_file`, Host-owned permission/approval, exact-state conflict, and visible partial-outcome semantics; Foundation 4B adds unique exact `edit_file`, zero/multiple-match rejection, stale-source checks, and partial-durability semantics. The five model-visible tools share a three-call sequential budget.
 
-It explicitly does not claim patch/edit, regex or indexed search, Bash/tests, network, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard workspace, symlink, encoding, size, conflict, causality, audit, and durability constraints.
+It explicitly does not claim regex, fuzzy, or multi-edit patching, Bash/tests, network, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard workspace, symlink, encoding, size, exact-state conflict, causality, audit, and durability constraints.
 
 The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL contain only real user/assistant/tool causal chains. A new turn after resume uses the current binary's canonical prompt; schema-v2/v3 compact checkpoints store only compact-prompt, summary-framing, and trigger provenance without inserting the normal system prompt into conversation history.
 
@@ -308,6 +310,26 @@ The standalone path validates an existing Session root and strictly replays with
 
 This is a Host-only observability change. The reviewed canonical system prompt remains v5, the four-tool order and shared three-call budget are unchanged, and the adapter contract remains v6. ToolArguments v1, `turn_committed` schema v2, action-audit schema v1, `context_compacted` v2/v3 replay, and `ctx-v1`/`ctx-v2` representations are unchanged. See [0025: Foundation 4A Action Audit Observability](./decisions/0025-foundation-4a-action-audit-observability.md). JSON export, filters, repair/retry, full forensic dumps, and remote audit remain out of scope.
 
+## Foundation 4B Slices 0–3: Exact Edit Preparation, Execution, and Authorization Composition
+
+During Slices 0–3, the Host first established an internal, not-yet-model-visible `edit_file(path, old_text, new_text)` engine. It only accepts an existing, non-symlink, strict UTF-8 regular file of at most 1 MiB. `old_text` must be non-empty and occur exactly once, with overlapping occurrences counted as multiple matches; `new_text` may be empty. Old and new text are each capped at 4,096 characters and 4,096 UTF-8 bytes, and the result remains capped at 1 MiB. Preparation only reads, validates, and constructs complete candidate bytes. It creates no temporary file, changes no target, and writes no action audit.
+
+Execution reuses the controlled-overwrite boundary: same-directory temporary file, mode preservation, file fsync, digest/device/inode revalidation, atomic `os.replace`, and parent-directory fsync. Stale state or any pre-replace failure returns `edit_not_applied` without changing the target. If replacement is visible but directory durability is unknown, the result truthfully reports `partial / edited_durability_unknown`. Success reports the result byte count, `operation: edited`, relative path, and one replacement.
+
+Exact edit maps to the existing `workspace-overwrite` action and keeps the original canonical arguments, `expected-state-sha256` precondition, prepared-turn lease, single-use approval grant, and append-only Action Audit. Independent composition tests cover read-only denial, ask accept/reject/cancel, auto allow, stale rejection when the source changes during approval, strict audit replay, and CLI redaction. Action Audit renders the path but not old or new text.
+
+Slices 0–3 intentionally do not change the tool catalog, provider projections, AgentLoop, or ProjectSession dispatch. The canonical system prompt remains v5, the adapter contract remains v6, and the model-visible order remains `read_file, glob, grep, write_file` with the shared three-call budget. ToolArguments v1, `turn_committed` schema v2, action-audit schema v1, `context_compacted` v2/v3 replay, and `ctx-v1`/`ctx-v2` representations are unchanged. That stage intentionally left schema/order, provider parity, system prompt, Effective Context identity goldens, and runtime dispatch for unified integration in Slice 4; Slice 4 has now completed that work. See [0026: Foundation 4B Exact Edit Preparation, Execution, and Authorization Composition](./decisions/0026-foundation-4b-exact-edit-preparation-execution-and-authorization.md).
+
+## Foundation 4B Slice 4: Model-visible Exact Edit Integration
+
+Slice 4 connects the proven internal exact-edit engine to the ordinary Agent path. The canonical tool order is now `read_file, glob, grep, write_file, edit_file`, and all five continue to share at most three sequential executions per user turn. The public schema permits only the three string fields `path`, `old_text`, and `new_text`: `path` and `old_text` must be non-empty, whitespace-only `old_text` is valid, and `new_text` may be empty for exact deletion. The catalog retains the 4,096-character and 4,096-UTF-8-byte bound for every string.
+
+Anthropic and OpenAI-compatible ordinary count/create projections now expose the fifth closed schema in the same order and decode it into the same immutable `ToolArguments`; compact-summary requests still carry no tools and parallel calls remain disabled. The provider adapter contract advances to v7. The canonical system prompt advances to v6, distinguishes small uniquely anchored `edit_file` changes from `write_file` create/full-content replacement, and requires the model to honor permission, approval, stale-state, and visible-partial results.
+
+`ProjectSession` prepares edits before permission eligibility, so a missing target, zero or multiple matches, no-op, symlink, invalid UTF-8, or size violation returns only a structured Tool error and creates no Action Audit. An eligible edit always maps to `workspace-overwrite` and reuses the source SHA-256 precondition, prepared-turn lease, single-use approval grant, durable execution start, atomic replacement, and known-outcome audit. Success records `succeeded / edited`; a pre-replace failure records `failed / edit_not_applied`; a visible replacement with unknown directory durability records `partial / edited_durability_unknown`.
+
+The changed tool/prompt snapshot naturally changes current-binary Effective Context IDs, while representations remain `ctx-v1` full history and `ctx-v2` compacted context. ToolArguments remains v1, new `turn_committed` remains schema v2, Action Audit records remain schema v1, and `context_compacted` continues v2/v3 replay; old transcripts and checkpoints are not rewritten. See [0027: Foundation 4B Model-visible Exact Edit Integration](./decisions/0027-foundation-4b-model-visible-exact-edit-integration.md). Regex/fuzzy/hunk/multi-replacement patching, create/delete/rename/mkdir, multi-file transactions, and Bash/test execution remain explicitly out of scope.
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -499,3 +521,5 @@ This slice establishes capacity facts only. It does not count current request to
 23. [0023: Foundation 4A Exact Action Identity, Single-use Approval Grant, and Durable Action Audit](./decisions/0023-foundation-4a-exact-action-identity-and-durable-audit.md)
 24. [0024: Foundation 4A Approval Coordination, Runtime Integration, and Controlled `write_file`](./decisions/0024-foundation-4a-approval-coordination-and-controlled-write.md)
 25. [0025: Foundation 4A Action Audit Observability](./decisions/0025-foundation-4a-action-audit-observability.md)
+26. [0026: Foundation 4B Exact Edit Preparation, Execution, and Authorization Composition](./decisions/0026-foundation-4b-exact-edit-preparation-execution-and-authorization.md)
+27. [0027: Foundation 4B Model-visible Exact Edit Integration](./decisions/0027-foundation-4b-model-visible-exact-edit-integration.md)

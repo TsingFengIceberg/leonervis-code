@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
+from leonervis_code.tools.edit_file import EDIT_FILE_TOOL_NAME, edit_file_tool_snapshot
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, glob_tool_snapshot
 from leonervis_code.tools.grep import GREP_TOOL_NAME, grep_tool_snapshot
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, read_file_tool_snapshot
@@ -18,6 +19,7 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     glob_tool_snapshot(),
     grep_tool_snapshot(),
     write_file_tool_snapshot(),
+    edit_file_tool_snapshot(),
 )
 
 
@@ -39,8 +41,8 @@ def tool_use_from_input(
         _validate_input_string(
             tool_input[key],
             label=f"{name} {key}",
-            allow_whitespace=key in {"query", "content"},
-            allow_empty=key == "content",
+            allow_whitespace=key in {"query", "content", "old_text", "new_text"},
+            allow_empty=key in {"content", "new_text"},
         )
     return ToolUse(
         tool_use_id=tool_use_id,
@@ -61,8 +63,8 @@ def tool_input_from_use(request: ToolUse) -> dict[str, object]:
         _validate_input_string(
             tool_input[key],
             label=f"{request.name} {key}",
-            allow_whitespace=key in {"query", "content"},
-            allow_empty=key == "content",
+            allow_whitespace=key in {"query", "content", "old_text", "new_text"},
+            allow_empty=key in {"content", "new_text"},
         )
     return tool_input
 
@@ -76,6 +78,8 @@ def _expected_keys(name: str) -> set[str]:
         return {"query", "include"}
     if name == WRITE_FILE_TOOL_NAME:
         return {"path", "content"}
+    if name == EDIT_FILE_TOOL_NAME:
+        return {"path", "old_text", "new_text"}
     raise ValueError(f"unsupported tool: {name}")
 
 

@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A 已把 permission policy、exact action identity、single-use approval、durable action audit、CLI/AgentLoop approval flow 与受控 create/overwrite 写入接成完整路径，并提供脱敏 Action Audit 查看命令；Bash、patch/edit、delete 与 mkdir 仍未实现。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A 已把 permission、approval、durable Action Audit 与受控 create/overwrite 接成完整路径；Foundation 4B 又把唯一exact replacement贯通为第五个model-visible工具。Bash、regex/fuzzy patch、delete 与 mkdir 仍未实现。
 
 ## 目录
 
@@ -84,6 +84,8 @@ uv run leonervis-code session --help
 权限默认是`read-only + ask`。`--permission-mode`是能力上限，`--approval`决定范围内的写动作逐次询问还是自动继续，两者相互独立。One-shot `prompt`遇到`ask`会安全取消且不会读取stdin；只有REPL会显示`workspace-create`或`workspace-overwrite`、相对路径和UTF-8 byte count，并接受`y/yes`、`n/no`或`c/cancel`。
 
 `write_file(path, content)`写入一个文件的**完整**UTF-8内容，不是patch。模型不能自报create/overwrite：Host根据目标是否存在分类，并在执行前重新检查审批绑定的absent或SHA-256状态。工具不跟随symlink、不创建parent directory，content上限为4096 characters且4096 UTF-8 bytes；overwrite只接受最多1 MiB的现有UTF-8普通文件、保留mode并拒绝stale/conflicting target。Permission或auto approval都不能绕过这些hard bounds。
+
+`edit_file(path, old_text, new_text)`现已是第五个model-visible工具，用于对现有UTF-8文件做一次唯一exact replacement。它复用`workspace-overwrite`审批、源SHA-256复查、原子replace与durable Action Audit，并拒绝零匹配、多匹配（含重叠匹配）、no-op、symlink和stale source。`new_text`可为空以做精确删除；它不会创建文件或parent directory，也不支持regex、模糊匹配或一次替换多处。
 
 ### 配置 Provider
 
@@ -224,6 +226,8 @@ git diff --check
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、compaction、permission/approval与controlled write的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
+- [Model-visible Exact Edit Integration](./docs/decisions/0027-foundation-4b-model-visible-exact-edit-integration.md)：第五个工具的schema/order、provider parity、system prompt v6、Effective Context identity与ProjectSession dispatch。
+- [Exact Edit Preparation、Execution与Authorization Composition](./docs/decisions/0026-foundation-4b-exact-edit-preparation-execution-and-authorization.md)：唯一exact replacement、无副作用prepare、原子replace、stale检查，以及为何Slice 0–3仍不改变模型契约。
 - [Action Audit Observability](./docs/decisions/0025-foundation-4a-action-audit-observability.md)：standalone与REPL只读查看、脱敏字段、数量边界和不改变模型契约的依据。
 - [Approval Coordination与Controlled `write_file`](./docs/decisions/0024-foundation-4a-approval-coordination-and-controlled-write.md)：coordinator顺序、prepared-turn lease、CLI approval UX、create/overwrite hard bounds与partial outcome语义。
 - [Exact Action Identity与Durable Action Audit](./docs/decisions/0023-foundation-4a-exact-action-identity-and-durable-audit.md)：exact manifest/digest、prepared-turn lease、single-use grant、append-only lifecycle与crash/recovery语义。
@@ -244,6 +248,6 @@ git diff --check
 
 ## 当前范围与下一步
 
-当前model-visible surface按固定顺序包含workspace-bound、受限的`read_file`、`glob`、literal `grep`与完整内容`write_file`，四者共享每个user turn最多三次顺序调用。尚无regex/index/ignore-aware search、patch/edit、delete、mkdir、Bash/test、网络工具、streaming、自动retry/fallback、并行工具、多Agent或远程服务。
+当前model-visible surface按固定顺序包含workspace-bound、受限的`read_file`、`glob`、literal `grep`、完整内容`write_file`与唯一exact `edit_file`，五者共享每个user turn最多三次顺序调用。Regex/index/ignore-aware search、fuzzy或multi-edit patch、delete、mkdir、Bash/test、网络工具、streaming、自动retry/fallback、并行工具、多Agent或远程服务仍不可用。
 
-Foundation 4A现已完成Slice 1–10：纯`PermissionGate`、exact identity、single-use approval、durable start与controlled create/overwrite已经接成可恢复审计链；`session actions`和REPL `/actions`现在能以脱敏摘要显示最近的action class、相对path、permission/approval与最终状态，不展示content、message、absolute workspace或内部ID。Standalone检查严格只读，不创建或修复Session；slash检查不进入模型history。Canonical system prompt保持v5，adapter contract保持v6；ToolArguments v1、new `turn_committed` schema v2、action audit schema v1、`context_compacted` v2/v3 replay与`ctx-v1`/`ctx-v2` representation均不变。下一独立slice建议先设计并实现受控exact `edit_file`，复用现有PermissionGate、approval、precondition、audit与failure-atomic边界，而不是直接加入Bash。完整边界以tracked ADR与已实现Foundation文档为准。
+Foundation 4B现已完整交付受控exact edit：Slice 0–3建立内部合同、无副作用prepare、failure-atomic executor及授权审计组合，Slice 4再同步接入canonical catalog、两类provider projection/parser、system prompt、Effective Context identity和ProjectSession dispatch。它只修改已存在的最多1 MiB strict UTF-8普通文件，要求`old_text`唯一出现并生成完整候选内容；成功保留mode并原子替换，replace前失败不改目标，directory durability未知则如实记录partial。Canonical system prompt现为v6，adapter contract为v7；model-visible五工具仍共享三次顺序预算。ToolArguments v1、new `turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay与`ctx-v1`/`ctx-v2` representation保持不变。下一独立方向应先设计受控command/test execution的action分类、参数与输出边界、timeout、审批和failure-atomicity，而不是直接暴露任意Bash。完整边界以tracked ADR与已实现Foundation文档为准。

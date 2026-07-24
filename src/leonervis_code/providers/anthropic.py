@@ -308,6 +308,11 @@ def write_file_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[3]
 
 
+def edit_file_tool_definition() -> dict[str, object]:
+    """Return the canonical Anthropic controlled exact-edit contract."""
+    return model_tool_definitions()[4]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,
