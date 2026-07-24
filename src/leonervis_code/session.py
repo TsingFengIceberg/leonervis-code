@@ -92,6 +92,13 @@ from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
 from leonervis_code.tools.glob import GLOB_TOOL_NAME
 from leonervis_code.tools.grep import GREP_TOOL_NAME
+from leonervis_code.tools.run_command import (
+    RUN_COMMAND_TOOL_NAME,
+    PreparedRunCommand,
+    RunCommandOutcome,
+    RunCommandPreparationError,
+    RunCommandTool,
+)
 from leonervis_code.tools.write_file import (
     WRITE_FILE_TOOL_NAME,
     PreparedWriteFile,
@@ -298,6 +305,7 @@ class ProjectSession:
         grep: GrepTool,
         write_file: WriteFileTool | None = None,
         edit_file: EditFileTool | None = None,
+        run_command: RunCommandTool | None = None,
         *,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
@@ -316,6 +324,7 @@ class ProjectSession:
         self._grep = grep
         self._write_file = write_file or WriteFileTool(workspace)
         self._edit_file = edit_file or EditFileTool(workspace)
+        self._run_command = run_command or RunCommandTool(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -355,6 +364,7 @@ class ProjectSession:
         grep_factory: Callable[[Path], GrepTool] = GrepTool,
         write_file_factory: Callable[[Path], WriteFileTool] = WriteFileTool,
         edit_file_factory: Callable[[Path], EditFileTool] = EditFileTool,
+        run_command_factory: Callable[[Path, Mapping[str, str]], RunCommandTool] = RunCommandTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -393,6 +403,7 @@ class ProjectSession:
             grep = grep_factory(resolved_workspace)
             write_file = write_file_factory(resolved_workspace)
             edit_file = edit_file_factory(resolved_workspace)
+            run_command = run_command_factory(resolved_workspace, resolved_environment)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -408,6 +419,7 @@ class ProjectSession:
                     grep,
                     write_file,
                     edit_file,
+                    run_command,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -454,6 +466,7 @@ class ProjectSession:
                     grep,
                     write_file,
                     edit_file,
+                    run_command,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -1006,6 +1019,7 @@ class ProjectSession:
 
         prepared_write: PreparedWriteFile | None = None
         prepared_edit: PreparedEditFile | None = None
+        prepared_command: PreparedRunCommand | None = None
         if request.name in {READ_FILE_TOOL_NAME, GLOB_TOOL_NAME, GREP_TOOL_NAME}:
             action = PermissionAction.WORKSPACE_READ
             precondition = ActionPrecondition.none()
@@ -1023,6 +1037,13 @@ class ProjectSession:
                 return ToolResult(request.tool_use_id, str(error), is_error=True)
             action = prepared_edit.action
             precondition = prepared_edit.precondition
+        elif request.name == RUN_COMMAND_TOOL_NAME:
+            try:
+                prepared_command = self._run_command.prepare(request)
+            except RunCommandPreparationError as error:
+                return ToolResult(request.tool_use_id, str(error), is_error=True)
+            action = prepared_command.action
+            precondition = prepared_command.precondition
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
@@ -1050,6 +1071,9 @@ class ProjectSession:
                 return replace(current, precondition=refreshed)
             if prepared_edit is not None:
                 refreshed = self._edit_file.refresh_precondition(prepared_edit)
+                return replace(current, precondition=refreshed)
+            if prepared_command is not None:
+                refreshed = self._run_command.revalidate(prepared_command)
                 return replace(current, precondition=refreshed)
             return current
 
@@ -1086,6 +1110,19 @@ class ProjectSession:
                     outcome=outcome,
                     result_code=edit_result.result_code,
                     audit_message=edit_result.audit_message,
+                )
+            elif request.name == RUN_COMMAND_TOOL_NAME and prepared_command is not None:
+                command_result = self._run_command.execute_detailed(prepared_command)
+                outcome = {
+                    RunCommandOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    RunCommandOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    RunCommandOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[command_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=command_result.tool_result,
+                    outcome=outcome,
+                    result_code=command_result.result_code,
+                    audit_message=command_result.audit_message,
                 )
             else:
                 result = ToolResult(

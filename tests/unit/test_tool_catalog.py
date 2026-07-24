@@ -10,13 +10,14 @@ from leonervis_code.tools.catalog import (
 )
 
 
-def test_catalog_exposes_edit_file_last_with_shared_closed_schema() -> None:
+def test_catalog_exposes_run_command_last_with_shared_closed_schema() -> None:
     assert [definition.name for definition in TOOL_CATALOG] == [
         "read_file",
         "glob",
         "grep",
         "write_file",
         "edit_file",
+        "run_command",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -47,3 +48,38 @@ def test_catalog_exposes_edit_file_last_with_shared_closed_schema() -> None:
 def test_catalog_rejects_malformed_edit_file_inputs(tool_input: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="edit_file"):
         tool_use_from_input("edit-1", "edit_file", tool_input)
+
+
+def test_catalog_validates_closed_run_command_array_and_integer_input() -> None:
+    command = tool_use_from_input(
+        "command-1",
+        "run_command",
+        {"argv": ["uv", "run", "pytest", ""], "cwd": ".", "timeout_seconds": 60},
+    )
+    assert command == ToolUse(
+        "command-1",
+        "run_command",
+        ToolArguments.from_mapping(
+            {"argv": ["uv", "run", "pytest", ""], "cwd": ".", "timeout_seconds": 60}
+        ),
+    )
+    assert tool_input_from_use(command) == {
+        "argv": ["uv", "run", "pytest", ""],
+        "cwd": ".",
+        "timeout_seconds": 60,
+    }
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"argv": [], "cwd": ".", "timeout_seconds": 60},
+        {"argv": ["uv", 1], "cwd": ".", "timeout_seconds": 60},
+        {"argv": ["uv"], "cwd": ".", "timeout_seconds": True},
+        {"argv": ["uv"], "cwd": ".", "timeout_seconds": 301},
+        {"argv": ["uv"], "cwd": "."},
+    ],
+)
+def test_catalog_rejects_malformed_run_command_inputs(tool_input: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="run_command"):
+        tool_use_from_input("command-1", "run_command", tool_input)

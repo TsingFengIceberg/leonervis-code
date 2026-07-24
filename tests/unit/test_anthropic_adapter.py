@@ -34,6 +34,7 @@ from leonervis_code.providers.anthropic import (
     parse_compact_summary_response,
     parse_response,
     read_file_tool_definition,
+    run_command_tool_definition,
     serialize_history,
     write_file_tool_definition,
 )
@@ -519,6 +520,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 grep_tool_definition(),
                 write_file_tool_definition(),
                 edit_file_tool_definition(),
+                run_command_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -755,3 +757,22 @@ def test_adapter_backed_loop_preserves_atomic_commit_after_failure(tmp_path) -> 
             }
         ],
     }
+
+
+def test_run_command_schema_and_parser_preserve_array_and_integer_arguments() -> None:
+    definition = run_command_tool_definition()
+    assert definition["name"] == "run_command"
+    assert definition["input_schema"]["required"] == ["argv", "cwd", "timeout_seconds"]
+    block = ToolUseBlock(
+        id="command-provider",
+        name="run_command",
+        input={"argv": ["uv", "run", "pytest"], "cwd": ".", "timeout_seconds": 60},
+        type="tool_use",
+    )
+    assert parse_response(message(block, stop_reason="tool_use"), config=config()) == ToolUse(
+        "command-provider",
+        "run_command",
+        ToolArguments.from_mapping(
+            {"argv": ["uv", "run", "pytest"], "cwd": ".", "timeout_seconds": 60}
+        ),
+    )

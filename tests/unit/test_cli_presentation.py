@@ -535,3 +535,37 @@ def test_colored_non_readline_prompt_has_no_readline_markers() -> None:
     assert "\x1b[" in prompt
     assert "\001" not in prompt
     assert "\002" not in prompt
+
+
+def test_action_audit_renders_redacted_command_summary() -> None:
+    audit = SimpleNamespace(
+        identity=SimpleNamespace(
+            tool_name="run_command",
+            action=PermissionAction.DANGEROUS,
+            arguments=ToolArguments.from_mapping(
+                {
+                    "argv": ["uv", "run", "pytest", "--token=secret"],
+                    "cwd": "tests",
+                    "timeout_seconds": 60,
+                }
+            ),
+        ),
+        permission_result=PermissionResult(
+            PermissionDecision.ALLOW,
+            PermissionReason.ALLOWED_DANGEROUS_AUTO,
+        ),
+        approval_outcome=None,
+        status=ActionAuditStatus.SUCCEEDED,
+        result_code="command_succeeded",
+        requested_sequence=7,
+    )
+
+    rendered = render_action_audits((audit,), 20)
+
+    assert "Action #7: run_command" in rendered
+    assert "class: dangerous" in rendered
+    assert "command: 'uv' (+3 args)" in rendered
+    assert "cwd: 'tests'" in rendered
+    assert "timeout: 60s" in rendered
+    assert "--token=secret" not in rendered
+    assert "result: succeeded (command_succeeded)" in rendered

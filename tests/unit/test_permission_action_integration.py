@@ -457,3 +457,102 @@ def test_model_visible_edit_accepted_approval_rejects_stale_source(tmp_path: Pat
         assert session.action_audits()[-1].status == ActionAuditStatus.ABANDONED
     finally:
         session.close()
+
+
+def command_call(argv: list[str], *, cwd: str = ".", timeout_seconds: int = 10) -> ToolUse:
+    return ToolUse(
+        "command-1",
+        "run_command",
+        ToolArguments.from_mapping({"argv": argv, "cwd": cwd, "timeout_seconds": timeout_seconds}),
+    )
+
+
+def test_model_visible_command_auto_runs_and_commits_exact_causality(tmp_path: Path) -> None:
+    import json
+    import sys
+
+    call = command_call([sys.executable, "-c", "print('verified')"])
+    provider = ToolProvider([call, AssistantText("tests passed")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("run verification") == "tests passed"
+
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult)
+        assert result.tool_use_id == "command-1"
+        assert not result.is_error
+        assert json.loads(result.content)["stdout"]["text"] == "verified\n"
+        assert session.history == (
+            UserMessage("run verification"),
+            call,
+            result,
+            AssistantText("tests passed"),
+        )
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.SUCCEEDED
+        assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert audit.result_code == "command_succeeded"
+        assert audit.identity.action.value == "dangerous"
+    finally:
+        session.close()
+
+
+def test_model_visible_command_workspace_write_denial_never_spawns(tmp_path: Path) -> None:
+    import sys
+
+    marker = tmp_path / "must-not-exist.txt"
+    call = command_call(
+        [sys.executable, "-c", "from pathlib import Path; Path('must-not-exist.txt').touch()"]
+    )
+    provider = ToolProvider([call, AssistantText("denied")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("run command") == "denied"
+        denied = ToolResult(
+            "command-1",
+            "permission denied: denied_workspace_write_mode",
+            is_error=True,
+        )
+        assert provider.requests[1].history[-2:] == (call, denied)
+        assert not marker.exists()
+        assert session.action_audits()[-1].status == ActionAuditStatus.DENIED
+    finally:
+        session.close()
+
+
+def test_model_visible_command_ask_accept_binds_exact_request(tmp_path: Path) -> None:
+    import sys
+
+    call = command_call([sys.executable, "-c", "print('approved')"], timeout_seconds=7)
+    provider = ToolProvider([call, AssistantText("done")])
+    approvals: list[HumanApprovalRequest] = []
+
+    def approve(request: HumanApprovalRequest) -> ApprovalResolution:
+        approvals.append(request)
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=approve,
+    )
+    try:
+        assert session.prompt("run approved command") == "done"
+        assert len(approvals) == 1
+        assert approvals[0].identity.tool_name == "run_command"
+        assert approvals[0].identity.arguments == call.arguments
+        assert session.action_audits()[-1].approval_outcome.value == "accepted"
+    finally:
+        session.close()

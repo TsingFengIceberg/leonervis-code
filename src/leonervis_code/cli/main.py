@@ -69,6 +69,7 @@ from leonervis_code.session_store import (
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.read_file import ReadFileTool
+from leonervis_code.tools.run_command import RunCommandTool
 from leonervis_code.tools.edit_file import EditFileTool
 from leonervis_code.tools.write_file import WriteFileTool
 
@@ -585,12 +586,19 @@ def terminal_approval_handler(stdin: TextIO, stdout: TextIO):
 
     def handle(request: HumanApprovalRequest) -> ApprovalResolution:
         arguments = request.identity.arguments.as_mapping()
-        path = arguments.get("path", "<unknown>")
-        content = arguments.get("content")
-        byte_count = len(content.encode("utf-8")) if isinstance(content, str) else None
-        detail = f" path={path!r}"
-        if byte_count is not None:
-            detail += f" bytes={byte_count}"
+        if request.identity.tool_name == "run_command":
+            argv = arguments.get("argv")
+            cwd = arguments.get("cwd")
+            timeout = arguments.get("timeout_seconds")
+            rendered_argv = repr(tuple(argv)) if isinstance(argv, list) else "<unknown>"
+            detail = f" argv={rendered_argv} cwd={cwd!r} timeout={timeout!r}s"
+        else:
+            path = arguments.get("path", "<unknown>")
+            content = arguments.get("content")
+            byte_count = len(content.encode("utf-8")) if isinstance(content, str) else None
+            detail = f" path={path!r}"
+            if byte_count is not None:
+                detail += f" bytes={byte_count}"
         prompt = (
             f"Approval required: {request.identity.action.value} "
             f"{request.identity.tool_name}{detail} [y/N/c]: "
@@ -779,6 +787,7 @@ def main(
             grep_factory=GrepTool,
             write_file_factory=WriteFileTool,
             edit_file_factory=EditFileTool,
+            run_command_factory=RunCommandTool,
             permission_mode=PermissionMode(arguments.permission_mode),
             approval_mode=ApprovalMode(arguments.approval),
             approval_handler=approval_handler,

@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A 已把 permission、approval、durable Action Audit 与受控 create/overwrite 接成完整路径；Foundation 4B 又把唯一exact replacement贯通为第五个model-visible工具。Bash、regex/fuzzy patch、delete 与 mkdir 仍未实现。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file`/`run_command` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A 已贯通 permission、approval、durable Action Audit 与受控写入，Foundation 4B 加入唯一exact edit，Foundation 4C 现已加入受控本地命令执行。Shell source string、interactive PTY、OS sandbox、regex/fuzzy patch、delete 与 mkdir 仍未实现。
 
 ## 目录
 
@@ -77,15 +77,19 @@ uv run leonervis-code session --help
 | 使用直接 model route | `uv run leonervis-code --model anthropic/claude-opus-4-8 prompt "解释 README"` |
 | 在 REPL 逐次审批 workspace 写入 | `uv run leonervis-code --permission-mode workspace-write --approval ask` |
 | 一次性允许 workspace 自动写入 | `uv run leonervis-code --permission-mode workspace-write --approval auto prompt "创建 note.txt"` |
+| 在 REPL 逐次审批本地命令 | `uv run leonervis-code --permission-mode danger-full-access --approval ask` |
+| 一次性自动运行获准命令 | `uv run leonervis-code --permission-mode danger-full-access --approval auto prompt "运行项目测试"` |
 | 查看版本 | `uv run leonervis-code --version` |
 
 `prompt` 用于脚本和一次性任务；裸命令用于有状态多轮 REPL。成功 turn 会自动保存到 workspace Session transcript。
 
-权限默认是`read-only + ask`。`--permission-mode`是能力上限，`--approval`决定范围内的写动作逐次询问还是自动继续，两者相互独立。One-shot `prompt`遇到`ask`会安全取消且不会读取stdin；只有REPL会显示`workspace-create`或`workspace-overwrite`、相对路径和UTF-8 byte count，并接受`y/yes`、`n/no`或`c/cancel`。
+权限默认是`read-only + ask`。`--permission-mode`是能力上限，`--approval`决定范围内动作逐次询问还是自动继续，两者相互独立。One-shot `prompt`遇到`ask`会安全取消且不会读取stdin；只有REPL会展示写入的相对路径/byte count，或命令的argv/cwd/timeout，并接受`y/yes`、`n/no`或`c/cancel`。`run_command`固定属于`dangerous`，因此`read-only`和`workspace-write`都会拒绝，只有`danger-full-access`能够按ask/auto继续。
 
 `write_file(path, content)`写入一个文件的**完整**UTF-8内容，不是patch。模型不能自报create/overwrite：Host根据目标是否存在分类，并在执行前重新检查审批绑定的absent或SHA-256状态。工具不跟随symlink、不创建parent directory，content上限为4096 characters且4096 UTF-8 bytes；overwrite只接受最多1 MiB的现有UTF-8普通文件、保留mode并拒绝stale/conflicting target。Permission或auto approval都不能绕过这些hard bounds。
 
 `edit_file(path, old_text, new_text)`现已是第五个model-visible工具，用于对现有UTF-8文件做一次唯一exact replacement。它复用`workspace-overwrite`审批、源SHA-256复查、原子replace与durable Action Audit，并拒绝零匹配、多匹配（含重叠匹配）、no-op、symlink和stale source。`new_text`可为空以做精确删除；它不会创建文件或parent directory，也不支持regex、模糊匹配或一次替换多处。
+
+`run_command(argv, cwd, timeout_seconds)`是第六个model-visible工具，用于运行测试、lint和build verification。Host直接执行argv而不解析shell source，stdin关闭，cwd必须是已存在且无symlink的workspace相对目录，timeout为1–300秒，stdout/stderr各最多保留32 KiB。命令只继承Host固定allowlist环境，并在timeout、取消或残留process group时执行有界TERM→KILL清理；但它没有OS、filesystem、network或credential sandbox，也不能回滚已发生副作用。
 
 ### 配置 Provider
 
@@ -226,6 +230,9 @@ git diff --check
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、compaction、permission/approval与controlled write的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
+- [Durable Model-visible Command Integration](./docs/decisions/0030-foundation-4c-durable-model-visible-command-integration.md)：spawn前durable commit point、CLI approval/audit、六工具顺序、provider adapter v8、system prompt v7与兼容性。
+- [Bounded Command Execution与Process-group Cleanup](./docs/decisions/0029-foundation-4c-bounded-command-execution-and-process-cleanup.md)：direct argv、closed environment、有界output、UTF-8/base64、timeout/cancel与TERM→KILL清理。
+- [Controlled Command Contract与Side-effect-free Preparation](./docs/decisions/0028-foundation-4c-controlled-command-contract-and-preparation.md)：argv/cwd/timeout边界、`dangerous`权限绑定、environment allowlist与exact approval identity。
 - [Model-visible Exact Edit Integration](./docs/decisions/0027-foundation-4b-model-visible-exact-edit-integration.md)：第五个工具的schema/order、provider parity、system prompt v6、Effective Context identity与ProjectSession dispatch。
 - [Exact Edit Preparation、Execution与Authorization Composition](./docs/decisions/0026-foundation-4b-exact-edit-preparation-execution-and-authorization.md)：唯一exact replacement、无副作用prepare、原子replace、stale检查，以及为何Slice 0–3仍不改变模型契约。
 - [Action Audit Observability](./docs/decisions/0025-foundation-4a-action-audit-observability.md)：standalone与REPL只读查看、脱敏字段、数量边界和不改变模型契约的依据。
@@ -248,6 +255,6 @@ git diff --check
 
 ## 当前范围与下一步
 
-当前model-visible surface按固定顺序包含workspace-bound、受限的`read_file`、`glob`、literal `grep`、完整内容`write_file`与唯一exact `edit_file`，五者共享每个user turn最多三次顺序调用。Regex/index/ignore-aware search、fuzzy或multi-edit patch、delete、mkdir、Bash/test、网络工具、streaming、自动retry/fallback、并行工具、多Agent或远程服务仍不可用。
+当前model-visible surface按固定顺序包含`read_file`、`glob`、literal `grep`、完整内容`write_file`、唯一exact `edit_file`与direct-argv `run_command`；六者共享每个user turn最多三次顺序调用。Command要求`danger-full-access`，支持ask/auto approval、1–300秒timeout、分别32 KiB的stdout/stderr capture、non-UTF-8 base64与process-group cleanup，并进入同一durable Action Audit。它不是shell source、PTY或sandbox：测试代码仍可能访问workspace外、联网、读取filesystem credential或启动子进程，副作用不可保证回滚。
 
-Foundation 4B现已完整交付受控exact edit：Slice 0–3建立内部合同、无副作用prepare、failure-atomic executor及授权审计组合，Slice 4再同步接入canonical catalog、两类provider projection/parser、system prompt、Effective Context identity和ProjectSession dispatch。它只修改已存在的最多1 MiB strict UTF-8普通文件，要求`old_text`唯一出现并生成完整候选内容；成功保留mode并原子替换，replace前失败不改目标，directory durability未知则如实记录partial。Canonical system prompt现为v6，adapter contract为v7；model-visible五工具仍共享三次顺序预算。ToolArguments v1、new `turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay与`ctx-v1`/`ctx-v2` representation保持不变。下一独立方向应先设计受控command/test execution的action分类、参数与输出边界、timeout、审批和failure-atomicity，而不是直接暴露任意Bash。完整边界以tracked ADR与已实现Foundation文档为准。
+Foundation 4C现已完成。Canonical system prompt为v7，provider adapter contract为v8；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Regex/index/ignore-aware search、fuzzy或multi-edit patch、delete、mkdir、shell source string、interactive PTY、network tool、streaming、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。下一独立方向应先设计受控`mkdir`/delete/rename的路径、审批和failure-atomicity边界，而不是把任意Bash文本塞进现有command合同；完整决策见[ADR 0028](./docs/decisions/0028-foundation-4c-controlled-command-contract-and-preparation.md)、[ADR 0029](./docs/decisions/0029-foundation-4c-bounded-command-execution-and-process-cleanup.md)与[ADR 0030](./docs/decisions/0030-foundation-4c-durable-model-visible-command-integration.md)。

@@ -248,3 +248,45 @@ def test_invalid_permission_and_approval_flags_are_argparse_errors(capsys) -> No
         main(["--approval", "always", "prompt", "hello"])
     assert approval.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_terminal_command_approval_shows_exact_argv_cwd_and_timeout() -> None:
+    identity = ActionIdentity(
+        request_id="12345678-1234-4234-9234-123456789abc",
+        tool_use_id="command-1",
+        tool_name="run_command",
+        arguments=ToolArguments.from_mapping(
+            {
+                "argv": ["uv", "run", "pytest", "tests/unit"],
+                "cwd": ".",
+                "timeout_seconds": 60,
+            }
+        ),
+        action=PermissionAction.DANGEROUS,
+        workspace_fingerprint=f"v1-{'1' * 64}",
+        lease=ActionLease(
+            "22345678-1234-4234-9234-123456789abc",
+            "32345678-1234-4234-9234-123456789abc",
+            0,
+            f"ctx-v1-{'2' * 64}",
+        ),
+        precondition=ActionPrecondition.none(),
+    )
+    request = HumanApprovalRequest(
+        identity,
+        PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_DANGEROUS,
+        ),
+    )
+    stdout = io.StringIO()
+
+    assert (
+        terminal_approval_handler(io.StringIO("y\n"), stdout)(request) == ApprovalResolution.ACCEPT
+    )
+    rendered = stdout.getvalue()
+    assert "dangerous run_command" in rendered
+    assert "argv=('uv', 'run', 'pytest', 'tests/unit')" in rendered
+    assert "cwd='.'" in rendered
+    assert "timeout=60s" in rendered
+    assert "PWD" not in rendered

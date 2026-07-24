@@ -39,6 +39,7 @@ from leonervis_code.providers.openai_compat import (
     parse_compact_summary_response,
     parse_response,
     read_file_tool_definition,
+    run_command_tool_definition,
     serialize_history,
     write_file_tool_definition,
 )
@@ -507,3 +508,27 @@ def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:
         "tool_call_id": "call_read",
         "content": "workspace notes\n",
     }
+
+
+def test_run_command_schema_and_parser_preserve_array_and_integer_arguments() -> None:
+    definition = run_command_tool_definition()
+    assert definition["function"]["name"] == "run_command"
+    assert definition["function"]["parameters"]["required"] == [
+        "argv",
+        "cwd",
+        "timeout_seconds",
+    ]
+    call = tool_call(
+        call_id="command-provider",
+        name="run_command",
+        arguments='{"argv":["uv","run","pytest"],"cwd":".","timeout_seconds":60}',
+    )
+    assert parse_response(
+        completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
+    ) == ToolUse(
+        "command-provider",
+        "run_command",
+        ToolArguments.from_mapping(
+            {"argv": ["uv", "run", "pytest"], "cwd": ".", "timeout_seconds": 60}
+        ),
+    )

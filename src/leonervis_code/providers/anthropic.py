@@ -313,6 +313,11 @@ def edit_file_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[4]
 
 
+def run_command_tool_definition() -> dict[str, object]:
+    """Return the canonical Anthropic controlled command contract."""
+    return model_tool_definitions()[5]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

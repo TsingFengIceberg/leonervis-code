@@ -165,6 +165,18 @@ def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str
         arguments = identity.arguments.as_mapping()
         path = arguments.get("path")
         path_line = f"\n  path: {path!r}" if isinstance(path, str) else ""
+        command_line = ""
+        if identity.tool_name == "run_command":
+            argv = arguments.get("argv")
+            executable = argv[0] if isinstance(argv, list) and argv else "<unknown>"
+            argument_count = len(argv) - 1 if isinstance(argv, list) and argv else 0
+            cwd = arguments.get("cwd", "<unknown>")
+            timeout = arguments.get("timeout_seconds", "<unknown>")
+            command_line = (
+                f"\n  command: {_safe_inline(str(executable))!r} (+{argument_count} args)"
+                f"\n  cwd: {_safe_inline(str(cwd))!r}"
+                f"\n  timeout: {timeout}s"
+            )
 
         permission = audit.permission_result
         if permission is None:
@@ -189,7 +201,7 @@ def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str
             result_line += f" ({_safe_inline(audit.result_code)})"
         entries.append(
             f"Action #{audit.requested_sequence}: {identity.tool_name}\n"
-            f"  class: {identity.action.value}{path_line}\n"
+            f"  class: {identity.action.value}{path_line}{command_line}\n"
             f"  permission: {permission_line}\n"
             f"  approval: {approval_line}\n"
             f"  result: {result_line}"
